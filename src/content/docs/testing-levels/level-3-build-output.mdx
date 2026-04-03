@@ -1,0 +1,102 @@
+---
+title: "Level 3: Build Output Verification"
+description: Testing built files, SSG output, templates, and bundler configuration.
+sidebar_position: 4
+---
+
+## What Level 3 Tests
+
+Level 3 tests verify **build output** -- the actual files produced by your build tool. Instead of testing source code directly, you run the build and inspect the results.
+
+Typical targets:
+
+- SSG (Static Site Generation) output HTML
+- Template rendering results
+- Bundler output (correct chunks, code splitting)
+- Generated configuration files
+- Build-time data transforms (MDX compilation, content collections)
+
+## Tools
+
+| Tool | Role |
+|------|------|
+| **vitest** | Test runner, reading and asserting on files |
+| **fs/path** | Node.js file system APIs to read build output |
+| **cheerio** | Parse and query HTML output |
+
+## Example: SSG Output Verification
+
+```typescript
+// tests/build-output.test.ts
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+const DIST = join(__dirname, "../dist");
+
+describe("build output", () => {
+  it("generates index.html with correct title", () => {
+    const html = readFileSync(join(DIST, "index.html"), "utf-8");
+    expect(html).toContain("<title>My Site</title>");
+  });
+
+  it("generates sitemap.xml", () => {
+    const sitemap = readFileSync(join(DIST, "sitemap.xml"), "utf-8");
+    expect(sitemap).toContain("<urlset");
+  });
+
+  it("includes all expected pages", () => {
+    const pages = ["index.html", "about/index.html", "docs/index.html"];
+    for (const page of pages) {
+      const content = readFileSync(join(DIST, page), "utf-8");
+      expect(content).toContain("<!DOCTYPE html>");
+    }
+  });
+});
+```
+
+## Example: MDX Formatter Contract Testing
+
+A real-world pattern from mdx-formatter: the Vitest suite tests the Rust formatting engine by running it on fixture files and comparing output:
+
+```typescript
+// tests/format.test.ts
+import { describe, it, expect } from "vitest";
+import { format } from "../src/format";
+
+describe("mdx formatting", () => {
+  it("is idempotent", () => {
+    const input = readFixture("sample.mdx");
+    const first = format(input);
+    const second = format(first);
+    expect(first).toBe(second);
+  });
+});
+```
+
+<Tip>
+**Idempotency testing** is a powerful invariant for any formatter or transformer: applying the operation twice should produce the same result as applying it once.
+</Tip>
+
+## Blind Spots
+
+<Warning>
+Level 3 tests verify file contents, not runtime behavior. They cannot detect:
+
+- JavaScript runtime errors
+- Client-side hydration issues
+- Visual rendering problems
+- Browser API interactions
+- Dynamic content loaded after page load
+</Warning>
+
+## When to Use Level 3
+
+| Scenario | Level 3 Appropriate? |
+|----------|---------------------|
+| SSG page missing from build | Yes |
+| Wrong HTML structure in output | Yes |
+| Bundle too large / wrong chunks | Yes |
+| Hydration mismatch in browser | No -- use Level 4 |
+| Page renders blank in browser | No -- use Level 4/5 |
+| CSS not applied correctly | No -- use Level 5 |

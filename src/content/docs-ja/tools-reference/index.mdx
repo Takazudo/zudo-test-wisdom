@@ -1,0 +1,148 @@
+---
+title: ツールリファレンス
+description: 各テストレベルのツールとコマンドのクイックリファレンス。
+sidebar_position: 1
+---
+
+## テストレベル別ツール
+
+| レベル | ツール | インストール | 実行コマンド |
+|-------|-------|------------|------------|
+| 1 | vitest | `pnpm add -D vitest` | `pnpm vitest` |
+| 1 | jest | `pnpm add -D jest` | `pnpm jest` |
+| 2 | vitest + jsdom | `pnpm add -D vitest jsdom` | `pnpm vitest` |
+| 2 | vitest + happy-dom | `pnpm add -D vitest happy-dom` | `pnpm vitest` |
+| 2 | @testing-library/react | `pnpm add -D @testing-library/react` | （テスト内で使用） |
+| 3 | vitest（ビルドファイル読み取り） | `pnpm add -D vitest` | `pnpm build && pnpm vitest --project build` |
+| 4 | Playwright | `pnpm add -D @playwright/test` | `npx playwright test` |
+| 4 | headless-browser | （Claude Codeスキル） | `/headless-browser` |
+| 5 | verify-ui | （Claude Codeスキル） | `/verify-ui` |
+| 5 | headless-browser | （Claude Codeスキル） | `/headless-browser` |
+
+## ツール機能マトリクス
+
+| 機能 | vitest | vitest+jsdom | Playwright | verify-ui | headless-browser |
+|------|--------|-------------|------------|-----------|-----------------|
+| 純粋関数テスト | はい | はい | -- | -- | -- |
+| DOM構造 | -- | はい | はい | -- | -- |
+| ユーザーイベント | -- | はい | はい | -- | -- |
+| CSS算出スタイル | -- | -- | はい | **はい** | -- |
+| 視覚的スクリーンショット | -- | -- | はい | -- | **はい** |
+| コンソールエラー | -- | -- | はい | -- | はい |
+| 複数ページナビゲーション | -- | -- | はい | -- | はい |
+| ビルド出力 | はい | -- | -- | -- | -- |
+| レスポンシブビューポート | -- | -- | はい | はい | はい |
+
+## Vitest設定クイックリファレンス
+
+### 最小限のユニットテストセットアップ
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["src/**/*.test.ts"],
+  },
+});
+```
+
+### コンポーネントテストセットアップ（jsdom）
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.tsx"],
+    setupFiles: ["./test-setup.ts"],
+  },
+});
+```
+
+### ワークスペースセットアップ（複数テストタイプ）
+
+```typescript
+// vitest.workspace.ts
+import { defineWorkspace } from "vitest/config";
+
+export default defineWorkspace([
+  {
+    test: { name: "unit", include: ["src/**/*.test.ts"], environment: "node" },
+  },
+  {
+    test: {
+      name: "component",
+      include: ["src/**/*.test.tsx"],
+      environment: "jsdom",
+    },
+  },
+  {
+    test: {
+      name: "build",
+      include: ["tests/build/**/*.test.ts"],
+      environment: "node",
+    },
+  },
+]);
+```
+
+## Playwright設定クイックリファレンス
+
+### 基本セットアップ
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "./e2e",
+  use: {
+    baseURL: "http://localhost:3000",
+  },
+  webServer: {
+    command: "pnpm dev",
+    port: 3000,
+    reuseExistingServer: !process.env.CI,
+  },
+});
+```
+
+### WebKit専用（Tauri向け）
+
+```typescript
+// playwright.config.ts
+import { defineConfig, devices } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+  ],
+});
+```
+
+### 本番ビルドテスト
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  webServer: {
+    command: "pnpm build && pnpm preview",
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+});
+```
+
+## Claude Codeスキルコマンド
+
+| コマンド | レベル | 目的 |
+|---------|-------|------|
+| `/headless-browser` | 4、5 | スクリーンショット撮影、コンソールエラーチェック、ページ操作 |
+| `/verify-ui` | 5 | 算出CSS値を決定論的にアサート |
+| `/test-wisdom` | -- | どのテストレベルを使用すべきかのガイダンスを取得 |

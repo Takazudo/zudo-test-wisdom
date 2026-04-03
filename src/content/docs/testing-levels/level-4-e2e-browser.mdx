@@ -1,0 +1,111 @@
+---
+title: "Level 4: E2E Browser Tests"
+description: End-to-end testing with Playwright and headless browser verification.
+sidebar_position: 5
+---
+
+## What Level 4 Tests
+
+Level 4 tests run in a **real browser** (or headless browser), verifying complete user flows from page load through interaction to final state. They catch runtime errors, navigation issues, and interaction bugs that simulated environments miss.
+
+Typical targets:
+
+- Full user workflows (login, form submission, navigation)
+- Client-side routing
+- API integration (with mocks or real endpoints)
+- Console error detection
+- Cross-page interactions
+- Dynamic content loading
+
+## Tools
+
+| Tool | Role |
+|------|------|
+| **Playwright** | Full E2E test framework with multi-browser support |
+| **headless-browser** | Quick verification script for page health checks |
+
+## Example: Playwright E2E
+
+```typescript
+// e2e/navigation.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("navigates from home to docs", async ({ page }) => {
+  await page.goto("/");
+  await page.click('a[href="/docs"]');
+  await expect(page).toHaveURL("/docs");
+  await expect(page.locator("h1")).toHaveText("Documentation");
+});
+
+test("no console errors on page load", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+  await page.goto("/");
+  expect(errors).toHaveLength(0);
+});
+```
+
+## Example: Headless Browser Quick Check
+
+For rapid verification without a full test suite, use headless-browser to take a screenshot and check for errors:
+
+```bash
+# Quick page health check
+node headless-check.js --url http://localhost:3000 --screenshot
+
+# Check for console errors
+node headless-check.js --url http://localhost:3000 --console-errors
+```
+
+## Console Error Monitoring
+
+A powerful pattern from production projects: monitor console output during E2E tests to catch unexpected errors:
+
+```typescript
+// e2e/fixtures.ts
+import { test as base } from "@playwright/test";
+
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    const errors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        errors.push(msg.text());
+      }
+    });
+    await use(page);
+    if (errors.length > 0) {
+      throw new Error(
+        `Console errors detected:\n${errors.join("\n")}`
+      );
+    }
+  },
+});
+```
+
+## Blind Spots
+
+<Warning>
+Level 4 tests interact with real browser rendering but typically assert on **DOM state**, not visual appearance. They may miss:
+
+- Subtle CSS issues (off-by-one pixel, wrong color shade)
+- Elements technically visible but visually overlapped
+- Font rendering differences
+- Responsive layout breakpoints
+- Computed style values
+</Warning>
+
+Level 4 confirms "the element exists and is interactable." For "the element looks correct," escalate to Level 5.
+
+## When to Use Level 4
+
+| Scenario | Level 4 Appropriate? |
+|----------|---------------------|
+| Page navigation broken | Yes |
+| Form submission fails | Yes |
+| Dynamic content not loading | Yes |
+| Console errors on page | Yes |
+| Element positioned wrong | Partial -- Level 5 better |
+| CSS color/spacing wrong | No -- use Level 5 |

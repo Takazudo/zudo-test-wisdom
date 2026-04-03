@@ -1,0 +1,199 @@
+---
+title: Vitestパターン
+description: Vitest を使ったユニットテスト、コンポーネントテスト、ビルド出力テスト。
+sidebar_position: 2
+---
+
+## ワークスペースレベルのVitest設定
+
+大規模なプロジェクトでは、異なるテストタイプに異なるVitest設定が必要になることがよくあります。Vitestワークスペースで管理します：
+
+```typescript
+// vitest.workspace.ts
+import { defineWorkspace } from "vitest/config";
+
+export default defineWorkspace([
+  {
+    test: {
+      name: "unit",
+      include: ["src/**/*.test.ts"],
+      environment: "node",
+    },
+  },
+  {
+    test: {
+      name: "component",
+      include: ["src/**/*.test.tsx"],
+      environment: "jsdom",
+    },
+  },
+  {
+    test: {
+      name: "build",
+      include: ["tests/build/**/*.test.ts"],
+      environment: "node",
+    },
+  },
+]);
+```
+
+<Tip>
+設定を分離することで、高速なユニットテストを低速なコンポーネントテストやビルドテストとは独立して実行できます：`vitest --project unit` vs `vitest --project component`。
+</Tip>
+
+## jsdomとhappy-dom環境
+
+コンポーネントテストに適切なDOM環境を選択します：
+
+```typescript
+// vitest.config.ts for component tests
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom",
+    // Or use happy-dom for faster execution:
+    // environment: "happy-dom",
+    globals: true,
+    setupFiles: ["./test-setup.ts"],
+  },
+});
+```
+
+必要に応じてファイル単位の環境オーバーライドも可能です：
+
+```typescript
+// @vitest-environment jsdom
+import { describe, it, expect } from "vitest";
+
+describe("DOM-dependent test", () => {
+  it("manipulates the document", () => {
+    document.body.innerHTML = '<div id="app">Hello</div>';
+    expect(document.getElementById("app")?.textContent).toBe("Hello");
+  });
+});
+```
+
+## テストタイプ別の設定分離
+
+mdx-formatterのパターン：ユニットテスト、APIテスト、関数テスト用の別々の設定：
+
+```
+vitest.config.ts          # Default: unit tests
+vitest.config.api.ts      # API integration tests
+vitest.config.functions.ts # Cloud function tests
+```
+
+```json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:api": "vitest --config vitest.config.api.ts",
+    "test:functions": "vitest --config vitest.config.functions.ts",
+    "test:all": "vitest && vitest --config vitest.config.api.ts"
+  }
+}
+```
+
+## コントラクトテスト: VitestによるRustエンジン
+
+mdx-formatterの実例：VitestスイートがRustフォーマッティングエンジンのコントラクトテストとして機能します。Node.jsラッパーがRustバイナリを呼び出し、Vitestが出力の期待値との一致を検証します：
+
+```typescript
+// tests/contract.test.ts
+import { describe, it, expect } from "vitest";
+import { execSync } from "child_process";
+
+describe("Rust formatter contract", () => {
+  it("formats basic MDX correctly", () => {
+    const input = "# Hello\nSome   text   here";
+    const result = execSync(`echo '${input}' | ./target/release/formatter`, {
+      encoding: "utf-8",
+    });
+    expect(result.trim()).toBe("# Hello\n\nSome text here");
+  });
+});
+```
+
+<Note>
+コントラクトテストにより、上位レベルの言語からバイナリの動作を検証できます。Vitestスイートが仕様として機能し、Rustエンジンの動作が変わるとコントラクトテストがキャッチします。
+</Note>
+
+## 冪等性テスト
+
+フォーマッターやトランスフォーマーにとって強力な不変条件：操作を2回適用した結果は、1回適用した結果と同じでなければなりません。
+
+```typescript
+// tests/idempotency.test.ts
+import { describe, it, expect } from "vitest";
+import { format } from "../src/format";
+import { readFileSync, readdirSync } from "fs";
+import { join } from "path";
+
+const FIXTURES_DIR = join(__dirname, "fixtures");
+
+describe("idempotency", () => {
+  const fixtures = readdirSync(FIXTURES_DIR).filter((f) =>
+    f.endsWith(".mdx")
+  );
+
+  for (const fixture of fixtures) {
+    it(`is idempotent for ${fixture}`, () => {
+      const input = readFileSync(join(FIXTURES_DIR, fixture), "utf-8");
+      const firstPass = format(input);
+      const secondPass = format(firstPass);
+      expect(firstPass).toBe(secondPass);
+    });
+  }
+});
+```
+
+## Miniflare + D1/R2 インテグレーションテスト
+
+zudo-pattern-genの実例：MiniflareによるローカルD1データベースとR2ストレージを使ったCloudflare Workersのテスト：
+
+```typescript
+// tests/integration.test.ts
+import { describe, it, expect, beforeAll } from "vitest";
+import { Miniflare } from "miniflare";
+
+describe("Worker with D1", () => {
+  let mf: Miniflare;
+
+  beforeAll(async () => {
+    mf = new Miniflare({
+      modules: true,
+      script: `export default { async fetch(req, env) { /* ... */ } }`,
+      d1Databases: ["DB"],
+      r2Buckets: ["STORAGE"],
+    });
+
+    // Run migrations
+    const db = await mf.getD1Database("DB");
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS patterns (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL
+      )
+    `);
+  });
+
+  it("stores and retrieves a pattern", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/api/patterns", {
+      method: "POST",
+      body: JSON.stringify({ name: "test", data: "{}" }),
+    });
+    expect(resp.status).toBe(201);
+
+    const getResp = await mf.dispatchFetch("http://localhost/api/patterns");
+    const patterns = await getResp.json();
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0].name).toBe("test");
+  });
+});
+```
+
+<Tip>
+Miniflareは同じWorkersランタイムをローカルで実行するため、インテグレーションテストは本番環境の動作に近くなります。D1とR2のバインディングを組み合わせることで、デプロイなしに完全なデータフローをテストできます。
+</Tip>

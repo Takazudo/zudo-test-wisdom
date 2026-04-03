@@ -1,0 +1,199 @@
+---
+title: Vitest Patterns
+description: Unit tests, component tests, and build output tests with Vitest.
+sidebar_position: 2
+---
+
+## Workspace-Level Vitest Configs
+
+Large projects often need different Vitest configurations for different test types. Use Vitest workspaces to manage this:
+
+```typescript
+// vitest.workspace.ts
+import { defineWorkspace } from "vitest/config";
+
+export default defineWorkspace([
+  {
+    test: {
+      name: "unit",
+      include: ["src/**/*.test.ts"],
+      environment: "node",
+    },
+  },
+  {
+    test: {
+      name: "component",
+      include: ["src/**/*.test.tsx"],
+      environment: "jsdom",
+    },
+  },
+  {
+    test: {
+      name: "build",
+      include: ["tests/build/**/*.test.ts"],
+      environment: "node",
+    },
+  },
+]);
+```
+
+<Tip>
+Separate configs let you run fast unit tests independently from slower component or build tests: `vitest --project unit` vs `vitest --project component`.
+</Tip>
+
+## jsdom and happy-dom Environments
+
+Choose the right DOM environment for component tests:
+
+```typescript
+// vitest.config.ts for component tests
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom",
+    // Or use happy-dom for faster execution:
+    // environment: "happy-dom",
+    globals: true,
+    setupFiles: ["./test-setup.ts"],
+  },
+});
+```
+
+Per-file environment override when needed:
+
+```typescript
+// @vitest-environment jsdom
+import { describe, it, expect } from "vitest";
+
+describe("DOM-dependent test", () => {
+  it("manipulates the document", () => {
+    document.body.innerHTML = '<div id="app">Hello</div>';
+    expect(document.getElementById("app")?.textContent).toBe("Hello");
+  });
+});
+```
+
+## Separate Configs for Different Test Types
+
+A pattern from mdx-formatter: separate configurations for unit tests, API tests, and function tests:
+
+```
+vitest.config.ts          # Default: unit tests
+vitest.config.api.ts      # API integration tests
+vitest.config.functions.ts # Cloud function tests
+```
+
+```json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:api": "vitest --config vitest.config.api.ts",
+    "test:functions": "vitest --config vitest.config.functions.ts",
+    "test:all": "vitest && vitest --config vitest.config.api.ts"
+  }
+}
+```
+
+## Contract Testing: Rust Engine via Vitest
+
+From mdx-formatter: the Vitest suite serves as a contract test for the Rust formatting engine. The Node.js wrapper calls the Rust binary, and Vitest verifies the output matches expectations:
+
+```typescript
+// tests/contract.test.ts
+import { describe, it, expect } from "vitest";
+import { execSync } from "child_process";
+
+describe("Rust formatter contract", () => {
+  it("formats basic MDX correctly", () => {
+    const input = "# Hello\nSome   text   here";
+    const result = execSync(`echo '${input}' | ./target/release/formatter`, {
+      encoding: "utf-8",
+    });
+    expect(result.trim()).toBe("# Hello\n\nSome text here");
+  });
+});
+```
+
+<Note>
+Contract testing lets you verify a binary's behavior from a higher-level language. The Vitest suite acts as the specification -- if the Rust engine changes behavior, the contract tests catch it.
+</Note>
+
+## Idempotency Testing
+
+A powerful invariant for formatters and transformers: applying the operation twice should produce the same result as applying it once.
+
+```typescript
+// tests/idempotency.test.ts
+import { describe, it, expect } from "vitest";
+import { format } from "../src/format";
+import { readFileSync, readdirSync } from "fs";
+import { join } from "path";
+
+const FIXTURES_DIR = join(__dirname, "fixtures");
+
+describe("idempotency", () => {
+  const fixtures = readdirSync(FIXTURES_DIR).filter((f) =>
+    f.endsWith(".mdx")
+  );
+
+  for (const fixture of fixtures) {
+    it(`is idempotent for ${fixture}`, () => {
+      const input = readFileSync(join(FIXTURES_DIR, fixture), "utf-8");
+      const firstPass = format(input);
+      const secondPass = format(firstPass);
+      expect(firstPass).toBe(secondPass);
+    });
+  }
+});
+```
+
+## Miniflare + D1/R2 Integration Tests
+
+From zudo-pattern-gen: testing Cloudflare Workers with local D1 database and R2 storage using Miniflare:
+
+```typescript
+// tests/integration.test.ts
+import { describe, it, expect, beforeAll } from "vitest";
+import { Miniflare } from "miniflare";
+
+describe("Worker with D1", () => {
+  let mf: Miniflare;
+
+  beforeAll(async () => {
+    mf = new Miniflare({
+      modules: true,
+      script: `export default { async fetch(req, env) { /* ... */ } }`,
+      d1Databases: ["DB"],
+      r2Buckets: ["STORAGE"],
+    });
+
+    // Run migrations
+    const db = await mf.getD1Database("DB");
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS patterns (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL
+      )
+    `);
+  });
+
+  it("stores and retrieves a pattern", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/api/patterns", {
+      method: "POST",
+      body: JSON.stringify({ name: "test", data: "{}" }),
+    });
+    expect(resp.status).toBe(201);
+
+    const getResp = await mf.dispatchFetch("http://localhost/api/patterns");
+    const patterns = await getResp.json();
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0].name).toBe("test");
+  });
+});
+```
+
+<Tip>
+Miniflare runs the same Workers runtime locally, so integration tests closely match production behavior. Combined with D1 and R2 bindings, you can test full data flows without deploying.
+</Tip>

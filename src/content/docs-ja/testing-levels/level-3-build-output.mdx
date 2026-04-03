@@ -1,0 +1,102 @@
+---
+title: "レベル3: ビルド出力検証"
+description: ビルドされたファイル、SSG出力、テンプレート、バンドラ設定のテスト。
+sidebar_position: 4
+---
+
+## レベル3がテストするもの
+
+レベル3のテストは**ビルド出力**を検証します。ソースコードを直接テストする代わりに、ビルドを実行してその結果を検査します。
+
+典型的な対象：
+
+- SSG（静的サイト生成）出力HTML
+- テンプレートのレンダリング結果
+- バンドラ出力（正しいチャンク、コード分割）
+- 生成された設定ファイル
+- ビルド時のデータ変換（MDXコンパイル、コンテンツコレクション）
+
+## ツール
+
+| ツール | 役割 |
+|-------|------|
+| **vitest** | テストランナー、ファイルの読み取りとアサーション |
+| **fs/path** | ビルド出力を読むためのNode.jsファイルシステムAPI |
+| **cheerio** | HTML出力のパースとクエリ |
+
+## 例: SSG出力検証
+
+```typescript
+// tests/build-output.test.ts
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+const DIST = join(__dirname, "../dist");
+
+describe("build output", () => {
+  it("generates index.html with correct title", () => {
+    const html = readFileSync(join(DIST, "index.html"), "utf-8");
+    expect(html).toContain("<title>My Site</title>");
+  });
+
+  it("generates sitemap.xml", () => {
+    const sitemap = readFileSync(join(DIST, "sitemap.xml"), "utf-8");
+    expect(sitemap).toContain("<urlset");
+  });
+
+  it("includes all expected pages", () => {
+    const pages = ["index.html", "about/index.html", "docs/index.html"];
+    for (const page of pages) {
+      const content = readFileSync(join(DIST, page), "utf-8");
+      expect(content).toContain("<!DOCTYPE html>");
+    }
+  });
+});
+```
+
+## 例: MDXフォーマッターのコントラクトテスト
+
+mdx-formatterの実例パターン：VitestスイートがRustフォーマッティングエンジンをフィクスチャファイルで実行し、出力を比較するコントラクトテスト：
+
+```typescript
+// tests/format.test.ts
+import { describe, it, expect } from "vitest";
+import { format } from "../src/format";
+
+describe("mdx formatting", () => {
+  it("is idempotent", () => {
+    const input = readFixture("sample.mdx");
+    const first = format(input);
+    const second = format(first);
+    expect(first).toBe(second);
+  });
+});
+```
+
+<Tip>
+**冪等性テスト**はフォーマッターやトランスフォーマーにとって強力な不変条件です：操作を2回適用した結果は、1回適用した結果と同じでなければなりません。
+</Tip>
+
+## ブラインドスポット
+
+<Warning>
+レベル3のテストはファイルの内容を検証しますが、ランタイム動作は検証しません。以下を検出できません：
+
+- JavaScriptのランタイムエラー
+- クライアントサイドのハイドレーション問題
+- 視覚的レンダリングの問題
+- ブラウザAPIとのインタラクション
+- ページロード後に動的に読み込まれるコンテンツ
+</Warning>
+
+## レベル3を使用するタイミング
+
+| シナリオ | レベル3は適切か？ |
+|---------|-----------------|
+| SSGページがビルドに含まれていない | はい |
+| 出力のHTML構造が誤っている | はい |
+| バンドルが大きすぎる/チャンクが不正 | はい |
+| ブラウザでのハイドレーションミスマッチ | いいえ -- レベル4を使用 |
+| ページがブラウザで空白表示 | いいえ -- レベル4/5を使用 |
+| CSSが正しく適用されていない | いいえ -- レベル5を使用 |

@@ -1,0 +1,251 @@
+---
+title: Tauriアプリのテスト
+description: Tauri v2 デスクトップアプリケーション固有のテストパターン。
+sidebar_position: 4
+---
+
+## WebKit専用ルール
+
+TauriはすべてのプラットフォームでレンダリングエンジンとしてWebKitを使用します。TauriフロントエンドのPlaywright E2Eテストを書く際は、常にWebKitに対してテストしてください：
+
+```typescript
+// playwright.config.ts
+import { defineConfig, devices } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+    },
+  ],
+});
+```
+
+<Warning>
+PlaywrightでTauriフロントエンドをChromiumやFirefoxに対してテスト**しないでください**。本番アプリはWebKitを使用するため、他のエンジンに対するテストは誤った確信を与えます。Chromiumでテストがパスしても、Tauriウィンドウで動作するとは限りません。
+</Warning>
+
+## コアクレートパターン
+
+プラットフォーム非依存のビジネスロジックを、Tauri依存のない別のRustクレートに抽出します。このクレートはTauriアプリケーションコンテキストなしで標準的な `cargo test` でテストできます：
+
+```
+src-tauri/
+  Cargo.toml          # depends on core + tauri
+  src/
+    main.rs           # Tauri setup, commands
+    commands.rs       # #[tauri::command] handlers
+core/
+  Cargo.toml          # no Tauri dependency
+  src/
+    lib.rs
+    settings.rs       # pure Rust logic
+    file_ops.rs       # file operations
+    transforms.rs     # data transforms
+```
+
+```toml
+# core/Cargo.toml
+[package]
+name = "myapp-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# No tauri dependency here
+```
+
+```rust
+// core/src/settings.rs
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct Settings {
+    pub theme: String,
+    pub font_size: u32,
+}
+
+impl Settings {
+    pub fn with_theme(mut self, theme: &str) -> Self {
+        self.theme = theme.to_string();
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_with_theme() {
+        let settings = Settings {
+            theme: "light".to_string(),
+            font_size: 14,
+        };
+        let updated = settings.with_theme("dark");
+        assert_eq!(updated.theme, "dark");
+        assert_eq!(updated.font_size, 14);
+    }
+}
+```
+
+<Tip>
+コアクレートパターンにより、完全なTauriアプリをビルドせずにCIで `cargo test` を実行できます。高速で信頼性が高く、ロジックバグを早期にキャッチします。
+</Tip>
+
+## バックエンドブリッジモックアダプターパターン
+
+Tauriアプリでは、フロントエンドはIPCコマンドを通じてRustバックエンドと通信します。フロントエンドテストでは、このブリッジをモックします：
+
+```typescript
+// src/adapters/backend.ts -- the real adapter
+import { invoke } from "@tauri-apps/api/core";
+
+export interface BackendAdapter {
+  getSettings(): Promise<Settings>;
+  saveSettings(settings: Settings): Promise<void>;
+  readFile(path: string): Promise<string>;
+}
+
+export const tauriBackend: BackendAdapter = {
+  async getSettings() {
+    return invoke<Settings>("get_settings");
+  },
+  async saveSettings(settings) {
+    return invoke("save_settings", { settings });
+  },
+  async readFile(path) {
+    return invoke<string>("read_file", { path });
+  },
+};
+```
+
+```typescript
+// src/adapters/mock-backend.ts -- for testing
+import type { BackendAdapter, Settings } from "./backend";
+
+export function createMockBackend(
+  overrides: Partial<BackendAdapter> = {}
+): BackendAdapter {
+  return {
+    async getSettings() {
+      return { theme: "dark", fontSize: 14 };
+    },
+    async saveSettings() {},
+    async readFile() {
+      return "mock file content";
+    },
+    ...overrides,
+  };
+}
+```
+
+```typescript
+// In the app entry point
+import { tauriBackend } from "./adapters/backend";
+import { createMockBackend } from "./adapters/mock-backend";
+
+const backend =
+  import.meta.env.MODE === "test"
+    ? createMockBackend()
+    : tauriBackend;
+```
+
+## 8ステップエスカレーションラダー
+
+Tauriアプリの場合、エスカレーションラダーは標準の5レベルを超えて拡張されます：
+
+| ステップ | メソッド | キャッチするもの |
+|---------|--------|---------------|
+| 1 | コアクレートの`cargo test` | 純粋なRustロジックバグ |
+| 2 | Vitestユニットテスト | フロントエンドロジックバグ |
+| 3 | Vitest + jsdomコンポーネントテスト | コンポーネント動作バグ |
+| 4 | Playwright WebKit（devサーバー） | フロントエンドレンダリングバグ |
+| 5 | Playwright WebKit（本番ビルド） | ビルド固有のフロントエンドバグ |
+| 6 | verify-ui + headless-browser | フロントエンドのCSS/ビジュアルバグ |
+| 7 | Tauriデブモードの手動テスト | IPC連携バグ |
+| 8 | Tauri本番ビルドの手動テスト | 完全なアプリパッケージングバグ |
+
+<Note>
+ステップ1-6は自動化可能でCIに含めるべきです。ステップ7-8は完全なTauriアプリケーションが必要で、通常は手動またはディスプレイサーバーを備えた専用CIが必要です。
+</Note>
+
+### ステップバイステップガイド
+
+**ステップ1-3: 高速、自動化可能、ブラウザ不要**
+
+```bash
+# Step 1: Rust core logic
+cd core && cargo test
+
+# Step 2: Frontend unit tests
+pnpm vitest --project unit
+
+# Step 3: Frontend component tests
+pnpm vitest --project component
+```
+
+**ステップ4-6: ブラウザが必要、ただし自動化可能**
+
+```bash
+# Step 4: E2E against dev server (WebKit only)
+pnpm dev &
+npx playwright test --project=webkit
+
+# Step 5: E2E against production build
+pnpm build
+pnpm preview &
+npx playwright test --project=webkit
+
+# Step 6: Visual verification
+verify-ui --url http://localhost:4173 --selector ".app" --check "display: flex"
+```
+
+**ステップ7-8: 完全なTauriアプリが必要**
+
+```bash
+# Step 7: Tauri dev mode
+pnpm tauri dev
+# Manual testing in the actual Tauri window
+
+# Step 8: Production build
+pnpm tauri build
+# Test the built .dmg / .msi / .AppImage
+```
+
+## Tauriプロジェクトの CI設定
+
+```yaml
+# .github/workflows/test.yml
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd core && cargo test
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+      - run: pnpm vitest run
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+      - run: npx playwright install webkit --with-deps
+      - run: pnpm build && pnpm preview &
+      - run: npx playwright test --project=webkit
+```
+
+<Warning>
+CIでのTauri E2EテストにはWebKitの依存関係が必要です。Ubuntuの場合、`npx playwright install webkit --with-deps` が必要です。macOSランナーではWebKitはすでに利用可能です。
+</Warning>

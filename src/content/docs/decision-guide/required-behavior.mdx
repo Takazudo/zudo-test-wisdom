@@ -1,0 +1,95 @@
+---
+title: Required Testing Behavior
+description: Mandatory behaviors for AI agents when testing frontend code.
+sidebar_position: 3
+---
+
+## The Five Rules
+
+Every AI agent working on frontend code must follow these five rules when testing:
+
+### Rule 1: Declare Your Test Plan First
+
+Before writing any test or running any verification, state:
+
+- **What** you are testing
+- **Which level** you are using
+- **Why** that level is appropriate
+
+```
+Test plan:
+- Testing: notification banner visibility after CSS fix
+- Level: 5 (verify-ui + screenshot)
+- Reason: This is a visual bug — the element exists in DOM but
+  user reports it's not visible. Need to check computed styles.
+```
+
+<Note>
+Declaring the test plan prevents the common mistake of defaulting to Level 1 out of habit. It forces conscious level selection.
+</Note>
+
+### Rule 2: Match Test Level to Goal
+
+The test level must match what you are actually verifying:
+
+| If you are verifying... | Use at least... |
+|------------------------|----------------|
+| A function returns the right value | Level 1 |
+| A component renders correct elements | Level 2 |
+| Build output contains expected content | Level 3 |
+| A user flow works in the browser | Level 4 |
+| Something is visually correct | Level 5 |
+
+Do not use Level 1 for a Level 5 problem. The test will pass, but the bug will remain.
+
+### Rule 3: Escalate When Lower Levels Pass But Problem Persists
+
+When a test passes but the user says the problem is not fixed:
+
+1. **Do not** re-run the same test
+2. **Do not** suggest the user clear their cache
+3. **Do** escalate to the next testing level
+4. If already at Level 4, escalate to Level 5
+5. If at Level 5, investigate deeper (check ancestor elements, stacking context, etc.)
+
+<Warning>
+**Never suggest "clear browser cache" or "hard refresh" as a solution.** If the user says it is still broken, the code is still broken. Investigate the actual cause.
+</Warning>
+
+### Rule 4: Default to Level 5 for UI/CSS
+
+Any task involving:
+
+- CSS changes
+- Layout modifications
+- Visibility issues
+- Visual appearance
+- Responsive design
+- Spacing, colors, fonts
+
+should default to Level 5 verification. Lower levels are structurally unable to verify CSS correctness.
+
+### Rule 5: Report What Was NOT Tested
+
+After testing, explicitly state the blind spots:
+
+```
+Verification complete:
+- Tested: computed styles confirm banner has display:block,
+  opacity:1, and parent has overflow:visible
+- Screenshot: banner is visible at top of page
+- NOT tested: responsive behavior at mobile breakpoints
+- NOT tested: animation transition timing
+```
+
+This transparency helps the user decide if additional testing is needed.
+
+## Summary Checklist
+
+Before declaring any fix complete:
+
+- [ ] Test plan was declared before testing
+- [ ] Test level matches the nature of the change
+- [ ] If test passes but user reports failure, escalated to next level
+- [ ] For CSS/visual changes, used Level 5
+- [ ] Reported what was and was not tested

@@ -1,0 +1,112 @@
+---
+title: "Level 5: Deterministic + Visual Verification"
+description: Combining computed style checks with visual screenshots for maximum coverage.
+sidebar_position: 6
+---
+
+## What Level 5 Tests
+
+Level 5 combines **deterministic computed style assertions** with **visual screenshot verification** to catch bugs that all lower levels miss. This is the highest-confidence verification method for UI/CSS work.
+
+The two complementary tools:
+
+- **verify-ui** -- Extracts computed CSS values from a running page and asserts exact values (no LLM interpretation)
+- **headless-browser** -- Takes screenshots for visual comparison and interaction testing
+
+## Why Both Are Needed
+
+Computed style checks alone can miss visual issues that come from element interaction (overlapping, stacking context). Screenshots alone rely on LLM interpretation which can have confirmation bias. Together, they provide:
+
+| Approach | Strength | Weakness |
+|----------|----------|----------|
+| verify-ui | Deterministic, exact values | Cannot see visual composition |
+| headless-browser | Sees full visual result | LLM interpretation may have bias |
+| Both combined | Deterministic + visual | Minimal blind spots |
+
+## verify-ui Example
+
+```bash
+# Check computed styles of an element
+verify-ui --url http://localhost:3000 \
+  --selector ".hero-title" \
+  --check "font-size: 48px" \
+  --check "color: rgb(255, 255, 255)" \
+  --check "display: block"
+```
+
+```bash
+# Verify visibility
+verify-ui --url http://localhost:3000 \
+  --selector ".notification-banner" \
+  --check "display: block" \
+  --check "opacity: 1" \
+  --check "visibility: visible"
+```
+
+## The Common Failure This Catches
+
+Consider the classic scenario:
+
+1. An AI agent adds a notification banner component
+2. Unit test confirms the component renders (Level 1 passes)
+3. DOM test confirms the element is in the tree (Level 2 passes)
+4. But the parent container has `overflow: hidden` and `height: 0`
+5. The banner exists in the DOM but is completely invisible
+
+Level 5 catches this:
+
+```bash
+# verify-ui would reveal:
+# .notification-banner parent has height: 0px, overflow: hidden
+verify-ui --url http://localhost:3000 \
+  --selector ".notification-container" \
+  --check "height: auto" \
+  --check "overflow: visible"
+```
+
+And the screenshot from headless-browser would visually confirm the banner is not visible.
+
+## headless-browser for Visual Verification
+
+```bash
+# Full-page screenshot
+node headless-check.js --url http://localhost:3000 --screenshot --full-page
+
+# Screenshot of specific viewport
+node headless-check.js --url http://localhost:3000 \
+  --screenshot --width 375 --height 812  # iPhone viewport
+```
+
+## Combined Workflow
+
+For UI/CSS changes, the recommended verification workflow is:
+
+1. Make the CSS/layout change
+2. Run **verify-ui** to assert exact computed values
+3. Take a **screenshot** with headless-browser to visually confirm
+4. If verify-ui passes but screenshot looks wrong, investigate stacking/composition issues
+5. If screenshot looks right but verify-ui fails, update the expected values
+
+<Note>
+This two-step approach eliminates both false positives (screenshot looks fine but values are wrong) and false negatives (values look right but visual composition is broken).
+</Note>
+
+## Blind Spots
+
+Level 5 has minimal blind spots, but some remain:
+
+- Font rendering differences across operating systems
+- Sub-pixel rendering variations
+- Animation timing (mid-frame states)
+- Browser-specific quirks not present in the test browser
+
+## When to Use Level 5
+
+| Scenario | Level 5 Appropriate? |
+|----------|---------------------|
+| CSS change not taking effect | Yes |
+| Element not visible despite being in DOM | Yes |
+| Layout spacing looks wrong | Yes |
+| Color or font-size incorrect | Yes |
+| Responsive breakpoint issue | Yes |
+| Any time user says "it's still broken" after lower-level test passed | Yes |

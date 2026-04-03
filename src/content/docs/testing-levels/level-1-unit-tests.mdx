@@ -1,0 +1,88 @@
+---
+title: "Level 1: Unit/Logic Tests"
+description: Pure JavaScript testing with vitest or jest for logic, data transforms, and state.
+sidebar_position: 2
+---
+
+## What Level 1 Tests
+
+Level 1 tests verify **pure logic** -- functions that take inputs and return outputs without touching the DOM, browser APIs, or visual rendering.
+
+Typical targets:
+
+- Utility functions (string manipulation, date formatting, math)
+- Data transforms (API response mapping, normalization)
+- State reducers and selectors
+- Validation logic
+- Business rules
+
+## Tools
+
+| Tool | Use Case |
+|------|----------|
+| **vitest** | Modern projects, Vite-based, fast HMR |
+| **jest** | Legacy projects, CRA, widely supported |
+
+## Example
+
+```typescript
+// utils/format-price.ts
+export function formatPrice(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+```
+
+```typescript
+// utils/format-price.test.ts
+import { describe, it, expect } from "vitest";
+import { formatPrice } from "./format-price";
+
+describe("formatPrice", () => {
+  it("formats cents to dollar string", () => {
+    expect(formatPrice(1299)).toBe("$12.99");
+  });
+
+  it("handles zero", () => {
+    expect(formatPrice(0)).toBe("$0.00");
+  });
+
+  it("handles single-digit cents", () => {
+    expect(formatPrice(5)).toBe("$0.05");
+  });
+});
+```
+
+## TDD Cycle
+
+For logic changes, follow the standard TDD cycle:
+
+1. Write a failing test that describes the expected behavior
+2. Implement the minimum code to make the test pass
+3. Verify the test is green
+4. Refactor if needed
+5. Repeat for each behavior
+
+## Blind Spots
+
+<Warning>
+Level 1 tests are **blind to everything visual**. They cannot detect:
+
+- Whether an element renders on screen
+- CSS issues (overflow, z-index, opacity, display:none)
+- Layout problems (element present in DOM but not visible)
+- Browser-specific rendering behavior
+- User interaction flows
+</Warning>
+
+Level 1 is the right choice when you are confident the bug is in logic, not in rendering. If there is any doubt about visibility or visual correctness, escalate to Level 4 or 5.
+
+## When to Use Level 1
+
+| Scenario | Level 1 Appropriate? |
+|----------|---------------------|
+| Function returns wrong value | Yes |
+| Data transform is incorrect | Yes |
+| Validation rejects valid input | Yes |
+| Element not showing on screen | No -- use Level 4/5 |
+| Layout looks wrong | No -- use Level 5 |
+| Click handler not firing | No -- use Level 2 or 4 |

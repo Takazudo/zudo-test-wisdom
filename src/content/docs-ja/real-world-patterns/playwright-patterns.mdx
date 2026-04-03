@@ -1,0 +1,248 @@
+---
+title: Playwrightパターン
+description: CI と本番環境検証のための Playwright E2E テストパターン。
+sidebar_position: 3
+---
+
+## CI安全テスト vs @interactiveテストの分割
+
+すべてのE2EテストがCIで実行できるわけではありません。キーボードショートカット、クリップボードアクセス、デスクトップ固有のインタラクションを必要とするテストにはタグを付けて分割します：
+
+```typescript
+// e2e/basic-navigation.spec.ts -- runs in CI
+import { test, expect } from "@playwright/test";
+
+test("loads the home page", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("h1")).toBeVisible();
+});
+```
+
+```typescript
+// e2e/keyboard-shortcuts.spec.ts -- only runs locally
+import { test, expect } from "@playwright/test";
+
+test("@interactive Ctrl+S saves document", async ({ page }) => {
+  await page.goto("/editor");
+  await page.keyboard.press("Control+KeyS");
+  await expect(page.locator(".save-indicator")).toHaveText("Saved");
+});
+```
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    {
+      name: "ci",
+      testMatch: /.*\.spec\.ts/,
+      testIgnore: /.*@interactive.*/,
+    },
+    {
+      name: "interactive",
+      testMatch: /.*@interactive.*\.spec\.ts/,
+    },
+  ],
+});
+```
+
+<Tip>
+CIでは `npx playwright test --project=ci` を実行し、フルキーボード/クリップボードテストが必要な場合はローカルで `npx playwright test --project=interactive` を実行します。
+</Tip>
+
+## コンソールエラーモニタリング
+
+Playwrightのテストフィクスチャを拡張して、コンソールエラー時に自動的にテストを失敗させます：
+
+```typescript
+// e2e/fixtures.ts
+import { test as base, expect } from "@playwright/test";
+
+export const test = base.extend<{ consoleErrors: string[] }>({
+  consoleErrors: async ({ page }, use) => {
+    const errors: string[] = [];
+
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        errors.push(msg.text());
+      }
+    });
+
+    page.on("pageerror", (error) => {
+      errors.push(error.message);
+    });
+
+    await use(errors);
+
+    // Assert no console errors after each test
+    expect(errors).toEqual([]);
+  },
+});
+
+export { expect };
+```
+
+```typescript
+// e2e/app.spec.ts
+import { test, expect } from "./fixtures";
+
+test("home page has no console errors", async ({ page, consoleErrors }) => {
+  await page.goto("/");
+  await page.waitForLoadState("networkidle");
+  // consoleErrors assertion happens automatically in fixture teardown
+});
+```
+
+## CI画像インターセプトによる高速化
+
+CIでは、大きな画像のネットワークリクエストがテストを遅くします。インターセプトして小さなプレースホルダーに置き換えます：
+
+```typescript
+// e2e/fixtures.ts
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    // Intercept image requests in CI
+    if (process.env.CI) {
+      await page.route("**/*.{png,jpg,jpeg,webp,gif}", (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: "image/png",
+          // 1x1 transparent PNG
+          body: Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "base64"
+          ),
+        });
+      });
+    }
+    await use(page);
+  },
+});
+```
+
+<Note>
+zmodのこのパターンにより、画像アセットのネットワークレイテンシーが排除され、CI E2Eテスト時間が40%削減されました。
+</Note>
+
+## 本番ビルド検証
+
+devサーバーではなく、本番ビルドに対してテストを実行します。これによりビルド固有の問題をキャッチできます：
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  webServer: {
+    command: "npm run build && npm run preview",
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+  use: {
+    baseURL: "http://localhost:4173",
+  },
+});
+```
+
+```typescript
+// e2e/production.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("production build serves all pages", async ({ page }) => {
+  const urls = ["/", "/docs", "/about", "/contact"];
+  for (const url of urls) {
+    const response = await page.goto(url);
+    expect(response?.status()).toBe(200);
+  }
+});
+
+test("production build has no broken links", async ({ page }) => {
+  await page.goto("/");
+  const links = await page.locator("a[href^='/']").all();
+  for (const link of links) {
+    const href = await link.getAttribute("href");
+    if (href) {
+      const response = await page.goto(href);
+      expect(response?.status()).toBe(200);
+    }
+  }
+});
+```
+
+## シャードCIラン
+
+大規模なテストスイートの場合、複数のCIランナーにシャードします：
+
+```yaml
+# .github/workflows/e2e.yml
+jobs:
+  e2e:
+    strategy:
+      matrix:
+        shard: [1/4, 2/4, 3/4, 4/4]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx playwright install --with-deps
+      - run: npx playwright test --shard=${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-${{ strategy.job-index }}
+          path: playwright-report/
+```
+
+## フロントエント専用E2Eのためのモックバックエンドアダプター
+
+実際のバックエンドから独立してフロントエンドの動作をテストする場合：
+
+```typescript
+// e2e/mocks/backend-adapter.ts
+import { Page } from "@playwright/test";
+
+export async function mockBackend(page: Page) {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+
+    const mocks: Record<string, unknown> = {
+      "/api/user": { id: 1, name: "Test User", email: "test@example.com" },
+      "/api/settings": { theme: "dark", language: "en" },
+      "/api/documents": [
+        { id: 1, title: "Doc 1" },
+        { id: 2, title: "Doc 2" },
+      ],
+    };
+
+    const mockData = mocks[url.pathname];
+    if (mockData) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockData),
+      });
+    } else {
+      await route.continue();
+    }
+  });
+}
+```
+
+```typescript
+// e2e/frontend.spec.ts
+import { test, expect } from "@playwright/test";
+import { mockBackend } from "./mocks/backend-adapter";
+
+test.beforeEach(async ({ page }) => {
+  await mockBackend(page);
+});
+
+test("displays user name from mock API", async ({ page }) => {
+  await page.goto("/dashboard");
+  await expect(page.locator(".user-name")).toHaveText("Test User");
+});
+```
+
+<Warning>
+モックバックエンドはフロントエント中心のテストには最適ですが、実際のAPIに対するインテグレーションテストの代わりにはなりません。両方を使用してください：UIの動作にはモック、データフローには実際のAPI。
+</Warning>

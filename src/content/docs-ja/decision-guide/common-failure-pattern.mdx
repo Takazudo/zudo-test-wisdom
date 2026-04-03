@@ -1,0 +1,107 @@
+---
+title: AIの典型的な失敗パターン
+description: バグが視覚的なのにロジックをテストしてしまうAIエージェントの失敗パターン。
+sidebar_position: 2
+---
+
+## パターン
+
+AI支援開発における最も頻繁なテスト失敗は、予測可能なパターンに従います：
+
+1. ユーザーが報告：**「表示されない」** または **「まだ壊れている」**
+2. AIエージェントがユニットテストを書くかロジックをチェックする
+3. ロジックテストがパス -- データは正しく、コンポーネントは正しいJSXを返す
+4. AIエージェントが宣言：**「修正完了！テストがパスしました。」**
+5. ユーザーが報告：**「まだ表示されない。」**
+6. AIエージェントが同じテストを再実行し、同じパス結果を得る
+7. ユーザーの信頼を失うまでサイクルが繰り返される
+
+## なぜ起こるか
+
+AIエージェントが**レベル5（視覚的検証）**を必要とする問題に対して**レベル1（ユニットテスト）**または**レベル2（DOMテスト）**を選択しています。
+
+データとロジックは正しいです。コンポーネントはDOMツリーに正しい要素をレンダリングします。しかし、祖先チェーンのどこかにあるCSSルールが要素を非表示にしています。
+
+## 具体例
+
+開発者がAIに通知バナーの追加を依頼します。AIがコンポーネントを作成します：
+
+```tsx
+// NotificationBanner.tsx
+export function NotificationBanner({ message }: { message: string }) {
+  return (
+    <div className="notification-banner">
+      <p>{message}</p>
+    </div>
+  );
+}
+```
+
+そしてテストを書きます：
+
+```tsx
+// NotificationBanner.test.tsx
+it("renders the message", () => {
+  render(<NotificationBanner message="Update available" />);
+  expect(screen.getByText("Update available")).toBeTruthy();
+});
+```
+
+テストはパスします。しかしユーザーは画面に何も見えません。なぜでしょうか？
+
+```css
+/* layout.css -- inherited from the page layout */
+.main-content {
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 0.3s ease;
+}
+
+.main-content.expanded {
+  max-height: 1000px;
+}
+```
+
+通知バナーは `.main-content` 内にレンダリングされており、デフォルトで `max-height: 0` と `overflow: hidden` が設定されています。要素はDOMに存在します（レベル2パス）が、高さ0にクリップされて視覚的に非表示です（レベル5ならキャッチ）。
+
+## 修正方法
+
+<Note>
+ユーザーが何かが「表示されない」と言った場合、デフォルトでレベル5の検証を使用してください。要素とその祖先の**算出スタイル**をチェックし、**スクリーンショット**を撮影して視覚的な状態を確認します。
+</Note>
+
+レベル5の検証で以下が明らかになります：
+
+```
+verify-ui result:
+  .main-content {
+    overflow: hidden     // <-- clipping children
+    max-height: 0px      // <-- zero height
+  }
+  .notification-banner {
+    display: block       // present in DOM
+    // but parent clips it to invisible
+  }
+```
+
+headless-browserのスクリーンショットにより、バナーが表示されていないことが視覚的に確認されます。
+
+## このパターンの他のバリエーション
+
+`overflow: hidden` + `height: 0` パターンはバリエーションの1つに過ぎません。他のよくある原因：
+
+| CSSプロパティ | 効果 | レベル2で検出？ | レベル5で検出？ |
+|-------------|------|---------------|---------------|
+| `display: none` | 要素がフローから除去される | いいえ | はい |
+| `visibility: hidden` | 要素は非表示だがスペースを占める | いいえ | はい |
+| `opacity: 0` | 要素が完全に透明 | いいえ | はい |
+| `z-index`のスタッキング | 要素が別の要素の背後に | いいえ | はい |
+| 祖先の`overflow: hidden` | コンテンツがクリップされる | いいえ | はい |
+| `transform: scale(0)` | 要素が何もないサイズに縮小 | いいえ | はい |
+| `position: absolute` + 画面外 | 要素がビューポート外に配置 | いいえ | はい |
+
+## 重要なポイント
+
+<Warning>
+**ロジックテストに基づいてビジュアルバグを修正済みと宣言しないでください。** ユーザーが何かが見えないと言う場合、テストは表示を検証する必要があり、それにはレベル5が必要です。
+</Warning>

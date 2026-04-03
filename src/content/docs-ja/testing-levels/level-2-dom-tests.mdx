@@ -1,0 +1,108 @@
+---
+title: "レベル2: DOMベースのコンポーネントテスト"
+description: jsdom または happy-dom と Testing Library を使ったコンポーネントテスト。
+sidebar_position: 3
+---
+
+## レベル2がテストするもの
+
+レベル2のテストは、**シミュレートされたDOM環境でのコンポーネントの動作**を検証します。実際のブラウザなしで、コンポーネントが正しい要素をレンダリングし、ユーザーイベントに応答し、状態を正しく更新することを確認できます。
+
+典型的な対象：
+
+- コンポーネントのレンダリング（正しい要素を出力するか？）
+- 条件付き表示（propsや状態に基づいて表示/非表示するか？）
+- イベントハンドラー（クリックで正しい動作がトリガーされるか？）
+- propsに基づく動作
+- コンポーネント間の連携（親子コンポーネントの通信）
+
+## ツール
+
+| ツール | 役割 |
+|-------|------|
+| **vitest** | テストランナー |
+| **jsdom** または **happy-dom** | シミュレートされたブラウザDOM環境 |
+| **@testing-library/react** | DOMクエリとユーザーイベントシミュレーション |
+| **@testing-library/preact** | Preactプロジェクト向け |
+
+## セットアップ
+
+DOM環境を使用するようvitestを設定します：
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom", // or "happy-dom"
+  },
+});
+```
+
+<Tip>
+**happy-dom** はほとんどのケースで jsdom より高速です。より広いブラウザAPI互換性が必要な場合は jsdom を使用してください。
+</Tip>
+
+## 例
+
+```tsx
+// components/Toggle.tsx
+import { useState } from "react";
+
+export function Toggle({ label }: { label: string }) {
+  const [on, setOn] = useState(false);
+  return (
+    <button onClick={() => setOn(!on)}>
+      {label}: {on ? "ON" : "OFF"}
+    </button>
+  );
+}
+```
+
+```tsx
+// components/Toggle.test.tsx
+import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Toggle } from "./Toggle";
+
+describe("Toggle", () => {
+  it("renders with OFF state", () => {
+    render(<Toggle label="Sound" />);
+    expect(screen.getByText("Sound: OFF")).toBeTruthy();
+  });
+
+  it("toggles to ON on click", async () => {
+    render(<Toggle label="Sound" />);
+    await userEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Sound: ON")).toBeTruthy();
+  });
+});
+```
+
+## ブラインドスポット
+
+<Warning>
+レベル2のテストは実際のブラウザではなく**シミュレートされた**DOMを使用します。以下を検出できません：
+
+- CSSの効果（DOMにはCSSエンジンがない）
+- 視覚的レイアウト（CSSによりDOMに存在しても非表示の要素）
+- ブラウザ固有のレンダリング
+- スクロール動作
+- アニメーションとトランジションの状態
+- 算出スタイル
+</Warning>
+
+重要なギャップ：jsdomのツリーに要素が存在していても（レベル2はパス）、CSSにより画面上では完全に非表示になっている場合があります（レベル5ならこれをキャッチ）。
+
+## レベル2を使用するタイミング
+
+| シナリオ | レベル2は適切か？ |
+|---------|-----------------|
+| コンポーネントが誤ったテキストをレンダリング | はい |
+| propsが正しく渡されない | はい |
+| クリックハンドラーが状態を更新しない | はい |
+| 要素が存在するが表示されない | いいえ -- レベル5を使用 |
+| CSSレイアウトが壊れている | いいえ -- レベル5を使用 |
+| 複数ページのナビゲーションフロー | いいえ -- レベル4を使用 |

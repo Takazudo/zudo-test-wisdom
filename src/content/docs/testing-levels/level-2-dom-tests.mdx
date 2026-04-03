@@ -1,0 +1,108 @@
+---
+title: "Level 2: DOM-based Component Tests"
+description: Component testing with jsdom or happy-dom and Testing Library.
+sidebar_position: 3
+---
+
+## What Level 2 Tests
+
+Level 2 tests verify **component behavior in a simulated DOM environment**. They can check that components render the right elements, respond to user events, and update state correctly -- all without a real browser.
+
+Typical targets:
+
+- Component rendering (does it output the right elements?)
+- Conditional display (does it show/hide based on props or state?)
+- Event handlers (does clicking trigger the right behavior?)
+- Prop-driven behavior
+- Component integration (parent-child communication)
+
+## Tools
+
+| Tool | Role |
+|------|------|
+| **vitest** | Test runner |
+| **jsdom** or **happy-dom** | Simulated browser DOM environment |
+| **@testing-library/react** | DOM queries and user event simulation |
+| **@testing-library/preact** | For Preact projects |
+
+## Setup
+
+Configure vitest to use a DOM environment:
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom", // or "happy-dom"
+  },
+});
+```
+
+<Tip>
+**happy-dom** is faster than jsdom for most use cases. Use jsdom when you need broader browser API compatibility.
+</Tip>
+
+## Example
+
+```tsx
+// components/Toggle.tsx
+import { useState } from "react";
+
+export function Toggle({ label }: { label: string }) {
+  const [on, setOn] = useState(false);
+  return (
+    <button onClick={() => setOn(!on)}>
+      {label}: {on ? "ON" : "OFF"}
+    </button>
+  );
+}
+```
+
+```tsx
+// components/Toggle.test.tsx
+import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Toggle } from "./Toggle";
+
+describe("Toggle", () => {
+  it("renders with OFF state", () => {
+    render(<Toggle label="Sound" />);
+    expect(screen.getByText("Sound: OFF")).toBeTruthy();
+  });
+
+  it("toggles to ON on click", async () => {
+    render(<Toggle label="Sound" />);
+    await userEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Sound: ON")).toBeTruthy();
+  });
+});
+```
+
+## Blind Spots
+
+<Warning>
+Level 2 tests use a **simulated** DOM, not a real browser. They cannot detect:
+
+- CSS effects (the DOM has no CSS engine)
+- Visual layout (elements may exist in DOM but be invisible via CSS)
+- Browser-specific rendering
+- Scroll behavior
+- Animation and transition states
+- Computed styles
+</Warning>
+
+The critical gap: an element can be present in the jsdom tree (Level 2 passes) while being completely invisible on screen due to CSS (Level 5 would catch this).
+
+## When to Use Level 2
+
+| Scenario | Level 2 Appropriate? |
+|----------|---------------------|
+| Component renders wrong text | Yes |
+| Props not passed correctly | Yes |
+| Click handler not updating state | Yes |
+| Element present but not visible | No -- use Level 5 |
+| CSS layout broken | No -- use Level 5 |
+| Multi-page navigation flow | No -- use Level 4 |

@@ -1,0 +1,36 @@
+---
+title: Real-World Patterns
+description: Battle-tested testing patterns from production projects.
+sidebar_position: 1
+---
+
+## Production-Tested Approaches
+
+The patterns in this section come from real production projects, not theoretical best practices. Each pattern has been used in shipped software and refined through actual bugs and failures.
+
+## Source Projects
+
+| Project | Type | Key Testing Patterns |
+|---------|------|---------------------|
+| **zudo-text** | Tauri text editor | Mock backend adapter, console error monitoring, @interactive keyboard tests |
+| **zmod** | Web application | Production-build Playwright, CI image interception, sharded E2E |
+| **zudo-pattern-gen** | Pattern generator | Deterministic PNG rendering, Miniflare + D1/R2 integration |
+| **mdx-formatter** | CLI tool | Contract testing Rust via Vitest, idempotency invariant |
+
+## Pattern Categories
+
+### [Vitest Patterns](/pj/zudo-test-wisdom/docs/real-world-patterns/vitest-patterns)
+
+Workspace configurations, jsdom/happy-dom environments, contract testing, idempotency testing, and Miniflare integration testing.
+
+### [Playwright Patterns](/pj/zudo-test-wisdom/docs/real-world-patterns/playwright-patterns)
+
+CI-safe test splitting, console error monitoring, image interception, production build verification, and sharded CI runs.
+
+### [Tauri Testing](/pj/zudo-test-wisdom/docs/real-world-patterns/tauri-testing)
+
+WebKit-only rule, core crate pattern, backend bridge mocking, and the full 8-step escalation ladder for desktop apps.
+
+## Common Theme
+
+Across all these projects, one theme emerges: **the testing approach must match the deployment target**. A web app needs browser-level testing. A CLI tool needs output verification. A Tauri app needs WebKit-specific testing. There is no universal test setup -- only appropriate test setups for specific contexts.

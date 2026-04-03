@@ -1,0 +1,68 @@
+export type {
+  HeaderNavChildItem,
+  HeaderNavItem,
+  ColorModeConfig,
+  HtmlPreviewConfig,
+  LocaleConfig,
+  VersionConfig,
+  FooterConfig,
+} from "./settings-types";
+import type {
+  HeaderNavItem,
+  ColorModeConfig,
+  HtmlPreviewConfig,
+  LocaleConfig,
+  VersionConfig,
+  FooterConfig,
+} from "./settings-types";
+
+export const settings = {
+  colorScheme: "Default Dark",
+  colorMode: {
+    defaultMode: "dark",
+    lightScheme: "Default Light",
+    darkScheme: "Default Dark",
+    respectPrefersColorScheme: true,
+  } satisfies ColorModeConfig,
+  siteName: "zudo-test-wisdom",
+  siteDescription: "Takazudo's frontend testing strategy guide for AI agents and developers" as string,
+  base: "/pj/zudo-test-wisdom",
+  trailingSlash: false as boolean,
+  noindex: false as boolean,
+  editUrl: false as string | false,
+  siteUrl: "" as string,
+  docsDir: "src/content/docs",
+  locales: {
+    ja: { label: "JA", dir: "src/content/docs-ja" },
+  } as Record<string, LocaleConfig>,
+  mermaid: true,
+  d2: false,
+  d2BuildMode: "wasm" as "wasm" | "cli",
+  sitemap: false,
+  docMetainfo: false,
+  docTags: false,
+  llmsTxt: true,
+  math: false,
+  onBrokenMarkdownLinks: "warn" as "warn" | "error" | "ignore",
+  aiAssistant: false as boolean,
+  docHistory: true,
+  colorTweakPanel: true as boolean,
+  sidebarResizer: true as boolean,
+  sidebarToggle: true as boolean,
+  htmlPreview: undefined as HtmlPreviewConfig | undefined,
+  versions: false as VersionConfig[] | false,
+  claudeResources: {
+    claudeDir: ".claude",
+  } as { claudeDir: string; projectRoot?: string } | false,
+  footer: {
+    links: [],
+    copyright: "Copyright © 2026 Takazudo. Built with zudo-doc.",
+  } satisfies FooterConfig as FooterConfig | false,
+  headerNav: [
+    { label: "Overview", path: "/docs/overview", categoryMatch: "overview" },
+    { label: "Testing Levels", path: "/docs/testing-levels", categoryMatch: "testing-levels" },
+    { label: "Decision Guide", path: "/docs/decision-guide", categoryMatch: "decision-guide" },
+    { label: "Patterns", path: "/docs/real-world-patterns", categoryMatch: "real-world-patterns" },
+    { label: "Tools", path: "/docs/tools-reference", categoryMatch: "tools-reference" },
+  ] satisfies HeaderNavItem[],
+};

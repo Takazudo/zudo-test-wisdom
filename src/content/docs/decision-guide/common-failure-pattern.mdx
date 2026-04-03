@@ -1,0 +1,105 @@
+---
+title: The Common AI Failure Pattern
+description: How AI agents fail by testing logic when the bug is visual.
+sidebar_position: 2
+---
+
+## The Pattern
+
+The most frequent testing failure in AI-assisted development follows a predictable pattern:
+
+1. User reports: **"It's not showing"** or **"It's still broken"**
+2. AI agent writes a unit test or checks logic
+3. Logic test passes -- the data is correct, the component returns the right JSX
+4. AI agent declares: **"Fixed! The test passes."**
+5. User reports: **"It's still not showing."**
+6. AI agent re-runs the same test, gets the same passing result
+7. Cycle repeats until the user loses trust
+
+## Why It Happens
+
+The AI agent chose **Level 1 (unit test)** or **Level 2 (DOM test)** for a problem that requires **Level 5 (visual verification)**.
+
+The data and logic are correct. The component renders the right elements in the DOM tree. But a CSS rule somewhere in the ancestor chain makes the element invisible.
+
+## Concrete Example
+
+A developer asks the AI to add a notification banner. The AI creates the component:
+
+```tsx
+// NotificationBanner.tsx
+export function NotificationBanner({ message }: { message: string }) {
+  return (
+    <div className="notification-banner">
+      <p>{message}</p>
+    </div>
+  );
+}
+```
+
+And writes a test:
+
+```tsx
+// NotificationBanner.test.tsx
+it("renders the message", () => {
+  render(<NotificationBanner message="Update available" />);
+  expect(screen.getByText("Update available")).toBeTruthy();
+});
+```
+
+The test passes. But the user sees nothing on screen. Why?
+
+```css
+/* layout.css -- inherited from the page layout */
+.main-content {
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 0.3s ease;
+}
+
+.main-content.expanded {
+  max-height: 1000px;
+}
+```
+
+The notification banner is rendered inside `.main-content`, which has `max-height: 0` and `overflow: hidden` by default. The element exists in the DOM (Level 2 passes), but it is visually clipped to zero height (Level 5 would catch this).
+
+## The Fix
+
+<Note>
+When the user says something "is not showing," default to Level 5 verification. Check **computed styles** on the element and its ancestors, then take a **screenshot** to confirm visual state.
+</Note>
+
+Level 5 verification would reveal:
+
+```
+verify-ui result:
+  .main-content {
+    overflow: hidden     // <-- clipping children
+    max-height: 0px      // <-- zero height
+  }
+  .notification-banner {
+    display: block       // present in DOM
+    // but parent clips it to invisible
+  }
+```
+
+## Other Variants of This Pattern
+
+The `overflow: hidden` + `height: 0` pattern is just one variant. Other common causes:
+
+| CSS Property | Effect | Level 2 Detects? | Level 5 Detects? |
+|-------------|--------|-----------------|-----------------|
+| `display: none` | Element removed from flow | No | Yes |
+| `visibility: hidden` | Element invisible but takes space | No | Yes |
+| `opacity: 0` | Element fully transparent | No | Yes |
+| `z-index` stacking | Element behind another | No | Yes |
+| `overflow: hidden` on ancestor | Content clipped | No | Yes |
+| `transform: scale(0)` | Element shrunk to nothing | No | Yes |
+| `position: absolute` + off-screen | Element positioned off viewport | No | Yes |
+
+## Key Takeaway
+
+<Warning>
+**Never declare a visual bug fixed based on a logic test.** If the user says something is not visible, the test must verify visibility -- and that requires Level 5.
+</Warning>

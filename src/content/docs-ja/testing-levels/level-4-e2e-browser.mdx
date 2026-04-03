@@ -1,0 +1,111 @@
+---
+title: "レベル4: E2Eブラウザテスト"
+description: Playwright とヘッドレスブラウザによるエンドツーエンドテスト。
+sidebar_position: 5
+---
+
+## レベル4がテストするもの
+
+レベル4のテストは**実際のブラウザ**（またはヘッドレスブラウザ）で実行され、ページロードからインタラクションを経て最終状態に至るまでの完全なユーザーフローを検証します。シミュレートされた環境では見逃すランタイムエラー、ナビゲーションの問題、インタラクションのバグをキャッチします。
+
+典型的な対象：
+
+- 完全なユーザーワークフロー（ログイン、フォーム送信、ナビゲーション）
+- クライアントサイドルーティング
+- API連携（モックまたは実際のエンドポイント）
+- コンソールエラーの検出
+- ページ間のインタラクション
+- 動的コンテンツの読み込み
+
+## ツール
+
+| ツール | 役割 |
+|-------|------|
+| **Playwright** | マルチブラウザ対応の完全なE2Eテストフレームワーク |
+| **headless-browser** | ページヘルスチェック用のクイック検証スクリプト |
+
+## 例: Playwright E2E
+
+```typescript
+// e2e/navigation.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("navigates from home to docs", async ({ page }) => {
+  await page.goto("/");
+  await page.click('a[href="/docs"]');
+  await expect(page).toHaveURL("/docs");
+  await expect(page.locator("h1")).toHaveText("Documentation");
+});
+
+test("no console errors on page load", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+  await page.goto("/");
+  expect(errors).toHaveLength(0);
+});
+```
+
+## 例: ヘッドレスブラウザによるクイックチェック
+
+フルテストスイートを使わない迅速な検証には、headless-browserでスクリーンショットを撮影しエラーをチェックします：
+
+```bash
+# Quick page health check
+node headless-check.js --url http://localhost:3000 --screenshot
+
+# Check for console errors
+node headless-check.js --url http://localhost:3000 --console-errors
+```
+
+## コンソールエラーモニタリング
+
+本番プロジェクトからの強力なパターン：E2Eテスト中にコンソール出力を監視して予期しないエラーをキャッチします：
+
+```typescript
+// e2e/fixtures.ts
+import { test as base } from "@playwright/test";
+
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    const errors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        errors.push(msg.text());
+      }
+    });
+    await use(page);
+    if (errors.length > 0) {
+      throw new Error(
+        `Console errors detected:\n${errors.join("\n")}`
+      );
+    }
+  },
+});
+```
+
+## ブラインドスポット
+
+<Warning>
+レベル4のテストは実際のブラウザレンダリングとインタラクションしますが、通常は視覚的な外観ではなく**DOMの状態**をアサートします。以下を見逃す可能性があります：
+
+- 微妙なCSSの問題（1ピクセルのズレ、色の微妙な違い）
+- 技術的には表示されているが視覚的に重なっている要素
+- フォントレンダリングの違い
+- レスポンシブレイアウトのブレークポイント
+- 算出スタイルの値
+</Warning>
+
+レベル4は「要素が存在してインタラクション可能である」ことを確認します。「要素が正しく見える」ことを確認するには、レベル5にエスカレーションしてください。
+
+## レベル4を使用するタイミング
+
+| シナリオ | レベル4は適切か？ |
+|---------|-----------------|
+| ページナビゲーションが壊れている | はい |
+| フォーム送信が失敗する | はい |
+| 動的コンテンツが読み込まれない | はい |
+| ページにコンソールエラーがある | はい |
+| 要素の配置が間違っている | 部分的 -- レベル5がより適切 |
+| CSSの色/間隔が間違っている | いいえ -- レベル5を使用 |

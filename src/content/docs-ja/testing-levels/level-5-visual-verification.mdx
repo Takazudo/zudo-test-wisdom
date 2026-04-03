@@ -1,0 +1,112 @@
+---
+title: "レベル5: 決定論的 + 視覚的検証"
+description: 算出スタイルのチェックとビジュアルスクリーンショットを組み合わせた最大カバレッジ。
+sidebar_position: 6
+---
+
+## レベル5がテストするもの
+
+レベル5は**決定論的な算出スタイルのアサーション**と**視覚的なスクリーンショット検証**を組み合わせて、すべての下位レベルが見逃すバグをキャッチします。UI/CSS作業における最も信頼度の高い検証方法です。
+
+2つの補完的なツール：
+
+- **verify-ui** -- 実行中のページから算出CSS値を抽出し、正確な値をアサート（LLMの解釈なし）
+- **headless-browser** -- 視覚的な比較とインタラクションテスト用のスクリーンショットを撮影
+
+## 両方が必要な理由
+
+算出スタイルのチェックだけでは、要素間のインタラクション（重なり、スタッキングコンテキスト）から生じる視覚的な問題を見逃す可能性があります。スクリーンショットだけでは、確証バイアスの可能性があるLLMの解釈に依存します。組み合わせることで以下を提供します：
+
+| アプローチ | 強み | 弱み |
+|----------|------|------|
+| verify-ui | 決定論的、正確な値 | 視覚的な構成を見られない |
+| headless-browser | 完全な視覚的結果を見られる | LLMの解釈にバイアスの可能性 |
+| 両方の組み合わせ | 決定論的 + 視覚的 | 最小限のブラインドスポット |
+
+## verify-uiの例
+
+```bash
+# Check computed styles of an element
+verify-ui --url http://localhost:3000 \
+  --selector ".hero-title" \
+  --check "font-size: 48px" \
+  --check "color: rgb(255, 255, 255)" \
+  --check "display: block"
+```
+
+```bash
+# Verify visibility
+verify-ui --url http://localhost:3000 \
+  --selector ".notification-banner" \
+  --check "display: block" \
+  --check "opacity: 1" \
+  --check "visibility: visible"
+```
+
+## このレベルがキャッチする典型的な失敗
+
+典型的なシナリオを考えてみます：
+
+1. AIエージェントが通知バナーコンポーネントを追加する
+2. ユニットテストでコンポーネントがレンダリングされることを確認する（レベル1パス）
+3. DOMテストで要素がツリーに存在することを確認する（レベル2パス）
+4. しかし親コンテナに `overflow: hidden` と `height: 0` がある
+5. バナーはDOMに存在するが完全に非表示
+
+レベル5ならこれをキャッチします：
+
+```bash
+# verify-ui would reveal:
+# .notification-banner parent has height: 0px, overflow: hidden
+verify-ui --url http://localhost:3000 \
+  --selector ".notification-container" \
+  --check "height: auto" \
+  --check "overflow: visible"
+```
+
+headless-browserのスクリーンショットにより、バナーが表示されていないことを視覚的に確認できます。
+
+## headless-browserによる視覚的検証
+
+```bash
+# Full-page screenshot
+node headless-check.js --url http://localhost:3000 --screenshot --full-page
+
+# Screenshot of specific viewport
+node headless-check.js --url http://localhost:3000 \
+  --screenshot --width 375 --height 812  # iPhone viewport
+```
+
+## 統合されたワークフロー
+
+UI/CSSの変更に対する推奨検証ワークフロー：
+
+1. CSS/レイアウトの変更を行う
+2. **verify-ui**を実行して正確な算出値をアサートする
+3. **headless-browser**でスクリーンショットを撮影して視覚的に確認する
+4. verify-uiがパスしてもスクリーンショットが正しくない場合、スタッキング/コンポジションの問題を調査する
+5. スクリーンショットが正しいがverify-uiが失敗する場合、期待値を更新する
+
+<Note>
+この2段階のアプローチにより、偽陽性（スクリーンショットは良好だが値が不正）と偽陰性（値は正しいが視覚的なコンポジションが壊れている）の両方を排除します。
+</Note>
+
+## ブラインドスポット
+
+レベル5のブラインドスポットは最小限ですが、いくつか残ります：
+
+- OSごとのフォントレンダリングの違い
+- サブピクセルレンダリングのバリエーション
+- アニメーションのタイミング（フレーム途中の状態）
+- テストブラウザに存在しないブラウザ固有の癖
+
+## レベル5を使用するタイミング
+
+| シナリオ | レベル5は適切か？ |
+|---------|-----------------|
+| CSSの変更が反映されない | はい |
+| DOMに存在するのに要素が表示されない | はい |
+| レイアウトの間隔が正しくない | はい |
+| 色やfont-sizeが不正確 | はい |
+| レスポンシブブレークポイントの問題 | はい |
+| 下位レベルのテストがパスした後にユーザーが「まだ壊れている」と報告 | はい |

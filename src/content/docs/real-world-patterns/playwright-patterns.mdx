@@ -1,0 +1,248 @@
+---
+title: Playwright Patterns
+description: E2E testing patterns with Playwright for CI and production verification.
+sidebar_position: 3
+---
+
+## CI-Safe vs @interactive Test Split
+
+Not all E2E tests can run in CI. Tests requiring keyboard shortcuts, clipboard access, or desktop-specific interactions should be tagged and split:
+
+```typescript
+// e2e/basic-navigation.spec.ts -- runs in CI
+import { test, expect } from "@playwright/test";
+
+test("loads the home page", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("h1")).toBeVisible();
+});
+```
+
+```typescript
+// e2e/keyboard-shortcuts.spec.ts -- only runs locally
+import { test, expect } from "@playwright/test";
+
+test("@interactive Ctrl+S saves document", async ({ page }) => {
+  await page.goto("/editor");
+  await page.keyboard.press("Control+KeyS");
+  await expect(page.locator(".save-indicator")).toHaveText("Saved");
+});
+```
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    {
+      name: "ci",
+      testMatch: /.*\.spec\.ts/,
+      testIgnore: /.*@interactive.*/,
+    },
+    {
+      name: "interactive",
+      testMatch: /.*@interactive.*\.spec\.ts/,
+    },
+  ],
+});
+```
+
+<Tip>
+Run `npx playwright test --project=ci` in CI and `npx playwright test --project=interactive` locally when you need full keyboard/clipboard testing.
+</Tip>
+
+## Console Error Monitoring
+
+Extend Playwright's test fixture to automatically fail on console errors:
+
+```typescript
+// e2e/fixtures.ts
+import { test as base, expect } from "@playwright/test";
+
+export const test = base.extend<{ consoleErrors: string[] }>({
+  consoleErrors: async ({ page }, use) => {
+    const errors: string[] = [];
+
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        errors.push(msg.text());
+      }
+    });
+
+    page.on("pageerror", (error) => {
+      errors.push(error.message);
+    });
+
+    await use(errors);
+
+    // Assert no console errors after each test
+    expect(errors).toEqual([]);
+  },
+});
+
+export { expect };
+```
+
+```typescript
+// e2e/app.spec.ts
+import { test, expect } from "./fixtures";
+
+test("home page has no console errors", async ({ page, consoleErrors }) => {
+  await page.goto("/");
+  await page.waitForLoadState("networkidle");
+  // consoleErrors assertion happens automatically in fixture teardown
+});
+```
+
+## CI Image Interception for Speed
+
+In CI, network requests for large images slow down tests. Intercept and replace them with tiny placeholders:
+
+```typescript
+// e2e/fixtures.ts
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    // Intercept image requests in CI
+    if (process.env.CI) {
+      await page.route("**/*.{png,jpg,jpeg,webp,gif}", (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: "image/png",
+          // 1x1 transparent PNG
+          body: Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "base64"
+          ),
+        });
+      });
+    }
+    await use(page);
+  },
+});
+```
+
+<Note>
+This pattern from zmod cut CI E2E test time by 40% by eliminating network latency for image assets.
+</Note>
+
+## Production Build Verification
+
+Test against the production build, not the dev server. This catches build-specific issues:
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  webServer: {
+    command: "npm run build && npm run preview",
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+  use: {
+    baseURL: "http://localhost:4173",
+  },
+});
+```
+
+```typescript
+// e2e/production.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("production build serves all pages", async ({ page }) => {
+  const urls = ["/", "/docs", "/about", "/contact"];
+  for (const url of urls) {
+    const response = await page.goto(url);
+    expect(response?.status()).toBe(200);
+  }
+});
+
+test("production build has no broken links", async ({ page }) => {
+  await page.goto("/");
+  const links = await page.locator("a[href^='/']").all();
+  for (const link of links) {
+    const href = await link.getAttribute("href");
+    if (href) {
+      const response = await page.goto(href);
+      expect(response?.status()).toBe(200);
+    }
+  }
+});
+```
+
+## Sharded CI Runs
+
+For large test suites, shard across multiple CI runners:
+
+```yaml
+# .github/workflows/e2e.yml
+jobs:
+  e2e:
+    strategy:
+      matrix:
+        shard: [1/4, 2/4, 3/4, 4/4]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx playwright install --with-deps
+      - run: npx playwright test --shard=${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-${{ strategy.job-index }}
+          path: playwright-report/
+```
+
+## Mock Backend Adapter for Frontend-Only E2E
+
+When testing frontend behavior independently from the real backend:
+
+```typescript
+// e2e/mocks/backend-adapter.ts
+import { Page } from "@playwright/test";
+
+export async function mockBackend(page: Page) {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+
+    const mocks: Record<string, unknown> = {
+      "/api/user": { id: 1, name: "Test User", email: "test@example.com" },
+      "/api/settings": { theme: "dark", language: "en" },
+      "/api/documents": [
+        { id: 1, title: "Doc 1" },
+        { id: 2, title: "Doc 2" },
+      ],
+    };
+
+    const mockData = mocks[url.pathname];
+    if (mockData) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockData),
+      });
+    } else {
+      await route.continue();
+    }
+  });
+}
+```
+
+```typescript
+// e2e/frontend.spec.ts
+import { test, expect } from "@playwright/test";
+import { mockBackend } from "./mocks/backend-adapter";
+
+test.beforeEach(async ({ page }) => {
+  await mockBackend(page);
+});
+
+test("displays user name from mock API", async ({ page }) => {
+  await page.goto("/dashboard");
+  await expect(page.locator(".user-name")).toHaveText("Test User");
+});
+```
+
+<Warning>
+Mock backends are great for frontend-focused testing, but they do not replace integration tests against the real API. Use both: mocked for UI behavior, real for data flow.
+</Warning>
