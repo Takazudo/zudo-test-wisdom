@@ -26,7 +26,7 @@ export const settings = {
   } satisfies ColorModeConfig,
   siteName: "zudo-test-wisdom",
   siteDescription: "Takazudo's frontend testing strategy guide for AI agents and developers" as string,
-  base: "/pj/zudo-test-wisdom",
+  base: "/pj/zudo-test",
   trailingSlash: false as boolean,
   noindex: false as boolean,
   editUrl: false as string | false,

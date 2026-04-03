@@ -103,7 +103,7 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all ski
 
 ## Site Config
 
-- Base path: `/pj/zudo-test-wisdom`
+- Base path: `/pj/zudo-test`
 - Settings: `src/config/settings.ts`
 
 ## CI/CD
