@@ -1,0 +1,307 @@
+---
+title: バックエンド & Node.js テスト
+description: Vitestを使用したサーバーサイドNode.jsコードのテストパターン。
+sidebar_position: 5
+---
+
+## フロントエンド・バックエンド分離の哲学
+
+著者のアプローチ：フロントエンドが得意で、バックエンド実装はAIに委任する。これによりテスト戦略が重要になります -- バックエンドのコードを自分で書いていない場合、テストがそれが正しく動作しているかの主要な検証手段となります。
+
+重要な原則は**関心の分離がテスト可能なバックエンドを実現する**ということです。フロントエンドとバックエンドが適切に分離されている場合：
+
+- 各レイヤーを独立してテストできる
+- フロントエンドテストはMSWライクなモックを使用してバックエンドの可用性から切り離す
+- バックエンドテストはブラウザを必要とせず、実際のまたはエミュレートされたインフラストラクチャに対して実行する
+- 一方のレイヤーの変更が他方のレイヤーのテストを壊さない
+
+この分離は単なるアーキテクチャ上の美点ではなく、AI支援バックエンド開発を実現可能にするものです。AIが実装を書き、テストがそれが実際に動作することを検証します。
+
+## Cloudflare Functions と Miniflare
+
+Cloudflare Workers/FunctionsでD1（SQLite）データベースとR2オブジェクトストレージを使用するプロジェクトでは、Miniflareがインテグレーションテスト用のローカルエミュレーションを提供します。
+
+### テスト環境のセットアップ
+
+実際のD1とR2バインディングを持つ分離されたテスト環境を起動するヘルパーを作成します：
+
+```ts
+// test/helpers/test-env.ts
+import { Miniflare } from "miniflare";
+import { readFileSync } from "fs";
+
+export async function createTestEnv() {
+  const mf = new Miniflare({
+    modules: true,
+    script: "",
+    d1Databases: ["DB"],
+    r2Buckets: ["BUCKET"],
+  });
+  const env = await mf.getBindings();
+
+  // Run SQL migrations
+  const migration = readFileSync("migrations/0001_init.sql", "utf-8");
+  const db = env.DB as D1Database;
+  await db.exec(migration);
+
+  return { mf, env, db, bucket: env.BUCKET as R2Bucket };
+}
+```
+
+### テストデータファクトリ
+
+合理的なデフォルト値を持つファクトリ関数を使用してテストデータを作成します：
+
+```ts
+// test/helpers/factories.ts
+export function createTestProject(overrides: Partial<Project> = {}): Project {
+  return {
+    id: crypto.randomUUID(),
+    name: "Test Project",
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+```
+
+### フルCRUDライフサイクルテスト
+
+エミュレートされたインフラストラクチャに対して、完全なCRUD（作成・読み取り・更新・削除）サイクルをテストします：
+
+```ts
+import { describe, it, expect, beforeEach } from "vitest";
+import { app } from "../src/index";
+import { createTestEnv } from "./helpers/test-env";
+
+describe("Projects API", () => {
+  let env: any;
+  let mf: any;
+
+  beforeEach(async () => {
+    ({ env, mf } = await createTestEnv());
+  });
+
+  it("creates and retrieves a project", async () => {
+    const createRes = await app.request(
+      new Request("http://localhost/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "My Project" }),
+      }),
+      {},
+      env,
+    );
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json();
+
+    const getRes = await app.request(
+      new Request(`http://localhost/api/projects/${created.id}`),
+      {},
+      env,
+    );
+    expect(getRes.status).toBe(200);
+    const fetched = await getRes.json();
+    expect(fetched.name).toBe("My Project");
+  });
+});
+```
+
+ここでの重要なパターンは`app.request(req, {}, env)`です -- これはMiniflareが提供するバインディングを使用してHonoアプリを直接呼び出し、HTTPを完全にバイパスします。
+
+### 別のVitest設定
+
+バックエンドテストは`environment: 'node'`を持つ独自のVitest設定が必要です：
+
+```ts
+// vitest.config.backend.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "node",
+    include: ["test/backend/**/*.test.ts"],
+    testTimeout: 10000,
+  },
+});
+```
+
+## HTTP APIテスト
+
+ライブまたはデプロイされたエンドポイント（ステージング、プレビュー、本番）に対してテストするには、直接HTTPリクエストを使用します。
+
+### 環境ベースのURL切り替え
+
+```ts
+// test/helpers/api-client.ts
+function getBaseUrl(): string {
+  if (process.env.TEST_API_URL) {
+    return process.env.TEST_API_URL;
+  }
+  if (process.env.CF_PAGES_URL) {
+    return process.env.CF_PAGES_URL;
+  }
+  return "http://localhost:8787";
+}
+
+const BASE_URL = getBaseUrl();
+
+export async function apiGet(path: string) {
+  return fetch(`${BASE_URL}${path}`, {
+    headers: {
+      Authorization: `Bearer ${process.env.TEST_API_TOKEN}`,
+    },
+  });
+}
+```
+
+### 破壊的テストのガード
+
+データを変更するテストは本番環境ではスキップすべきです：
+
+```ts
+const isProduction = process.env.TEST_ENV === "production";
+
+describe("Admin API", () => {
+  it.skipIf(isProduction)("deletes all test data", async () => {
+    const res = await apiGet("/api/admin/reset-test-data");
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+### ネットワークタイムアウト
+
+HTTPテストはユニットテストよりも長いタイムアウトが必要です：
+
+```ts
+// vitest.config.http.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "node",
+    include: ["test/http/**/*.test.ts"],
+    testTimeout: 30000,
+  },
+});
+```
+
+## モックを使ったHTTPクライアントテスト
+
+HTTPリクエストを行うコード（APIクライアント、認証フロー）をテストする場合、グローバルレベルで`fetch`をモックします。
+
+### `vi.stubGlobal`パターン
+
+```ts
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+describe("ApiClient", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends auth header", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    const client = new ApiClient({ token: "test-token" });
+    await client.get("/api/data");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/data"),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer test-token",
+        }),
+      }),
+    );
+  });
+});
+```
+
+### 認証フローテスト
+
+モックレスポンスを連鎖させて、トークンリフレッシュとリトライロジックをテストします：
+
+```ts
+it("retries with refreshed token on 401", async () => {
+  // First call returns 401
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+  // Token refresh succeeds
+  fetchMock.mockResolvedValueOnce(
+    new Response(JSON.stringify({ token: "new-token" }), { status: 200 }),
+  );
+  // Retry with new token succeeds
+  fetchMock.mockResolvedValueOnce(
+    new Response(JSON.stringify({ data: "success" }), { status: 200 }),
+  );
+
+  const client = new ApiClient({ token: "old-token" });
+  const result = await client.get("/api/data");
+
+  expect(result.data).toBe("success");
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});
+```
+
+## ファイルシステムテスト
+
+ファイルの読み書きを行うNode.jsツールでは、分離のために一時ディレクトリを使用します。
+
+### 一時ディレクトリパターン
+
+```ts
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+
+describe("FileProcessor", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("processes and writes output file", () => {
+    const inputPath = join(tempDir, "input.txt");
+    const outputPath = join(tempDir, "output.txt");
+    writeFileSync(inputPath, "hello world");
+
+    processFile(inputPath, outputPath);
+
+    expect(readFileSync(outputPath, "utf-8")).toBe("HELLO WORLD");
+  });
+});
+```
+
+重要なポイント：
+
+- `mkdtempSync`はテスト実行ごとにユニークなディレクトリを作成する -- 衝突がない
+- `afterEach`のクリーンアップにより、テスト間で残存ファイルがないことを保証する
+- すべてのパスは`tempDir`からの相対パス -- テストが実際のファイルシステムに触れることはない
+
+## バックエンドテストの重要な原則
+
+1. **vitest設定で`environment: 'node'`を使用する**。`jsdom`ではなく。バックエンドコードにDOMは不要です。
+
+2. **フロントエンドとバックエンドテストで別々のvitest設定**を使用する。異なる環境、異なるタイムアウト、そして多くの場合異なるセットアップファイルが必要です。
+
+3. **テストデータ用のヘルパーファクトリ**を使用する。テストデータをインラインでハードコードせず、合理的なデフォルト値とオーバーライドを持つファクトリ関数を使用します。
+
+4. **設定切り替えに環境変数**を使用する。ローカル、プレビュー、本番URLの切り替えにはハードコードではなく`process.env`を使用します。
+
+5. **破壊的テストを`it.skipIf()`でガード**する。データを削除したり状態をリセットしたりするテストは、本番環境では絶対に実行すべきではありません。
+
+6. **ネットワークテストには長いタイムアウト**を設定する。デフォルトの5秒タイムアウトはHTTPインテグレーションテストには短すぎます。30秒以上を使用します。

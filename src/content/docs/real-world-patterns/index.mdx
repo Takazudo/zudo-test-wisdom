@@ -31,6 +31,10 @@ CI-safe test splitting, console error monitoring, image interception, production
 
 WebKit-only rule, core crate pattern, backend bridge mocking, and the full 8-step escalation ladder for desktop apps.
 
+### [Backend & Node.js Testing](/pj/zudo-test-wisdom/docs/real-world-patterns/backend-testing)
+
+Cloudflare Functions with Miniflare, HTTP API testing, fetch mocking with `vi.stubGlobal`, file system testing with temp directories, and key principles for separating frontend and backend test configs.
+
 ## Common Theme
 
 Across all these projects, one theme emerges: **the testing approach must match the deployment target**. A web app needs browser-level testing. A CLI tool needs output verification. A Tauri app needs WebKit-specific testing. There is no universal test setup -- only appropriate test setups for specific contexts.

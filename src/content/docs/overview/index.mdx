@@ -1,27 +1,32 @@
 ---
-title: Testing Strategy Overview
-description: A testing level escalation guide for AI-assisted frontend development.
+title: Overview
+description: "Takazudo's personal frontend testing strategy guide for AI-assisted development"
 sidebar_position: 1
 ---
 
-## Why Testing Levels Matter
+Personal dev notes by [Takazudo](https://x.com/Takazudo). Not official testing documentation.
+Written for personal reference and AI-assisted coding.
 
-When an AI agent fixes a bug and declares it resolved, the fix is only as reliable as the testing method used to verify it. A unit test can confirm logic is correct, but it cannot confirm that the user actually sees the result on screen. This gap between "logically correct" and "visually correct" is the most common source of false confidence in AI-assisted development.
+This site covers **frontend testing strategy** for AI-assisted development. The focus is on choosing the right testing approach when working with AI coding agents -- knowing when a unit test is sufficient, when you need browser-level verification, and how to avoid the common trap of false confidence from passing tests that do not actually verify what matters.
 
-This guide defines **five testing levels**, each with increasing coverage and decreasing blind spots. The core principle is simple:
+## What This Covers
+
+These are the core topics documented here, all based on patterns extracted from real production projects:
+
+- **Testing Levels** -- The 5-level escalation ladder from unit tests to visual verification, each with increasing coverage and decreasing blind spots
+- **Decision Guide** -- Which testing level to use based on what changed, common failure patterns when the wrong level is chosen, and required behaviors for AI agents
+- **Real-World Patterns** -- Battle-tested Vitest configurations, Playwright E2E patterns, Tauri desktop app testing, and backend/Node.js testing approaches
+- **Tools Reference** -- Quick lookup of tools and commands for each testing level
 
 <Note>
-Match your testing level to what you are actually verifying. If you are checking logic, Level 1 is sufficient. If you are checking whether something is visible on screen, you need Level 5.
+
+This guide is primarily **frontend-focused**, because the author's strength is in frontend development. Backend testing is covered as a supplementary topic -- specifically the patterns that emerge when frontend and backend are properly separated and each can be tested independently.
+
 </Note>
 
-## Who This Guide Is For
+## The Core Insight
 
-This guide serves two audiences:
-
-- **AI agents** (Claude Code, Copilot, etc.) that need to choose the right testing approach when verifying their own work
-- **Developers** who work with AI agents and want to understand the testing escalation ladder
-
-## The Escalation Principle
+The single most important concept in AI-assisted testing is **test level escalation**. When an AI agent fixes a bug and declares it resolved, the fix is only as reliable as the testing method used to verify it. A unit test can confirm logic is correct, but it cannot confirm that the user actually sees the result on screen. The gap between "logically correct" and "visually correct" is the most common source of false confidence.
 
 Testing should escalate, not repeat. When a lower-level test passes but the problem persists, move to the next level:
 
@@ -31,11 +36,9 @@ Testing should escalate, not repeat. When a lower-level test passes but the prob
 4. **Level 4** -- E2E Browser Tests (Playwright, headless browser)
 5. **Level 5** -- Deterministic + Visual Verification (verify-ui + headless browser)
 
-Each level covers blind spots that lower levels cannot detect. The common failure pattern is staying at Level 1 when the bug requires Level 4 or 5.
-
 ## How to Use This Guide
 
-1. Start with the [Decision Guide](/pj/zudo-test-wisdom/docs/decision-guide) to determine which level fits your current task
-2. Read the [Testing Levels](/pj/zudo-test-wisdom/docs/testing-levels) section for detailed coverage of each level
-3. Reference [Real-World Patterns](/pj/zudo-test-wisdom/docs/real-world-patterns) for production-tested configurations
-4. Keep the [Tools Reference](/pj/zudo-test-wisdom/docs/tools-reference) open for quick lookup
+1. Start with the [Decision Guide](../decision-guide/index.mdx) to determine which testing level fits your current task
+2. Read the [Testing Levels](../testing-levels/index.mdx) section for detailed coverage of each level
+3. Reference [Real-World Patterns](../real-world-patterns/index.mdx) for production-tested configurations
+4. Keep the [Tools Reference](../tools-reference/index.mdx) open for quick lookup

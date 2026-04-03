@@ -1,0 +1,307 @@
+---
+title: Backend & Node.js Testing
+description: Testing patterns for server-side Node.js code with Vitest.
+sidebar_position: 5
+---
+
+## Frontend-Backend Separation Philosophy
+
+The author's approach: strong in frontend, delegate backend implementation to AI. This makes testing strategy critical -- when you did not write the backend code yourself, tests are your primary verification that it works correctly.
+
+The key principle is **separation of concerns enables testable backends**. When frontend and backend are properly separated:
+
+- Each layer can be tested independently
+- Frontend tests use MSW-like mocks to decouple from backend availability
+- Backend tests run against real or emulated infrastructure without needing a browser
+- Changes to one layer do not break the other layer's tests
+
+This separation is not just an architectural nicety -- it is what makes AI-assisted backend development viable. The AI writes the implementation, and the tests verify it actually works.
+
+## Cloudflare Functions with Miniflare
+
+For projects using Cloudflare Workers/Functions with D1 (SQLite) databases and R2 object storage, Miniflare provides local emulation for integration testing.
+
+### Test Environment Setup
+
+Create a helper that spins up an isolated test environment with real D1 and R2 bindings:
+
+```ts
+// test/helpers/test-env.ts
+import { Miniflare } from "miniflare";
+import { readFileSync } from "fs";
+
+export async function createTestEnv() {
+  const mf = new Miniflare({
+    modules: true,
+    script: "",
+    d1Databases: ["DB"],
+    r2Buckets: ["BUCKET"],
+  });
+  const env = await mf.getBindings();
+
+  // Run SQL migrations
+  const migration = readFileSync("migrations/0001_init.sql", "utf-8");
+  const db = env.DB as D1Database;
+  await db.exec(migration);
+
+  return { mf, env, db, bucket: env.BUCKET as R2Bucket };
+}
+```
+
+### Test Data Factories
+
+Use factory functions to create test data with sensible defaults:
+
+```ts
+// test/helpers/factories.ts
+export function createTestProject(overrides: Partial<Project> = {}): Project {
+  return {
+    id: crypto.randomUUID(),
+    name: "Test Project",
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+```
+
+### Full CRUD Lifecycle Tests
+
+Test the complete create-read-update-delete cycle against the emulated infrastructure:
+
+```ts
+import { describe, it, expect, beforeEach } from "vitest";
+import { app } from "../src/index";
+import { createTestEnv } from "./helpers/test-env";
+
+describe("Projects API", () => {
+  let env: any;
+  let mf: any;
+
+  beforeEach(async () => {
+    ({ env, mf } = await createTestEnv());
+  });
+
+  it("creates and retrieves a project", async () => {
+    const createRes = await app.request(
+      new Request("http://localhost/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "My Project" }),
+      }),
+      {},
+      env,
+    );
+    expect(createRes.status).toBe(201);
+    const created = await createRes.json();
+
+    const getRes = await app.request(
+      new Request(`http://localhost/api/projects/${created.id}`),
+      {},
+      env,
+    );
+    expect(getRes.status).toBe(200);
+    const fetched = await getRes.json();
+    expect(fetched.name).toBe("My Project");
+  });
+});
+```
+
+The key pattern here is `app.request(req, {}, env)` -- this calls the Hono app directly with the Miniflare-provided bindings, bypassing HTTP entirely.
+
+### Separate Vitest Config
+
+Backend tests need their own Vitest config with `environment: 'node'`:
+
+```ts
+// vitest.config.backend.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "node",
+    include: ["test/backend/**/*.test.ts"],
+    testTimeout: 10000,
+  },
+});
+```
+
+## HTTP API Testing
+
+For testing against live or deployed endpoints (staging, preview, production), use direct HTTP requests.
+
+### Environment-Based URL Switching
+
+```ts
+// test/helpers/api-client.ts
+function getBaseUrl(): string {
+  if (process.env.TEST_API_URL) {
+    return process.env.TEST_API_URL;
+  }
+  if (process.env.CF_PAGES_URL) {
+    return process.env.CF_PAGES_URL;
+  }
+  return "http://localhost:8787";
+}
+
+const BASE_URL = getBaseUrl();
+
+export async function apiGet(path: string) {
+  return fetch(`${BASE_URL}${path}`, {
+    headers: {
+      Authorization: `Bearer ${process.env.TEST_API_TOKEN}`,
+    },
+  });
+}
+```
+
+### Destructive Test Guards
+
+Tests that modify data should be skipped in production:
+
+```ts
+const isProduction = process.env.TEST_ENV === "production";
+
+describe("Admin API", () => {
+  it.skipIf(isProduction)("deletes all test data", async () => {
+    const res = await apiGet("/api/admin/reset-test-data");
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+### Network Timeouts
+
+HTTP tests need longer timeouts than unit tests:
+
+```ts
+// vitest.config.http.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "node",
+    include: ["test/http/**/*.test.ts"],
+    testTimeout: 30000,
+  },
+});
+```
+
+## HTTP Client Testing with Mocks
+
+When testing code that makes HTTP requests (API clients, auth flows), mock `fetch` at the global level.
+
+### The `vi.stubGlobal` Pattern
+
+```ts
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+describe("ApiClient", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends auth header", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+
+    const client = new ApiClient({ token: "test-token" });
+    await client.get("/api/data");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/data"),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer test-token",
+        }),
+      }),
+    );
+  });
+});
+```
+
+### Auth Flow Testing
+
+Test token refresh and retry logic by chaining mock responses:
+
+```ts
+it("retries with refreshed token on 401", async () => {
+  // First call returns 401
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+  // Token refresh succeeds
+  fetchMock.mockResolvedValueOnce(
+    new Response(JSON.stringify({ token: "new-token" }), { status: 200 }),
+  );
+  // Retry with new token succeeds
+  fetchMock.mockResolvedValueOnce(
+    new Response(JSON.stringify({ data: "success" }), { status: 200 }),
+  );
+
+  const client = new ApiClient({ token: "old-token" });
+  const result = await client.get("/api/data");
+
+  expect(result.data).toBe("success");
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});
+```
+
+## File System Testing
+
+For Node.js tools that read/write files, use temporary directories for isolation.
+
+### Temp Directory Pattern
+
+```ts
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+
+describe("FileProcessor", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("processes and writes output file", () => {
+    const inputPath = join(tempDir, "input.txt");
+    const outputPath = join(tempDir, "output.txt");
+    writeFileSync(inputPath, "hello world");
+
+    processFile(inputPath, outputPath);
+
+    expect(readFileSync(outputPath, "utf-8")).toBe("HELLO WORLD");
+  });
+});
+```
+
+The key points:
+
+- `mkdtempSync` creates a unique directory per test run -- no collisions
+- `afterEach` cleanup ensures no leftover files between tests
+- All paths are relative to `tempDir` -- tests never touch the real filesystem
+
+## Key Principles for Backend Testing
+
+1. **Use `environment: 'node'`** in vitest config, not `jsdom`. Backend code does not need a DOM.
+
+2. **Separate vitest configs** for frontend and backend tests. They need different environments, different timeouts, and often different setup files.
+
+3. **Helper factories** for test data. Never hardcode test data inline -- use factory functions with sensible defaults and overrides.
+
+4. **Environment variables** for configuration switching. Use `process.env` to switch between local, preview, and production URLs rather than hardcoding.
+
+5. **Guard destructive tests** with `it.skipIf()`. Tests that delete data or reset state should never run against production.
+
+6. **Longer timeouts for network tests**. Default 5-second timeouts are too short for HTTP integration tests. Use 30 seconds or more.
