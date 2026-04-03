@@ -78,13 +78,13 @@ jobs:
 
       - name: Prepare deploy directory
         run: |
-          mkdir -p deploy/pj/zudo-test-wisdom
+          mkdir -p deploy/pj/zudo-test
           if [ -d dist-out/client ]; then
-            cp -r dist-out/client/. deploy/pj/zudo-test-wisdom/
+            cp -r dist-out/client/. deploy/pj/zudo-test/
           else
-            cp -r dist-out/. deploy/pj/zudo-test-wisdom/
+            cp -r dist-out/. deploy/pj/zudo-test/
           fi
-          echo '/ /pj/zudo-test-wisdom/ 302' > deploy/_redirects
+          echo '/ /pj/zudo-test/ 302' > deploy/_redirects
 
       - name: Deploy to Cloudflare Pages (production)
         run: |
