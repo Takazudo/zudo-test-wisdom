@@ -95,9 +95,15 @@ Navigation is filesystem-driven. Directory structure directly becomes sidebar na
 4. Keep code blocks identical -- only translate prose
 5. Run `pnpm format:md` then `pnpm build` to verify
 
-## Doc Skill (test-wisdom)
+## Skills
 
-The `test-wisdom` skill (`.claude/skills/test-wisdom/SKILL.md`) is **generated** by `pnpm setup:doc-skill` (runs `scripts/setup-doc-skill.sh`). It is gitignored -- do NOT track it in git or edit it directly.
+This repo contains test-related Claude Code skills under `.claude/skills/`:
+
+- `test-wisdom/` - Doc-lookup skill (**generated** by `pnpm setup:doc-skill`, gitignored -- do NOT track or edit directly)
+- `verify-ui/` - Deterministic CSS/computed-style verification (tracked in git)
+- `headless-browser/` - Headless browser screenshots and interaction (tracked in git, run `npm install` in its directory for playwright)
+
+Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all skills to `~/.claude/skills/`. The script handles both the generated doc-lookup skill and the tracked skills in one step.
 
 ## Typography
 

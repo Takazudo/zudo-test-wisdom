@@ -1,6 +1,8 @@
 node_modules
 dist
 .astro
+
+# Generated doc-lookup skill (created by setup-doc-skill.sh)
 .claude/skills/test-wisdom/SKILL.md
 .claude/skills/test-wisdom/docs
 .claude/skills/test-wisdom/docs-ja
