@@ -1,3 +1,6 @@
 node_modules
 dist
 .astro
+.claude/skills/test-wisdom/SKILL.md
+.claude/skills/test-wisdom/docs
+.claude/skills/test-wisdom/docs-ja
