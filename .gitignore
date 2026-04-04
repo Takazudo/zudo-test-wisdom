@@ -1,6 +1,7 @@
 node_modules
 dist
 .astro
+.playwright-cli
 
 # Generated doc-lookup skill (created by setup-doc-skill.sh)
 .claude/skills/test-wisdom/SKILL.md
