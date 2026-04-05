@@ -23,7 +23,14 @@ export default defineConfig({
 ```
 
 <Warning>
-Do **not** test Tauri frontends with Chromium or Firefox in Playwright. The production app uses WebKit, so testing against other engines gives false confidence. A test passing in Chromium does not mean it works in the Tauri window.
+Testing **only** in Chromium gives false confidence — the production app uses WebKit on macOS and Linux, so Chromium-only coverage can miss real bugs.
+
+**Recommended dual strategy:**
+
+- **WebKit for local verification** — matches the production WebKit engine. Use this for any test that exercises WebKit-specific behavior (CSS quirks, focus handling, keyboard shortcuts via the app's shortcut engine).
+- **Chromium for CI** — more reliable in headless CI environments. CI-safe tests (DOM-only assertions, clicks, no keyboard shortcuts) behave identically across engines and run faster in headless Chromium.
+
+The key rule: always verify locally with WebKit, and ensure WebKit is in your Playwright project matrix. Using Chromium in CI for DOM-only tests is a pragmatic tradeoff, not a shortcut.
 </Warning>
 
 ## The Core Crate Pattern
