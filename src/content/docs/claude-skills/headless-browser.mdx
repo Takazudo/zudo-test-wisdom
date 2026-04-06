@@ -1,6 +1,6 @@
 ---
 title: "headless-browser"
-description: "Browser automation skill with two efficiency tiers. Tier 1: lightweight headless-check.js for quick checks, screenshots, error detection. Tier 2: custom Playwright scripts for interactions (click, fil..."
+description: "Browser automation with two efficiency tiers. Tier 1: headless-check.js for quick health checks, screenshots, error detection (JSON output). Tier 2: Playwright CLI (@playwright/cli via npx) for intera..."
 sidebar_label: "headless-browser"
 generated: true
 ---
@@ -26,11 +26,11 @@ Need browser automation?
     +-- Just checking page health/errors/screenshot?
     |       --> Tier 1: headless-check.js (fastest, lowest tokens)
     |
-    +-- Need to interact (click, fill, navigate)?
-    |       --> Tier 2: custom Playwright script (medium tokens)
+    +-- Need to interact (click, fill, navigate, inspect elements)?
+    |       --> Tier 2: Playwright CLI (YAML snapshots + element refs, 4x more efficient than MCP)
     |
     +-- Need persistent context, rich introspection, or very complex scenarios?
-            --> MCP Playwright (highest capability, higher tokens)
+            --> Tier 3: MCP Playwright (highest capability, higher tokens)
 ```
 
 ---
@@ -101,105 +101,186 @@ JSON with:
 
 ---
 
-## Tier 2: Interactive Operations (custom Playwright scripts)
+## Tier 2: Playwright CLI (Interactive Browser Automation)
 
-**Best for:** Clicking, form filling, navigation, multi-step automation
+**Best for:** Clicking, form filling, navigation, page inspection, multi-step automation
 
-**CRITICAL:** Playwright is installed in `$HOME/.claude/skills/headless-browser/node_modules/`. Scripts **MUST** be saved under `$HOME/.claude/skills/headless-browser/` (e.g., `$HOME/.claude/skills/headless-browser/tmp-browser-check.mjs`). **NEVER save to `/tmp/` or `$HOME/.claude/` root** — Node will fail with `ERR_MODULE_NOT_FOUND` because it cannot find the `playwright` package outside this directory tree.
+Playwright CLI (`@playwright/cli`) is Microsoft's CLI built specifically for coding agents. It outputs YAML snapshots with element refs (e.g., `e3`, `e15`) that you use to interact -- 4x more token-efficient than MCP Playwright.
 
-### How to Use
-
-Write a temporary `.mjs` script, save it as `$HOME/.claude/skills/headless-browser/tmp-browser-check.mjs`, and run it with `node`.
-
-### Script Template
-
-```javascript
-// Save as $HOME/.claude/skills/headless-browser/tmp-browser-check.mjs
-import { chromium } from 'playwright';
-
-const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-
-await page.goto('http://localhost:4321/some/page', { waitUntil: 'networkidle' });
-
-// Interact
-await page.locator('button:has-text("Submit")').click();
-await page.waitForTimeout(500);
-
-// Screenshot
-const path = `${process.env.HOME}/cclogs/REPO/headless-screenshots/result.png`;
-await page.screenshot({ path });
-console.log('Screenshot:', path);
-
-// Evaluate
-const result = await page.evaluate(() => document.title);
-console.log('Title:', result);
-
-await browser.close();
-```
-
-### Running
+**Run via npx** (no local install needed -- reuses existing Chromium browsers):
 
 ```bash
-node $HOME/.claude/skills/headless-browser/tmp-browser-check.mjs
+npx @playwright/cli@latest <command>
 ```
 
-### Common Operations
-
-```javascript
-// Click by selector
-await page.locator('.my-button').click();
-
-// Click by text
-await page.locator('button:has-text("Save")').click();
-
-// Fill an input
-await page.locator('input[name="email"]').fill('test@example.com');
-
-// Press a key
-await page.keyboard.press('Enter');
-
-// Wait for element
-await page.locator('.result').waitFor({ state: 'visible', timeout: 5000 });
-
-// Get computed style / check z-index
-const zIndex = await page.evaluate(() => {
-  return window.getComputedStyle(document.querySelector('.panel')).zIndex;
-});
-
-// Scroll to bottom
-await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-
-// Full page screenshot
-await page.screenshot({ path: 'full.png', fullPage: true });
-```
-
-### Cleanup
-
-Delete the temporary script after use:
+### Core Workflow
 
 ```bash
-rm -f $HOME/.claude/skills/headless-browser/tmp-browser-check.mjs
+# 1. Open a page
+npx @playwright/cli@latest open http://localhost:4321/some/page
+
+# 2. Take snapshot to see page structure and element refs
+npx @playwright/cli@latest snapshot
+# Output YAML with refs like:
+#   - heading "Welcome" [level=1] [ref=e3]
+#   - button "Submit" [ref=e15]
+#   - textbox [ref=e21]
+
+# 3. Interact using element refs from snapshot
+npx @playwright/cli@latest fill e21 "test@example.com"
+npx @playwright/cli@latest click e15
+
+# 4. Snapshot again to verify the result
+npx @playwright/cli@latest snapshot
+
+# 5. Screenshot for visual verification
+npx @playwright/cli@latest screenshot --filename $HOME/cclogs/REPO/headless-screenshots/result.png
+
+# 6. Close the browser when done
+npx @playwright/cli@latest close
 ```
+
+### Command Reference
+
+**Core:**
+
+- `open [url]` -- Launch browser and navigate
+- `close` -- Close current session
+- `snapshot` -- Get page structure with element refs (YAML)
+- `screenshot` -- Capture visual screenshot (`--filename path`, `--full-page`)
+- `eval <js>` -- Evaluate JavaScript in the page
+
+**Interaction:**
+
+- `click <ref>` -- Click an element by ref
+- `dblclick <ref>` -- Double-click
+- `fill <ref> <text>` -- Fill a form field
+- `type <text>` -- Type into focused element
+- `select <ref> <value>` -- Choose dropdown option
+- `check <ref>` / `uncheck <ref>` -- Toggle checkboxes
+- `hover <ref>` -- Hover over element
+- `drag <startRef> <endRef>` -- Drag and drop
+- `upload <file>` -- Upload a file
+
+**Navigation:**
+
+- `goto <url>` -- Navigate to URL
+- `go-back` / `go-forward` -- Browser navigation
+- `reload` -- Refresh page
+
+**Keyboard:**
+
+- `press <key>` -- Press a key (e.g., `Enter`, `Tab`, `Escape`)
+
+**Tabs:**
+
+- `tab-new [url]` -- Open new tab
+- `tab-list` -- List open tabs
+- `tab-select <index>` -- Switch to tab
+- `tab-close` -- Close current tab
+
+**Network:**
+
+- `route <url-pattern> <json-body>` -- Mock network responses
+- `network` -- View recent network requests
+
+**DevTools:**
+
+- `console` -- View console messages
+- `tracing-start` / `tracing-stop` -- Record traces
+- `video-start` / `video-stop` -- Record video
+
+### Common Patterns
+
+**Page inspection** (no interaction needed):
+
+```bash
+npx @playwright/cli@latest open http://localhost:4321/page
+npx @playwright/cli@latest snapshot
+npx @playwright/cli@latest console
+npx @playwright/cli@latest close
+```
+
+**Visual verification screenshot:**
+
+```bash
+npx @playwright/cli@latest open http://localhost:4321/page
+npx @playwright/cli@latest screenshot --filename $HOME/cclogs/REPO/headless-screenshots/check.png --full-page
+npx @playwright/cli@latest close
+```
+
+**Form interaction:**
+
+```bash
+npx @playwright/cli@latest open http://localhost:4321/form
+npx @playwright/cli@latest snapshot                  # Find form element refs
+npx @playwright/cli@latest fill e12 "user@example.com"
+npx @playwright/cli@latest fill e15 "password123"
+npx @playwright/cli@latest click e20                 # Submit button ref
+npx @playwright/cli@latest snapshot                  # Verify result
+npx @playwright/cli@latest close
+```
+
+**Check computed style via eval:**
+
+```bash
+npx @playwright/cli@latest open http://localhost:4321/page
+npx @playwright/cli@latest eval "window.getComputedStyle(document.querySelector('.panel')).zIndex"
+npx @playwright/cli@latest close
+```
+
+**Mock network response:**
+
+```bash
+npx @playwright/cli@latest open http://localhost:4321/page
+npx @playwright/cli@latest route "**/api/users" '{"users": []}'
+npx @playwright/cli@latest reload
+npx @playwright/cli@latest snapshot
+npx @playwright/cli@latest close
+```
+
+### Session Management
+
+The browser stays running between commands (persistent session). Always close when done:
+
+- `close` -- Close current session
+- `close-all` -- Close all sessions
+- `list` -- See active sessions
+
+### Artifacts
+
+Playwright CLI creates a `.playwright-cli/` directory at the current working directory containing snapshot YAML files and console logs. This directory is gitignored.
+
+### Notes
+
+- Always use `npx @playwright/cli@latest` (NOT the `playwright` CLI from the playwright npm package -- they are different)
+- The `--raw` flag strips metadata, outputting only the result value
+- Element refs (e3, e15, etc.) come from `snapshot` output -- use them in click/fill/select
+- For **color scheme testing** (light/dark), use Tier 1's headless-check.js which supports Playwright's `colorScheme` context option. Playwright CLI does not have a `--color-scheme` flag
+- If browsers are missing on a fresh machine, run: `npx playwright install chromium`
 
 ---
 
 ## When to Use What
 
-| Task | Recommended Tier |
-|------|-----------------|
+| Task | Recommended |
+|------|------------|
 | Check if page loads | Tier 1 |
-| Capture screenshot | Tier 1 |
+| Capture screenshot (no interaction) | Tier 1 |
 | Check for console errors | Tier 1 + `--no-block-resources` |
 | Check network failures | Tier 1 + `--no-block-resources` |
-| Click a button | Tier 2 |
-| Fill a form | Tier 2 |
-| Navigate through pages | Tier 2 |
+| Color scheme screenshots (light/dark) | Tier 1 (supports `colorScheme`) |
+| Inspect page structure / element tree | Tier 2 (`snapshot`) |
+| Click a button | Tier 2 (`click`) |
+| Fill a form | Tier 2 (`fill`) |
+| Navigate through pages | Tier 2 (`goto` / `go-back`) |
 | Test login flow | Tier 2 |
-| Extract text after interaction | Tier 2 |
-| Complex stateful automation | MCP Playwright |
-| Self-healing tests | MCP Playwright |
-| Deep debugging with tracing | MCP Playwright / Chrome DevTools |
+| Extract text after interaction | Tier 2 (`eval`) |
+| Check computed CSS styles | Tier 2 (`eval`) |
+| Multi-tab workflows | Tier 2 (`tab-*`) |
+| Mock network responses | Tier 2 (`route`) |
+| Complex stateful automation | Tier 3: MCP Playwright |
+| Deep debugging with tracing | Tier 2 (`tracing-*`) or MCP Playwright |
 
 ---
 
@@ -246,21 +327,22 @@ Screenshots that are captured but not visually inspected are worthless. If you s
 
 ## Best Practices
 
-1. **Start with Tier 1** - If you just need to check if a page works, use headless-check.js
-2. **Escalate to Tier 2** - When interactions are needed, write a custom Playwright script
-3. **Save scripts under `$HOME/.claude/skills/headless-browser/`** - This is where `playwright` is installed as a node_module
-4. **Clean up temp scripts** - Delete `$HOME/.claude/skills/headless-browser/tmp-*.mjs` after use
-5. **Use `waitForTimeout` between actions** - Gives the page time to settle after interactions
-6. **Capture both themes** - When checking CSS, use `colorScheme: 'light'` and `colorScheme: 'dark'`
-7. **Capture at project breakpoints** - When checking layout, read the project's breakpoint config and capture widths that cover each transition
-8. **Always visually verify** - Read every captured PNG with the Read tool before reporting
+1. **Start with Tier 1** -- If you just need to check if a page works, use headless-check.js
+2. **Escalate to Tier 2** -- When interactions or page inspection are needed, use Playwright CLI
+3. **Always close sessions** -- Run `npx @playwright/cli@latest close` when done to free resources
+4. **Use snapshots, not raw HTML** -- Playwright CLI snapshots are structured YAML with element refs, far more token-efficient than page source
+5. **Capture both themes** -- For theme testing, use Tier 1's `colorScheme` support
+6. **Capture at project breakpoints** -- When checking layout, read the project's breakpoint config and capture widths that cover each transition
+7. **Always visually verify** -- Read every captured PNG with the Read tool before reporting
 
 ---
 
 ## Technical Notes
 
-- Both tiers use Playwright's headless Chromium (installed in `$HOME/.claude/skills/headless-browser/node_modules/`)
+- **Tier 1** uses Playwright API via Node.js (installed in `$HOME/.claude/skills/headless-browser/node_modules/`)
+- **Tier 2** uses `@playwright/cli` via npx (isolated from the local playwright install, no conflicts)
+- Both tiers share the same Chromium browsers from `$HOME/.cache/ms-playwright/`
 - **Resource blocking:** By default, Tier 1 blocks images/fonts for speed. Use `--no-block-resources` for accurate error detection
-- Tier 2 scripts must be saved under `$HOME/.claude/skills/headless-browser/` so Node module resolution can find the `playwright` package in its `node_modules/`
-- Screenshots saved to `$HOME/cclogs/{repo-name}/headless-screenshots/` (Tier 1) or custom path (Tier 2)
-- Both tiers are more token-efficient than MCP Playwright
+- Screenshots saved to `$HOME/cclogs/{repo-name}/headless-screenshots/`
+- Playwright CLI creates a `.playwright-cli/` directory at CWD for snapshot artifacts (gitignored)
+- All tiers are more token-efficient than MCP Playwright (Tier 2 is ~4x more efficient)
