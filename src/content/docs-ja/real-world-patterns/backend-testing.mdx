@@ -292,6 +292,137 @@ describe("FileProcessor", () => {
 - `afterEach`のクリーンアップにより、テスト間で残存ファイルがないことを保証する
 - すべてのパスは`tempDir`からの相対パス -- テストが実際のファイルシステムに触れることはない
 
+## デプロイ後のスモークテスト（シェルスクリプト）
+
+Cloudflare Workers（またはデプロイ済みのAPI）に対して、シェルベースのスモークテストは依存関係のない高速なAPI全体フローの検証を提供します。実際のエンドポイントを叩き、テストデータを作成し、結果をアサートし、終了時にクリーンアップします。
+
+### 自動クリーンアップ付きテストスクリプト
+
+重要なパターンは`trap EXIT`で、スクリプトが途中で失敗してもテストデータを削除します：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${1:?Usage: smoke-test.sh <server-url>}"
+API="$BASE_URL/api/v1"
+PASS=0
+FAIL=0
+
+# Track resources for cleanup
+_AUTH=""
+_VAULT_ID=""
+
+cleanup() {
+  if [ -n "$_VAULT_ID" ] && [ -n "$_AUTH" ]; then
+    curl -sf -X DELETE -H "$_AUTH" "$API/vaults/$_VAULT_ID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+# --- assertions ---
+assert_eq() {
+  local label="$1" actual="$2" expected="$3"
+  if [ "$actual" = "$expected" ]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))  # ((PASS++))はNG -- 下記の注意参照
+  else
+    echo "  FAIL: $label (expected '$expected', got '$actual')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+```
+
+<Warning>
+**Bashの`set -e`と算術式の落とし穴**: `((PASS++))`は`PASS=0`のとき`0++`を評価し、0（偽）を返すため、`set -e`がスクリプトを終了させます。代わりに`PASS=$((PASS + 1))`を使用してください。
+</Warning>
+
+### デュアルE2E戦略：ローカルファースト、デプロイ後にリモート
+
+同じスモークテストスクリプトがURL引数を受け取るため、2つのモードが可能です：
+
+```json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:e2e": "bash scripts/smoke-test.sh https://my-worker.account.workers.dev",
+    "test:e2e:local": "bash scripts/smoke-test-local.sh"
+  }
+}
+```
+
+**開発ワークフロー**: まずローカル（高速フィードバック）、デプロイ後にリモート（本番検証）。
+
+ローカルラッパーは`wrangler dev`を起動し、準備完了を待ち、スモークテストを実行し、終了時にクリーンアップします：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+PORT=8799
+
+cd "$(dirname "$0")/.."
+
+# Apply local D1 migration
+wrangler d1 execute sync-db --local --file=migrations/0001_init.sql 2>/dev/null
+
+# Write local secrets (wrangler uses .dev.vars, NOT shell env vars)
+cat > .dev.vars.e2e <<'VARS'
+DEV_MODE=true
+JWT_SECRET=test-secret-for-local-e2e
+VARS
+
+wrangler dev --port "$PORT" --local --env-file .dev.vars.e2e 2>/dev/null &
+DEV_PID=$!
+
+cleanup() {
+  kill "$DEV_PID" 2>/dev/null || true
+  wait "$DEV_PID" 2>/dev/null || true
+  rm -f .dev.vars.e2e
+}
+trap cleanup EXIT
+
+# Wait for server readiness
+for i in $(seq 1 30); do
+  curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && break
+  [ "$i" -eq 30 ] && { echo "Server did not start"; exit 1; }
+  sleep 1
+done
+
+# Reuse the same smoke test
+scripts/smoke-test.sh "http://localhost:$PORT"
+```
+
+<Tip>
+**ローカル開発でのWranglerシークレット**: Wranglerはシェル環境変数をWorkerバインディングとして読み込みません。`.dev.vars`ファイルまたは`--env-file`フラグを使用してください。リモートシークレット（`wrangler secret put`）からローカル開発に移行する際のよくある落とし穴です。
+</Tip>
+
+### CI統合：デプロイ後の検証
+
+GitHub Actionsのデプロイ後ステップとしてスモークテストを追加します：
+
+```yaml
+- name: Deploy to Cloudflare Workers
+  run: cd workers/sync-server && pnpm run deploy
+  env:
+    CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+- name: Post-deploy smoke test
+  run: cd workers/sync-server && pnpm run test:e2e
+```
+
+これにより、ユニットテストでは捕捉できないデプロイ問題を検出します：シークレットの設定ミス、D1マイグレーションの未適用、R2バケットの権限、Durable Objectバインディングエラーなど。
+
+### 3段階バックエンドテスト戦略
+
+| 段階 | ツール | スコープ | タイミング |
+|------|------|-------|------|
+| ユニット | Vitest + Miniflare | 個別ハンドラー、プロセス内 | プッシュごと（CI） |
+| ローカルE2E | wrangler dev + シェルスクリプト | フルHTTPフロー、ローカルD1/R2 | 開発中 |
+| リモートE2E | curl + シェルスクリプト | デプロイ済みインフラ、実際のバインディング | デプロイ後（CI） |
+
+ユニットテストはロジックバグを捕捉。ローカルE2Eはインテグレーションバグを捕捉。リモートE2Eはインフラバグを捕捉。各段階が異なる障害クラスをカバーします。
+
 ## バックエンドテストの重要な原則
 
 1. **vitest設定で`environment: 'node'`を使用する**。`jsdom`ではなく。バックエンドコードにDOMは不要です。
