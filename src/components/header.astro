@@ -213,7 +213,7 @@ function isNavItemActive(item: (typeof settings.headerNav)[number]): boolean {
         )
       }
 
-      {lang && <LanguageSwitcher lang={lang} locales={locales} />}
+      {lang && locales.length > 1 && <LanguageSwitcher lang={lang} />}
     </div>
     <Search />
 

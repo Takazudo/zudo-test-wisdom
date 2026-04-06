@@ -65,5 +65,5 @@ export const settings = {
     { label: "Patterns", path: "/docs/real-world-patterns", categoryMatch: "real-world-patterns" },
     { label: "Tools", path: "/docs/tools-reference", categoryMatch: "tools-reference" },
     { label: "Claude", path: "/docs/claude", categoryMatch: "claude" },
-  ] satisfies HeaderNavItem[],
+  ] as HeaderNavItem[],
 };
