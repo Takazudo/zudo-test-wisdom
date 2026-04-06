@@ -292,6 +292,137 @@ The key points:
 - `afterEach` cleanup ensures no leftover files between tests
 - All paths are relative to `tempDir` -- tests never touch the real filesystem
 
+## Post-Deploy Smoke Testing with Shell Scripts
+
+For Cloudflare Workers (or any deployed API), a shell-based smoke test provides fast, dependency-free verification of the full API flow. The test hits real endpoints, creates test data, asserts results, and cleans up on exit.
+
+### Self-Cleaning Test Script
+
+The critical pattern is a `trap EXIT` that deletes test data even if the script fails mid-run:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${1:?Usage: smoke-test.sh <server-url>}"
+API="$BASE_URL/api/v1"
+PASS=0
+FAIL=0
+
+# Track resources for cleanup
+_AUTH=""
+_VAULT_ID=""
+
+cleanup() {
+  if [ -n "$_VAULT_ID" ] && [ -n "$_AUTH" ]; then
+    curl -sf -X DELETE -H "$_AUTH" "$API/vaults/$_VAULT_ID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+# --- assertions ---
+assert_eq() {
+  local label="$1" actual="$2" expected="$3"
+  if [ "$actual" = "$expected" ]; then
+    echo "  PASS: $label"
+    PASS=$((PASS + 1))  # NOT ((PASS++)) -- see gotcha below
+  else
+    echo "  FAIL: $label (expected '$expected', got '$actual')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+```
+
+<Warning>
+**Bash gotcha with `set -e` and arithmetic**: `((PASS++))` when `PASS=0` evaluates `0++` which returns 0 (falsy), causing `set -e` to exit the script. Use `PASS=$((PASS + 1))` instead.
+</Warning>
+
+### Dual E2E Strategy: Local First, Remote After Deploy
+
+The same smoke test script accepts a URL argument, enabling two modes:
+
+```json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:e2e": "bash scripts/smoke-test.sh https://my-worker.account.workers.dev",
+    "test:e2e:local": "bash scripts/smoke-test-local.sh"
+  }
+}
+```
+
+**Development workflow**: local first (fast feedback), remote after deploy (production verification).
+
+The local wrapper starts `wrangler dev`, waits for readiness, runs the smoke test, then tears down:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+PORT=8799
+
+cd "$(dirname "$0")/.."
+
+# Apply local D1 migration
+wrangler d1 execute sync-db --local --file=migrations/0001_init.sql 2>/dev/null
+
+# Write local secrets (wrangler uses .dev.vars, NOT shell env vars)
+cat > .dev.vars.e2e <<'VARS'
+DEV_MODE=true
+JWT_SECRET=test-secret-for-local-e2e
+VARS
+
+wrangler dev --port "$PORT" --local --env-file .dev.vars.e2e 2>/dev/null &
+DEV_PID=$!
+
+cleanup() {
+  kill "$DEV_PID" 2>/dev/null || true
+  wait "$DEV_PID" 2>/dev/null || true
+  rm -f .dev.vars.e2e
+}
+trap cleanup EXIT
+
+# Wait for server readiness
+for i in $(seq 1 30); do
+  curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1 && break
+  [ "$i" -eq 30 ] && { echo "Server did not start"; exit 1; }
+  sleep 1
+done
+
+# Reuse the same smoke test
+scripts/smoke-test.sh "http://localhost:$PORT"
+```
+
+<Tip>
+**Wrangler secrets in local dev**: Wrangler does NOT read shell environment variables as Worker bindings. Use a `.dev.vars` file or the `--env-file` flag. This is a common gotcha when transitioning from remote secrets (`wrangler secret put`) to local development.
+</Tip>
+
+### CI Integration: Post-Deploy Verification
+
+Add the smoke test as a post-deploy step in GitHub Actions:
+
+```yaml
+- name: Deploy to Cloudflare Workers
+  run: cd workers/sync-server && pnpm run deploy
+  env:
+    CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+- name: Post-deploy smoke test
+  run: cd workers/sync-server && pnpm run test:e2e
+```
+
+This catches deployment issues that unit tests cannot: misconfigured secrets, missing D1 migrations, R2 bucket permissions, and Durable Object binding errors.
+
+### Three-Tier Backend Testing Strategy
+
+| Tier | Tool | Scope | When |
+|------|------|-------|------|
+| Unit | Vitest + Miniflare | Individual handlers, in-process | Every push (CI) |
+| Local E2E | wrangler dev + shell script | Full HTTP flow, local D1/R2 | During development |
+| Remote E2E | curl + shell script | Deployed infra, real bindings | Post-deploy (CI) |
+
+Unit tests catch logic bugs. Local E2E catches integration bugs. Remote E2E catches infrastructure bugs. Each tier covers a different failure class.
+
 ## Key Principles for Backend Testing
 
 1. **Use `environment: 'node'`** in vitest config, not `jsdom`. Backend code does not need a DOM.
