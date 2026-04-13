@@ -25,7 +25,11 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
-import { getLogDir } from '../../../scripts/get-logdir.js';
+// Dynamic import to handle symlinked skill directories — relative paths
+// resolve against the symlink target, not $HOME/.claude/
+const { getLogDir } = await import(
+  new URL(`file://${path.join(os.homedir(), '.claude', 'scripts', 'get-logdir.js')}`).href
+);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
