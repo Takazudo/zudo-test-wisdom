@@ -210,4 +210,4 @@ PASS if ratio ∈ [0.95, 1.05] (±5%). FAIL otherwise.
 }
 ```
 
-The example shows the shape; the verification subagent reads this and follows the procedure verbatim. See the documentation page [Level 6: AI-Based Visual Verification](../../../src/content/docs/testing-levels/level-6-ai-based-verification.mdx) for the broader testing-strategy context.
+The example shows the shape; the verification subagent reads this and follows the procedure verbatim. For the broader testing-strategy context, see the project's Level 6 documentation page (`src/content/docs/testing-levels/level-6-ai-based-verification.mdx`).
