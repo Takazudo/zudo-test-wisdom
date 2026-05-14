@@ -1,6 +1,6 @@
 ---
 name: verify-ui
-description: "Verify CSS/UI changes actually match what the user asked for. Uses deterministic computed style checks to avoid LLM confirmation bias. Use when: (1) After making CSS or layout changes and the user asks to verify, (2) User says 'verify ui', 'check the result', 'confirm it works', (3) User asks to check via /headless-browser for style-related work. Use PROACTIVELY after CSS/layout changes when asked to verify. Key principle: verify what the user specifically requested, not a generic checklist."
+description: "Verify CSS/UI changes match what the user asked for. Uses deterministic computed style checks to avoid LLM confirmation bias. Use when: (1) After CSS or layout changes the user asks to verify, (2) User says 'verify ui', 'check the result', 'confirm it works', (3) User asks to check via /headless-browser for style work. Use PROACTIVELY after CSS/layout changes when asked to verify."
 ---
 
 # Verify UI

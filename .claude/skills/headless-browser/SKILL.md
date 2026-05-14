@@ -1,6 +1,6 @@
 ---
 name: headless-browser
-description: "Browser automation with two efficiency tiers. Tier 1: headless-check.js for quick health checks, screenshots, error detection (JSON output). Tier 2: Playwright CLI (@playwright/cli via npx) for interactive browser automation -- click, fill, navigate, take snapshots with YAML element refs (4x more token-efficient than MCP). Use when: (1) Quick webpage health checks, (2) Taking screenshots, (3) Checking console/network errors, (4) Clicking buttons, filling forms, navigating, (5) Multi-step browser interaction with element inspection. Use MCP Playwright only for complex scenarios requiring persistent context."
+description: "Browser automation with two efficiency tiers. Tier 1: headless-check.js for quick health checks, screenshots, error detection (JSON output). Tier 2: Playwright CLI (@playwright/cli via npx) for interactive automation — click, fill, navigate, snapshots with YAML element refs (4x more token-efficient than MCP). Use when: (1) Quick page health checks, (2) Screenshots, (3) Console/network errors, (4) Form filling/navigating, (5) Multi-step interaction. Use MCP Playwright only for complex persistent context."
 ---
 
 # Headless Browser Skill
