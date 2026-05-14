@@ -66,12 +66,12 @@ The skill is **per-task**, not per-app. A project will accumulate multiple test-
 
 #### Authoring checklist
 
-- [ ] Name follows convention: `test-flow-<short-topic-slug>` (e.g. `test-flow-composer-image-same-size`).
+- [ ] Name follows convention: `test-flow-<short-topic-slug>` (e.g. `test-flow-canvas-image-parity`).
 - [ ] Description includes the trigger keywords plus a one-line "use when" — the test-flow skill is triggered by the verification subagent's prompt, so it must load when the subagent reads its instructions.
 - [ ] Body is **self-contained** — the subagent starts fresh with NO conversation history. Everything needed to drive and verdict the test goes in the body.
 - [ ] Procedure is numbered and concrete — exact selectors, exact URLs, exact viewport sizes, exact fixture paths.
 - [ ] Verdict criteria are mechanical where possible (tolerance numbers, pixel deltas) and AI-judgment-only where unavoidable.
-- [ ] Output schema is explicit — what fields the subagent must return (e.g. `pgenImageWidth`, `composerImageWidth`, `ratio`, `verdict`, `summary`, `screenshotPaths`).
+- [ ] Output schema is explicit — what fields the subagent must return (e.g. `stageAImageWidth`, `stageBImageWidth`, `ratio`, `verdict`, `summary`, `screenshotPaths`).
 - [ ] Skill is committed to the repo (project-scope), not left in `$HOME/.claude/skills/`.
 
 Use the `skill-creator` skill's `init_skill.py` to scaffold the new test-flow skill, then write its body.
@@ -101,7 +101,7 @@ The subagent's prompt must include:
 You are a verification subagent. Produce a structured verdict using the test-flow skill below.
 
 ## Goal
-{one-sentence verdict goal, e.g. "Determine whether the composer-side image visually matches the pgen-side image at default landing viewport."}
+{one-sentence verdict goal, e.g. "Determine whether the Stage B (second-canvas) image visually matches the Stage A (first-canvas) image at default landing viewport."}
 
 ## Skills to load
 - /test-flow-<topic>  — the test procedure and verdict criteria. Read this first.
@@ -139,13 +139,13 @@ Because L6 verdicts are non-repeatable, **archive the evidence after every run**
 - The exact prompt the subagent ran
 - Any internal-state dumps captured during the run
 
-Attach them to the PR comment, write them to an evidence directory under the project log dir, or both. A future maintainer asking "did this ever actually pass?" needs to find the artifact, not re-run the test.
+**Default destination: the GitHub issue or PR comment** that drove the work. Screenshots accumulate quickly across runs; committing them into the repo bloats the working tree over time. Issue/PR comments keep the evidence linked to the conversation that produced it and the repo stays lean. The repo-side alternative — an `evidence/` directory or similar — is a valid choice when issue/PR comments aren't available or when project policy requires evidence to travel with the code. Absent a specific policy, post to the issue/PR comment.
 
 ## Choosing the browser-driving skill — primary vs fallback
 
 | Skill | Best for | When to fall back |
 |---|---|---|
-| `/verify-ui` | Deterministic computed-style checks; pure pgen-vs-composer parity; CSS / layout assertions | Cannot drive multi-step UI flows beyond single-page reads |
+| `/verify-ui` | Deterministic computed-style checks; cross-stage CSS / layout parity assertions | Cannot drive multi-step UI flows beyond single-page reads |
 | `/headless-browser` | Multi-step interactive flows (drag-drop a file, click → screenshot → click → screenshot); element bounding-rect reads via Playwright CLI | Slightly heavier; only use when /verify-ui can't reach the test surface |
 
 The test-flow skill should name BOTH so the subagent picks based on the task shape. If `/verify-ui` returns "cannot perform this flow" the subagent switches to `/headless-browser` without re-prompting the parent.
@@ -172,40 +172,40 @@ Sign that you're using this pattern correctly:
 
 ```markdown
 ---
-name: test-flow-composer-image-same-size
-description: Verify the composer-side image visually matches the pgen-side image at default landing viewport. Use when /verify-ui-ai dispatches a subagent for issue #1678 / composer-image-same-size verification.
+name: test-flow-canvas-image-parity
+description: Verify the Stage B (second-canvas) image visually matches the Stage A (first-canvas) image at default landing viewport. Use when /verify-ui-ai dispatches a subagent for canvas-image-parity verification.
 ---
 
-# Test flow: composer image same size as pgen
+# Test flow: canvas image parity (Stage A vs Stage B)
 
 ## Scenario
 1. Open <preview URL from inputs> at viewport 1440x900.
-2. Click the first template card.
-3. Click "Start cropping the pattern".
-4. Drop `packages/pattern-gen-viewer/e2e/fixtures/red-100-fits-composition.png` on the pgen canvas-layer.
-5. Capture screenshot A (pgen with image visible).
-6. Click "Commit selection and open Composer".
-7. Wait for composer mount (composer-art-canvas visible).
-8. Capture screenshot B (composer with image visible).
+2. Open the entry that lands on Stage A (the first canvas).
+3. Begin the selection / cropping mode for Stage A.
+4. Drop the fixture image (e.g. `<repo>/e2e/fixtures/red-100-fits-canvas.png`) onto the Stage A canvas layer.
+5. Capture screenshot A (Stage A with the placed image visible).
+6. Advance to Stage B (e.g. click the "commit and open next stage" affordance).
+7. Wait for the Stage B canvas to mount and become visible.
+8. Capture screenshot B (Stage B with the placed image visible).
 
 ## Measurements
-- pgen image width (CSS px): read via `__pgenLayerState.getSelectedLayerTransform()` + pgen canvas CSS scale.
-- composer image width (CSS px): read via `__composerTest.getState()` + cameraZoom + composer canvas CSS rect.
-- ratio = composer / pgen.
+- Stage A image width (CSS px): read via a test-only hook on the Stage A layer state plus the Stage A canvas CSS scale.
+- Stage B image width (CSS px): read via a test-only hook on the Stage B state plus the Stage B camera zoom and canvas CSS rect.
+- ratio = stageB / stageA.
 
 ## Verdict
 PASS if ratio ∈ [0.95, 1.05] (±5%). FAIL otherwise.
 
 ## Output schema
 {
-  pgenImageWidth: number,
-  composerImageWidth: number,
+  stageAImageWidth: number,
+  stageBImageWidth: number,
   ratio: number,
   delta: number,
   verdict: "PASS" | "FAIL",
   summary: string,
-  pgenScreenshot: string (path),
-  composerScreenshot: string (path),
+  stageAScreenshot: string (path),
+  stageBScreenshot: string (path),
   toolUsed: "verify-ui" | "headless-browser"
 }
 ```

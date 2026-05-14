@@ -30,16 +30,26 @@ Escalate **only** when **both** of these are true:
 
 If only one of the two is true, the right answer is the other tier — not L6.
 
-## Worked Example: Composer-Pgen Image Parity
+## Worked Example: Canvas-to-Canvas Image Parity
 
-The motivating case: [zudolab/zudo-pattern-gen#1678](https://github.com/zudolab/zudo-pattern-gen/issues/1678#issuecomment-4450099767). A photo-editor-style UI with two stages (pgen + composer), each running its own canvas with independent camera/zoom state and resizable image layers. The user needed to confirm that an image dropped on the pgen canvas appears at the same visual size after transitioning into the composer.
+The motivating case was a web app with two canvas-based stages, each running its own camera/zoom transform stack. The user drops an image onto the **first canvas**, frames it inside a clip rectangle, and advances to the **second canvas** where the image continues to be editable inside the clipped region. The visual contract: the image should appear at the same effective size relative to its containing canvas after the handoff.
+
+The bug — the image renders at the wrong size relative to the second canvas:
+
+**Stage A (first canvas, expected):** dark gray app chrome around a white canvas. Green rectangle = the user's clip selection. Red square = the placed image, centered inside the clip.
+
+![Stage A: first canvas showing the placed image fitting inside the clip rectangle](/pj/zudo-test/img/docs/level-6/stage-a-canvas-with-clip-and-image.png)
+
+**Stage B (second canvas, buggy):** the second canvas is rendered at the clip-rect's dimensions, but the placed image is painted at the same physical pixel size as in Stage A — making it appear visually too large relative to the smaller canvas. The image-to-canvas ratio diverges between the two stages.
+
+![Stage B: second canvas where the image's ratio to the canvas does not match Stage A](/pj/zudo-test/img/docs/level-6/stage-b-canvas-image-mismatched.png)
 
 Why neither L4 nor L5 worked cleanly:
 
-- **L4 was intractable:** the drop-target is a canvas layer, not a DOM element. Both stages have their own camera transforms, zoom, and pan state. Writing a deterministic E2E required reverse-engineering both transform stacks just to assert on the visual size after the handoff. Several attempts produced flaky specs.
+- **L4 was intractable:** the drop target is the canvas surface, not a DOM element. Both stages have their own camera transforms, zoom, and pan state. Writing a deterministic E2E required reverse-engineering both transform stacks just to assert on the visual size after the handoff. Several attempts produced flaky specs.
 - **L5 couldn't reach the assertion:** there is no DOM element with a stable bounding rect for the image in either stage. Screenshot pixel-diff was too noisy because of canvas anti-aliasing.
 
-The practical path: a per-task **test-flow skill** that documents the procedure (drop fixture → screenshot pgen → click commit → screenshot composer → read internal state) and an AI subagent that loads it, drives the flow, and produces a PASS/FAIL with a ratio measurement and both screenshots attached.
+The practical path: a per-task **test-flow skill** that documents the procedure (drop fixture → screenshot Stage A → advance → screenshot Stage B → read internal state hooks for both canvases) and an AI subagent that loads it, drives the flow, and produces a PASS/FAIL with a ratio measurement plus both screenshots attached.
 
 This is what L6 is for — and only this kind of case.
 
@@ -70,7 +80,7 @@ L6 is a one-shot evidence tool. It clears a difficult problem **once**. Long-ter
 
 - **Pin part of the surface mechanically.** If L4 can verify the canvas mounts and accepts a drop, but cannot verify the visual result, write the L4 spec for what it *can* verify and use L6 for the residual.
 - **Snapshot the AI verdict.** When L6 passes, save the screenshots + verdict + prompt to the PR or to a tracked evidence directory. Future regressions can compare against the snapshot before reaching for L6 again.
-- **Extract a measurement.** If the L6 run computes a numerical ratio (e.g. "composer width / pgen width = 1.02"), that number can later become an L5 assertion against an internal state hook — even if the rendered surface stays opaque to the DOM.
+- **Extract a measurement.** If the L6 run computes a numerical ratio (e.g. "Stage B image width / Stage A image width = 1.02"), that number can later become an L5 assertion against an internal state hook — even if the rendered surface stays opaque to the DOM.
 
 ## Risks and Limitations
 
@@ -82,7 +92,11 @@ L6 is a one-shot evidence tool. It clears a difficult problem **once**. Long-ter
 
 ## Archive Results for Auditability
 
-Because L6 verdicts are non-repeatable, **archive the evidence**: screenshots, structured verdict, the prompt the subagent ran, and any internal-state dumps. Attach them to the PR comment, write them to an evidence directory under the project log dir, or both. A future maintainer asking "did this ever actually pass?" needs to be able to find the artifact, not re-run the test.
+Because L6 verdicts are non-repeatable, **archive the evidence**: screenshots, the structured verdict, the prompt the subagent ran, and any internal-state dumps. A future maintainer asking "did this ever actually pass?" needs to be able to find the artifact, not re-run the test.
+
+**Default destination: the GitHub issue or PR comment** that drove the work. Screenshots accumulate every time L6 is run; committing them into the repo grows the working tree indefinitely and slows clones over time. Issue and PR comments keep the evidence permanently linked to the conversation that produced it, the repo stays lean, and reviewers can scroll the comment thread to see what each verification round looked like.
+
+The repo-side alternative — an `evidence/` directory or similar — is a valid project choice when issue/PR comments aren't an option (e.g., internal repos with no centralized issue tracker, or when the evidence must travel with the code). If your project prefers that pattern, follow it. But absent a specific policy, post to the issue/PR comment.
 
 ## L6 Is Not a Substitute For
 
