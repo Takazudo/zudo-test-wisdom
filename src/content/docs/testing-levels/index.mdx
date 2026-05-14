@@ -1,12 +1,12 @@
 ---
-title: The 5 Testing Levels
-description: Introduction to the five testing levels for frontend verification.
+title: The 6 Testing Levels
+description: Introduction to the six testing levels for frontend verification.
 sidebar_position: 1
 ---
 
 ## Overview
 
-Frontend testing is not a single activity -- it is a spectrum of verification methods, each with different capabilities and blind spots. This section defines five distinct levels, ordered by the scope of what they can verify.
+Frontend testing is not a single activity -- it is a spectrum of verification methods, each with different capabilities and blind spots. This section defines six distinct levels, ordered by the scope of what they can verify. Levels 1–5 are deterministic; Level 6 is an AI-judged final-resort tier reserved for surfaces the lower levels cannot reach.
 
 ```mermaid
 graph LR
@@ -14,6 +14,7 @@ graph LR
   L2 --> L3[Level 3<br/>Build Output]
   L3 --> L4[Level 4<br/>E2E Browser]
   L4 --> L5[Level 5<br/>Visual Verify]
+  L5 -. final resort .-> L6[Level 6<br/>AI-Based<br/>not for CI]
 ```
 
 ## Summary Table
@@ -25,6 +26,7 @@ graph LR
 | 3 | Build Output | vitest on built files | SSG output, templates, bundler config | Runtime behavior, visuals |
 | 4 | E2E Browser | Playwright, headless-browser | User interactions, navigation, full page | Subtle visual details |
 | 5 | Deterministic + Visual | verify-ui + headless-browser | Computed styles, pixel-level rendering | Minimal blind spots |
+| 6 | AI-Based Visual (final resort, **not for CI**) | verify-ui-ai + per-task test-flow skill + AI subagent | Surfaces L4 cannot drive cleanly and L5 cannot assert on (canvas, photo-editor, zoom/resize) | Non-deterministic; cost-bearing; not reproducible |
 
 ## The Escalation Rule
 
@@ -36,12 +38,13 @@ The levels are ordered by coverage breadth. Each higher level catches categories
 
 ## Choosing the Right Level
 
-Not every task requires Level 5. The goal is to match the test level to the nature of the change:
+Not every task requires Level 5 — and Level 6 is reserved for genuine corner cases. The goal is to match the test level to the nature of the change:
 
 - **Logic changes** -- Level 1 is sufficient
 - **Component behavior** -- Level 2 covers it
 - **Build configuration** -- Level 3 targets it
 - **Interactive flows** -- Level 4 is needed
 - **Visual/CSS bugs** -- Level 5 is required
+- **Canvas / photo-editor / zoom-resize where L4 is intractable AND L5 cannot reach** -- Level 6, as a one-time final resort
 
 See the [Decision Guide](/pj/zudo-test-wisdom/docs/decision-guide) for a detailed mapping table.

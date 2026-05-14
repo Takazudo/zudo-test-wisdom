@@ -39,8 +39,9 @@ The test level must match what you are actually verifying:
 | Build output contains expected content | Level 3 |
 | A user flow works in the browser | Level 4 |
 | Something is visually correct | Level 5 |
+| A canvas / photo-editor surface where L4 is intractable AND L5 cannot reach | Level 6 (final resort, not for CI) |
 
-Do not use Level 1 for a Level 5 problem. The test will pass, but the bug will remain.
+Do not use Level 1 for a Level 5 problem. The test will pass, but the bug will remain. Do not jump to Level 6 just because L4 is hard or L5 is awkward — L6 requires that *both* lower tiers are genuinely intractable.
 
 ### Rule 3: Escalate When Lower Levels Pass But Problem Persists
 
@@ -51,6 +52,7 @@ When a test passes but the user says the problem is not fixed:
 3. **Do** escalate to the next testing level
 4. If already at Level 4, escalate to Level 5
 5. If at Level 5, investigate deeper (check ancestor elements, stacking context, etc.)
+6. Only escalate to Level 6 (AI-based) when **both** L4 is intractable to write *and* L5 cannot reach the assertion. L6 is not the next step after L5 by default — it is reserved for canvas / photo-editor surfaces where no deterministic check is feasible.
 
 <Warning>
 **Never suggest "clear browser cache" or "hard refresh" as a solution.** If the user says it is still broken, the code is still broken. Investigate the actual cause.
