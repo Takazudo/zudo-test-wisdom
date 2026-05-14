@@ -18,6 +18,7 @@ Use this table to determine the minimum testing level for your current task:
 | Visual bug report | Level 5 | Must see computed styles + visual result |
 | "It's not showing" | Level 5 | Visibility is a visual property |
 | "It's still broken" (after test passed) | Next level up | Current level has blind spot for this bug |
+| Canvas / photo-editor / zoom-resize surface where L4 is intractable AND L5 cannot reach | Level 6 (final resort) | Neither E2E nor mechanical visual can express the assertion |
 
 <Warning>
 **"Minimum level" means the lowest level that can reliably catch the bug.** Using a lower level gives false confidence -- the test passes, but the bug remains.
@@ -40,6 +41,8 @@ flowchart TD
   F -->|No| G{Is it visual/CSS?}
   G -->|Yes| L5b[Level 5: Visual Verification]
   G -->|No| L1b[Level 1: Start with Unit Test]
+  L4 -. L4 intractable AND L5 unreachable .-> L6[Level 6: AI-Based<br/>final resort, not for CI]
+  L5b -. L4 intractable AND L5 unreachable .-> L6
 ```
 
 ## Key Principle: CSS Always Needs Level 5
@@ -62,3 +65,12 @@ Move to the next level when:
 - Lower-level test confirms data is correct but output looks wrong
 - You suspect a CSS or layout issue
 - Multiple lower-level tests pass but the feature does not work in the browser
+
+## The L6 Escalation Rule
+
+Escalation to [Level 6 (AI-based)](../testing-levels/level-6-ai-based-verification.mdx) is **not** part of the normal next-level progression. It requires **both** of these to be true at the same time:
+
+1. **L4 is intractable.** Writing a clean E2E for this surface is genuinely infeasible — canvas-driven, multi-camera/zoom, stateful resize transforms, or similar — not just "harder than usual."
+2. **L5 cannot reach the assertion.** There is no DOM element with a stable bounding rect, computed styles don't apply (the surface is `<canvas>`), and screenshot pixel-diff is too noisy.
+
+If only one of the two is true, the right answer is the other tier. L6 is the final resort, not "the next thing to try when L5 is hard."

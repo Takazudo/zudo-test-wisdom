@@ -103,3 +103,14 @@ The `overflow: hidden` + `height: 0` pattern is just one variant. Other common c
 <Warning>
 **Never declare a visual bug fixed based on a logic test.** If the user says something is not visible, the test must verify visibility -- and that requires Level 5.
 </Warning>
+
+## What If Level 5 Cannot Reach the Surface?
+
+Most visibility bugs are caught by Level 5 because the element has a DOM bounding rect, computed styles, and pixel content a screenshot diff can compare. But canvas-based and photo-editor-style surfaces sometimes don't expose any of that — the rendered image lives inside a `<canvas>` element with no stable DOM child to assert on, and screenshot pixel-diff is too noisy to be reliable.
+
+When **both** of these are true at once:
+
+- L4 is intractable to write (canvas drop targets, multi-camera transforms, resizable layers)
+- L5 cannot reach the assertion (no DOM rect, computed styles don't apply, pixel-diff too noisy)
+
+…then [Level 6 (AI-based)](../testing-levels/level-6-ai-based-verification.mdx) is the final resort. It is **not** the next thing to try when L5 is merely awkward — L6 is non-deterministic, cost-bearing, and not appropriate for CI. Reach for it only when there is no deterministic path to the assertion.

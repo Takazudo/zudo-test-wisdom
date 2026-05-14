@@ -1,0 +1,97 @@
+---
+title: "Level 6: AI-Based Visual Verification"
+description: Final-resort tier — AI judges whether a problem is resolved when neither L4 nor L5 can reach the assertion.
+sidebar_position: 7
+---
+
+<Danger>
+**L6 is the final resort.** It is **not** for routine use, and **never** for CI gates. AI verdicts are non-deterministic, cost-bearing, and not reproducible across runs. Use only when L4 (E2E) is intractable to write *and* L5 (mechanical visual) cannot reach the assertion. If you can express the check as a Playwright spec or a computed-style assertion, do that instead.
+</Danger>
+
+## What Level 6 Tests
+
+Level 6 produces a **visual verdict from an AI subagent**. The subagent loads a per-task **test-flow skill** (the procedure + verdict criteria) plus a browser-driving skill, drives the UI, and returns a structured PASS/FAIL with evidence. The judgment itself is the verdict — there is no deterministic assertion behind it.
+
+This is fundamentally different from L5:
+
+| Level | Verdict mechanism | Deterministic? |
+|-------|------------------|----------------|
+| L5 | Computed-style check or screenshot pixel-diff against a threshold | Yes |
+| L6 | AI subagent looks at screenshots / measurements and judges | **No** |
+
+L6 is for the residual class of problems where capturing "the right thing" for L5 to assert on is itself intractable.
+
+## When to Escalate to L6
+
+Escalate **only** when **both** of these are true:
+
+1. **L4 (E2E) is intractable.** The UI is too complex, stateful, or canvas-driven to drive cleanly from Playwright. Examples: zoomable photo editors, free-form drawing surfaces, multi-layer compositing with resizable objects, drag-snap-resize interactions where every step depends on previous transforms.
+2. **L5 (mechanical visual) cannot reach the assertion.** Computed-style checks don't apply (the surface is `<canvas>`). Screenshot pixel-diff is too noisy (anti-aliasing, sub-pixel rendering, animation in-flight). DOM bounding rects don't expose the visual size of canvas-rendered content.
+
+If only one of the two is true, the right answer is the other tier — not L6.
+
+## Worked Example: Composer-Pgen Image Parity
+
+The motivating case: [zudolab/zudo-pattern-gen#1678](https://github.com/zudolab/zudo-pattern-gen/issues/1678#issuecomment-4450099767). A photo-editor-style UI with two stages (pgen + composer), each running its own canvas with independent camera/zoom state and resizable image layers. The user needed to confirm that an image dropped on the pgen canvas appears at the same visual size after transitioning into the composer.
+
+Why neither L4 nor L5 worked cleanly:
+
+- **L4 was intractable:** the drop-target is a canvas layer, not a DOM element. Both stages have their own camera transforms, zoom, and pan state. Writing a deterministic E2E required reverse-engineering both transform stacks just to assert on the visual size after the handoff. Several attempts produced flaky specs.
+- **L5 couldn't reach the assertion:** there is no DOM element with a stable bounding rect for the image in either stage. Screenshot pixel-diff was too noisy because of canvas anti-aliasing.
+
+The practical path: a per-task **test-flow skill** that documents the procedure (drop fixture → screenshot pgen → click commit → screenshot composer → read internal state) and an AI subagent that loads it, drives the flow, and produces a PASS/FAIL with a ratio measurement and both screenshots attached.
+
+This is what L6 is for — and only this kind of case.
+
+## How to Use `/verify-ui-ai`
+
+The L6 entry point is the project-scope skill [`/verify-ui-ai`](../claude-skills/verify-ui-ai.mdx). It runs in two halves:
+
+1. **Author a per-task test-flow skill** at `.claude/skills/test-flow-<topic>/SKILL.md` capturing:
+   - the exact scenario (selectors, fixture paths, viewport sizes)
+   - what to capture (screenshots, internal-state reads)
+   - the verdict criteria (PASS/FAIL with explicit tolerances where mechanical, AI judgment where unavoidable)
+   - the output schema (named fields the subagent must return)
+2. **Dispatch a verification subagent** via the Agent tool. The subagent loads the test-flow skill plus a browser-driving skill (`/verify-ui` primary, `/headless-browser` fallback), runs the procedure, and returns the structured verdict.
+
+The test-flow skill is the durable artifact. Subsequent runs reuse it — the procedure is locked in, the subagent gets the same context each time.
+
+## Prefer Project-Scope Test-Flow Skills
+
+Author the test-flow skill under `.claude/skills/test-flow-<topic>/` (project-scope, checked into the repo), **not** under `$HOME/.claude/skills/` (personal-only). Reasons:
+
+- The verdict procedure is part of the codebase's testing strategy. The team needs to see it, review it, and update it as the UI evolves.
+- A personal-only skill creates verdict drift — a teammate running the "same" test against a different procedure produces incomparable results.
+- Project-scope skills are picked up by the same `setup:doc-skill` script that wires the repo's other tracked skills.
+
+## Pair with Deterministic Specs When Possible
+
+L6 is a one-shot evidence tool. It clears a difficult problem **once**. Long-term coverage still needs a deterministic spec — even a partial one. Patterns that work:
+
+- **Pin part of the surface mechanically.** If L4 can verify the canvas mounts and accepts a drop, but cannot verify the visual result, write the L4 spec for what it *can* verify and use L6 for the residual.
+- **Snapshot the AI verdict.** When L6 passes, save the screenshots + verdict + prompt to the PR or to a tracked evidence directory. Future regressions can compare against the snapshot before reaching for L6 again.
+- **Extract a measurement.** If the L6 run computes a numerical ratio (e.g. "composer width / pgen width = 1.02"), that number can later become an L5 assertion against an internal state hook — even if the rendered surface stays opaque to the DOM.
+
+## Risks and Limitations
+
+- **Non-deterministic.** The same flow can return different verdicts across runs. Treat any single PASS as one data point.
+- **Cost-bearing.** Each L6 run spawns a subagent, drives a browser, and consumes tokens. Cost is non-trivial even locally; on CI it compounds rapidly and unpredictably.
+- **Hallucination risk.** An AI judge can confidently report PASS on a broken UI if the test-flow skill's verdict criteria are vague. Tighten the criteria with explicit thresholds wherever possible — leave AI judgment only for the genuinely subjective part.
+- **Verdict drift.** Different runs of the same procedure with different model versions may judge edge cases differently. Lock the procedure in the test-flow skill; do not inline criteria into ad-hoc prompts.
+- **Not reproducible.** A failed L6 run cannot be replayed deterministically to debug the failure. Capture screenshots and internal-state dumps in the output schema so the failure is investigable even when the verdict isn't reproducible.
+
+## Archive Results for Auditability
+
+Because L6 verdicts are non-repeatable, **archive the evidence**: screenshots, structured verdict, the prompt the subagent ran, and any internal-state dumps. Attach them to the PR comment, write them to an evidence directory under the project log dir, or both. A future maintainer asking "did this ever actually pass?" needs to be able to find the artifact, not re-run the test.
+
+## L6 Is Not a Substitute For
+
+| Situation | Use this instead of L6 |
+|----------|------------------------|
+| CSS / layout regression on a normal DOM surface | L5 (`/verify-ui` + screenshot) |
+| Interactive flow on a normal DOM surface | L4 (Playwright spec) |
+| Logic correctness | L1 (unit test) |
+| Recurring regression gate in CI | A deterministic spec — write the L4 / L5 / L1 once, even if it's narrower than the ideal check |
+| Quick sanity check before a PR | L5 — L6 is too expensive for routine use |
+
+L6 earns its place only when the alternatives are genuinely intractable for the specific surface being verified.
