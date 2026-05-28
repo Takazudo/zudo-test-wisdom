@@ -197,3 +197,146 @@ describe("Worker with D1", () => {
 <Tip>
 Miniflareは同じWorkersランタイムをローカルで実行するため、インテグレーションテストは本番環境の動作に近くなります。D1とR2のバインディングを組み合わせることで、デプロイなしに完全なデータフローをテストできます。
 </Tip>
+
+## happy-dom の落とし穴
+
+happy-dom は高速ですが、自分のコードをいくら読み返しても気づけない挙動がいくつかあります。これらはフレームワーク固有のクセだからです。zfb-runtime のクライアントルーターのテストから、特に発見に時間を要したエスケープハッチと、import 順序に関する罠を紹介します。
+
+### シムで実ファイルの読み込みを無効化する
+
+テストが `<link rel="stylesheet">` や `<script src>` タグを挿入すると、happy-dom は実際のネットワークフェッチを試みます。テストを外部依存のない状態に保つため、これらを最初に無効化します。さらに無効化された読み込みを「成功した」とみなすことで、load イベントは引き続き発火します：
+
+```typescript
+// _helpers.ts
+type HappyDOMWindow = Window & {
+  happyDOM: {
+    settings: Record<string, boolean>;
+    waitUntilComplete: () => Promise<void>;
+  };
+};
+
+export function installHappyDomShim(): void {
+  const w = window as unknown as HappyDOMWindow;
+  w.happyDOM.settings["disableJavaScriptFileLoading"] = true;
+  w.happyDOM.settings["disableCSSFileLoading"] = true;
+  w.happyDOM.settings["disableIframePageLoading"] = true;
+  w.happyDOM.settings["handleDisabledFileLoadingAsSuccess"] = true;
+}
+```
+
+<Warning>
+`installHappyDomShim()` は、`describe`/`beforeEach` での DOM 操作よりも前、モジュールのトップレベルで呼び出してください。最初のタグ挿入よりも前に設定が有効になっている必要があります。さもないと最初のフェッチがすり抜けてしまいます。
+</Warning>
+
+### `afterEach` で保留中の非同期タスクをドレインする
+
+ファイル読み込みを無効化しても、happy-dom は依然として非同期処理（たとえば無効化されたスタイルシートの load イベントなど）をキューに入れます。その処理が保留中のまま Vitest が環境をティアダウンすると、アサーションとは無関係なフレーキーなティアダウンエラーが発生します。明示的にドレインしましょう：
+
+```typescript
+// _helpers.ts
+export async function drainHappyDom(): Promise<void> {
+  const w = window as unknown as HappyDOMWindow;
+  await w.happyDOM.waitUntilComplete();
+}
+```
+
+```typescript
+// router.test.ts
+afterEach(async () => {
+  await drainHappyDom();
+});
+```
+
+### ドキュメントは実 DOM API でリセットする
+
+テスト間のリセットとして自然なのは `document.body.innerHTML = ""` です。しかし、直前のテストが `replaceWith()` で body 要素を差し替えていた場合、このショートカットでは `getElementById` の内部状態が古いまま残り、参照が誤ったノードを返し始めます。代わりに標準の DOM API で body を作り直してください：
+
+```typescript
+// _helpers.ts
+export function resetDocument(): void {
+  document.head.innerHTML = "";
+  if (document.body) document.body.remove();
+  document.documentElement.appendChild(document.createElement("body"));
+}
+```
+
+<Note>
+`createElement("body")` と `appendChild` で要素を作り直すと、happy-dom の内部ノードレジストリがクリーンにリセットされます。body が以前に差し替えられている場合、`innerHTML = ""` ではこれが行われません。
+</Note>
+
+### モジュール評価タイミングの罠（核心となる気づき）
+
+これは、テストコードだけを見ても論理的に導き出すことが本当に不可能なものです。一部のモジュールは**モジュール評価時**――後から呼び出す関数の中ではなく、最初に import された瞬間――にライブのドキュメントを読み取ります。クライアントルーターはトップレベルでオプトイン用の `<meta>` タグをチェックします。そのタグを注入する前にルーターを import してしまうと、ルーターはすでにページがオプトインされていないと判断しており、後からどれだけ DOM をセットアップしても修正できません。
+
+解決策は、先にタグを注入してから、テスト対象モジュールを `import` することです：
+
+```typescript
+// router.test.ts
+import { drainHappyDom, installHappyDomShim, resetDocument } from "./_helpers.js";
+
+installHappyDomShim();
+
+// Inject the opt-in meta tag BEFORE importing the router module, so the
+// module's top-level branch sees the page as opted-in.
+// router.ts reads the live document at module-eval time.
+function enableTransitions(): void {
+  const meta = document.createElement("meta");
+  meta.setAttribute("name", "zfb-view-transitions-enabled");
+  meta.setAttribute("content", "true");
+  document.head.appendChild(meta);
+}
+enableTransitions();
+
+// Late import after the document is primed.
+import { init, navigate } from "../../client-router/router.js";
+```
+
+<Danger>
+テスト対象モジュールが評価時に `document`（あるいは任意のグローバル）を読み取る場合、ファイル先頭の静的な `import` はそのコードを即座に実行します。セットアップを import より前に配置するか、ドキュメントの準備が整った後に置く動的な `await import(...)` に切り替えてください。ESM は静的 import を周囲の文よりも上に巻き上げる（ホイスティング）ため、それより上の行に書いた DOM 操作を、通常の `import` は観測*しません*。観測されるのは、それらの操作がより早く評価されるモジュール内にある場合だけです。
+</Danger>
+
+### おまけ：`startViewTransition` をモックして両方の経路をテストする
+
+`document.startViewTransition` はプログレッシブエンハンスメントの API です。happy-dom はこれを実装していないため、View Transition の経路とプレーンなフォールバックの両方をカバーしたくなります。`vi` でその存在・不在をスタブします：
+
+```typescript
+// router.test.ts
+it("uses the View Transitions path when available", async () => {
+  vi.stubGlobal("document", {
+    ...document,
+    startViewTransition: vi.fn((cb: () => void) => {
+      cb();
+      return { finished: Promise.resolve(), ready: Promise.resolve() };
+    }),
+  });
+  // ...drive navigate() and assert the transition branch ran
+});
+
+it("falls back to a plain DOM swap when the API is absent", async () => {
+  // happy-dom has no startViewTransition by default -- assert the fallback
+  // ...drive navigate() and assert no transition was started
+});
+```
+
+## 信頼できる唯一の情報源を守る
+
+ある定数が単一のソースファイルにのみ存在するのに、2 つの異なる import チェーンを通じて参照される場合――たとえば TypeScript の ESM エントリと手書きの `.mjs` bin など――、どちらかのチェーンが壊れると 2 つのコピーは静かに分岐しうります。ごく小さな「メタ」テストが両者を固定します。zfb-adapter-cloudflare では、ワーカーラッパーの文字列が `src/build.ts` から 1 回、`bin/cli.mjs` 経由の再エクスポートで 1 回 import され、たった 1 つのアサーションが両者の分岐を防ぎます：
+
+```typescript
+// cli.test.ts
+import { WORKER_WRAPPER_SOURCE as TS_WRAPPER } from "../build.js";
+// CLI helper is a sibling .mjs re-exporting the same canonical constant.
+import { WORKER_WRAPPER_SOURCE as MJS_WRAPPER } from "../../bin/cli.mjs";
+
+describe("single source of truth", () => {
+  it("the .mjs bin re-exports the same wrapper as build.ts", () => {
+    // Both ultimately import from the canonical src/worker-wrapper.mjs,
+    // so they must be byte-identical. This catches import-chain breakage.
+    expect(MJS_WRAPPER).toBe(TS_WRAPPER);
+  });
+});
+```
+
+<Tip>
+このパターンを一般化しましょう。「本来は 1 つであるべき」値が 2 つの消費側で共有されているとき、それは静かに分岐しうります。1 つの `toBe` がそれを捕捉します。同じ形は「この TypeScript の enum はあの JSON 設定と一致していなければならない」や「この `.d.ts` の宣言はランタイムのエクスポートと一致していなければならない」にも当てはまります。値がモジュール境界をまたいで――あるいは生成ファイルとそのソースの間で――重複しているときは常に、1 つの等価アサーションが、静かな分岐を失敗するテストへと変えてくれます。
+</Tip>

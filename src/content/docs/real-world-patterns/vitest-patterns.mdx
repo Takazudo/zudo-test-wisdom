@@ -197,3 +197,146 @@ describe("Worker with D1", () => {
 <Tip>
 Miniflare runs the same Workers runtime locally, so integration tests closely match production behavior. Combined with D1 and R2 bindings, you can test full data flows without deploying.
 </Tip>
+
+## happy-dom Gotchas
+
+happy-dom is fast, but it has a handful of behaviors you cannot recover by reading more of your own code -- they are framework quirks. From zfb-runtime's client-router suite, here are the escape hatches and the one import-order trap that cost the most time to discover.
+
+### Disable real file loading with a shim
+
+When a test injects `<link rel="stylesheet">` or `<script src>` tags, happy-dom will try to perform real network fetches. Disable them up front so tests stay hermetic, and treat the disabled loads as silent successes so the load events still fire:
+
+```typescript
+// _helpers.ts
+type HappyDOMWindow = Window & {
+  happyDOM: {
+    settings: Record<string, boolean>;
+    waitUntilComplete: () => Promise<void>;
+  };
+};
+
+export function installHappyDomShim(): void {
+  const w = window as unknown as HappyDOMWindow;
+  w.happyDOM.settings["disableJavaScriptFileLoading"] = true;
+  w.happyDOM.settings["disableCSSFileLoading"] = true;
+  w.happyDOM.settings["disableIframePageLoading"] = true;
+  w.happyDOM.settings["handleDisabledFileLoadingAsSuccess"] = true;
+}
+```
+
+<Warning>
+Call `installHappyDomShim()` at module top, before any DOM mutation in `describe`/`beforeEach`. The settings must be in place before the first tag insertion, otherwise the very first fetch escapes.
+</Warning>
+
+### Drain pending async tasks in `afterEach`
+
+Even with file loading disabled, happy-dom still queues async work (for example, silent stylesheet load events). If that work is still pending when Vitest tears the environment down, you get flaky teardown errors that have nothing to do with your assertions. Drain it explicitly:
+
+```typescript
+// _helpers.ts
+export async function drainHappyDom(): Promise<void> {
+  const w = window as unknown as HappyDOMWindow;
+  await w.happyDOM.waitUntilComplete();
+}
+```
+
+```typescript
+// router.test.ts
+afterEach(async () => {
+  await drainHappyDom();
+});
+```
+
+### Reset the document through the real DOM API
+
+A natural reset between tests is `document.body.innerHTML = ""`. But if a prior test swapped the body element via `replaceWith()`, the shortcut leaves `getElementById` internals stale -- lookups start returning the wrong nodes. Rebuild the body through the standard DOM API instead:
+
+```typescript
+// _helpers.ts
+export function resetDocument(): void {
+  document.head.innerHTML = "";
+  if (document.body) document.body.remove();
+  document.documentElement.appendChild(document.createElement("body"));
+}
+```
+
+<Note>
+Recreating the element with `createElement("body")` + `appendChild` resets happy-dom's internal node registry cleanly, which `innerHTML = ""` does not when the body was previously replaced.
+</Note>
+
+### The module-eval timing trap (the key insight)
+
+This is the one that is genuinely impossible to reason out from the test alone. Some modules read the live document at **module-eval time** -- the moment they are first imported, not inside a function you call later. The client router checks for an opt-in `<meta>` tag at its top level. If you import the router before injecting that tag, the router has already decided the page is not opted in, and no amount of later DOM setup fixes it.
+
+The fix is to inject the tag first, then `import` the module under test:
+
+```typescript
+// router.test.ts
+import { drainHappyDom, installHappyDomShim, resetDocument } from "./_helpers.js";
+
+installHappyDomShim();
+
+// Inject the opt-in meta tag BEFORE importing the router module, so the
+// module's top-level branch sees the page as opted-in.
+// router.ts reads the live document at module-eval time.
+function enableTransitions(): void {
+  const meta = document.createElement("meta");
+  meta.setAttribute("name", "zfb-view-transitions-enabled");
+  meta.setAttribute("content", "true");
+  document.head.appendChild(meta);
+}
+enableTransitions();
+
+// Late import after the document is primed.
+import { init, navigate } from "../../client-router/router.js";
+```
+
+<Danger>
+If the module under test reads `document` (or any global) at eval time, a top-of-file static `import` runs that code immediately. Order your setup before the import, or switch to a dynamic `await import(...)` placed after the document is primed. ESM hoists static imports above surrounding statements, so a plain `import` will *not* observe DOM mutations written above it in the file unless those mutations are themselves in earlier-evaluated modules.
+</Danger>
+
+### Bonus: mock `startViewTransition` to test both paths
+
+`document.startViewTransition` is a progressive-enhancement API. happy-dom does not implement it, and you want to cover both the View-Transition path and the plain fallback. Stub its presence or absence with `vi`:
+
+```typescript
+// router.test.ts
+it("uses the View Transitions path when available", async () => {
+  vi.stubGlobal("document", {
+    ...document,
+    startViewTransition: vi.fn((cb: () => void) => {
+      cb();
+      return { finished: Promise.resolve(), ready: Promise.resolve() };
+    }),
+  });
+  // ...drive navigate() and assert the transition branch ran
+});
+
+it("falls back to a plain DOM swap when the API is absent", async () => {
+  // happy-dom has no startViewTransition by default -- assert the fallback
+  // ...drive navigate() and assert no transition was started
+});
+```
+
+## Guard the Single Source of Truth
+
+When one constant lives in a single source file but is consumed through two different import chains -- say a TypeScript ESM entry and a hand-written `.mjs` bin -- the two copies can silently fork if either chain breaks. A tiny "meta" test pins them together. From zfb-adapter-cloudflare, the worker wrapper string is imported once from `src/build.ts` and once via re-export from `bin/cli.mjs`, and a single assertion guards that they never diverge:
+
+```typescript
+// cli.test.ts
+import { WORKER_WRAPPER_SOURCE as TS_WRAPPER } from "../build.js";
+// CLI helper is a sibling .mjs re-exporting the same canonical constant.
+import { WORKER_WRAPPER_SOURCE as MJS_WRAPPER } from "../../bin/cli.mjs";
+
+describe("single source of truth", () => {
+  it("the .mjs bin re-exports the same wrapper as build.ts", () => {
+    // Both ultimately import from the canonical src/worker-wrapper.mjs,
+    // so they must be byte-identical. This catches import-chain breakage.
+    expect(MJS_WRAPPER).toBe(TS_WRAPPER);
+  });
+});
+```
+
+<Tip>
+Generalize the pattern: any value shared between two consumers that *should* be one thing can fork silently. One `toBe` catches it. The same shape applies to "this TypeScript enum must match that JSON config," or "this `.d.ts` declaration must match the runtime export." Whenever a value is duplicated across a module boundary -- or between a generated file and its source -- a single equality assertion turns a silent divergence into a failing test.
+</Tip>
