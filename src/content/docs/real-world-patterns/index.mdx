@@ -16,6 +16,10 @@ The patterns in this section come from real production projects, not theoretical
 | **zmod** | Web application | Production-build Playwright, CI image interception, sharded E2E |
 | **zudo-pattern-gen** | Pattern generator | Deterministic PNG rendering, Miniflare + D1/R2 integration |
 | **mdx-formatter** | CLI tool | Contract testing Rust via Vitest, idempotency invariant |
+| **zudo-file-sync** | File sync service | In-memory Cloudflare binding mocks, known-answer hashing, rate-limit time-bucketing |
+| **zfb** | Code generator | Binding-shape stubs, emitted-code dynamic import, single-source-of-truth guard, happy-dom router quirks |
+| **zudo-doc2** | Doc framework | remark/rehype golden fixtures + tree factories |
+| **zudo-text2** | Tauri text editor | Editor-input E2E, @flaky tier, console-error allowlist |
 
 ## Pattern Categories
 
@@ -34,6 +38,14 @@ WebKit-only rule, core crate pattern, backend bridge mocking, and the full 8-ste
 ### [Backend & Node.js Testing](/pj/zudo-test-wisdom/docs/real-world-patterns/backend-testing)
 
 Cloudflare Functions with Miniflare, HTTP API testing, fetch mocking with `vi.stubGlobal`, file system testing with temp directories, and key principles for separating frontend and backend test configs.
+
+### [Crypto & Hash Testing](/pj/zudo-test-wisdom/docs/real-world-patterns/crypto-testing)
+
+Known-answer (hardcoded-digest) crypto tests, cross-input-type equivalence (string vs `ArrayBuffer`), and catching encoding bugs that "deterministic" tests miss.
+
+### [Testing remark/rehype Plugins](/pj/zudo-test-wisdom/docs/real-world-patterns/remark-rehype-plugin-testing)
+
+mdast tree factories for unit tests plus a golden-fixture corpus with `UPDATE_FIXTURES` regeneration and a cross-language parity oracle.
 
 ## Common Theme
 

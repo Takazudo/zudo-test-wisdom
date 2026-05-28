@@ -1,0 +1,140 @@
+---
+title: Crypto & Hash Testing
+description: Known-answer testing for hash, HMAC, and signature functions.
+sidebar_position: 6
+---
+
+## The "Same Input, Same Output" Trap
+
+The most natural test to write for a hash function is a consistency check: hash the same input twice and assert the two results match.
+
+```ts
+import { describe, it, expect } from "vitest";
+import { hashContent } from "../hash.js";
+
+describe("hashContent", () => {
+  it("produces consistent output for the same input", async () => {
+    const hash1 = await hashContent("hello world");
+    const hash2 = await hashContent("hello world");
+
+    expect(hash1).toBe(hash2);
+  });
+});
+```
+
+This test passes. It also proves almost nothing.
+
+A hash function that encodes the string as UTF-16 instead of UTF-8, hashes the wrong byte range, or applies the wrong algorithm entirely will still return the *same* output for the *same* input every time. Determinism is a property of nearly any pure function -- it does not tell you the bytes flowing into the digest are the ones you intended.
+
+<Warning>
+A consistency test (`hash(x) === hash(x)`) and a uniqueness test (`hash(x) !== hash(y)`) both pass even when the encoding is wrong. They check that your function is deterministic, not that it is *correct*. Encoding bugs sail straight through.
+</Warning>
+
+## Known-Answer Testing: Pin to an External Digest
+
+The fix is to assert the output against a literal digest computed by an **independent tool** -- one that does not share your code's encoding logic. For SHA-256 of `"hello world"`, the answer is fixed by the algorithm and reproducible anywhere:
+
+```ts
+it("matches the known SHA-256 digest of 'hello world'", async () => {
+  const hash = await hashContent("hello world");
+
+  // Known external digest -- verify with: echo -n "hello world" | sha256sum
+  expect(hash).toBe(
+    "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+  );
+});
+```
+
+You can regenerate that constant from a shell, with no involvement from your application code:
+
+```bash
+echo -n "hello world" | sha256sum
+# b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+```
+
+<Tip>
+The `-n` flag on `echo` matters: without it, `echo` appends a trailing newline and you hash `"hello world\n"`, producing a completely different digest. This is the same class of byte-level mistake the test is meant to catch -- so get the reference value right.
+</Tip>
+
+Because the expected value comes from outside your codebase, a UTF-16 bug or an off-by-one byte slice now *fails* the test instead of silently agreeing with itself. This is the difference between testing that the function is consistent and testing that it is correct.
+
+## Cross-Input-Type Equivalence
+
+Hash functions often accept more than one input type -- a `string`, an `ArrayBuffer`, a `Buffer`. Conceptually, the same bytes should produce the same digest regardless of how they arrive. In practice, each input path has its own encoding step, and they can drift apart.
+
+Assert that a string and its byte-buffer equivalent hash identically:
+
+```ts
+it("hashes a string and its ArrayBuffer identically", async () => {
+  const text = "hello world";
+  const arrayBuffer = new TextEncoder().encode(text).buffer;
+
+  const hashFromString = await hashContent(text);
+  const hashFromBuffer = await hashContent(arrayBuffer);
+
+  expect(hashFromBuffer).toBe(hashFromString);
+});
+```
+
+If these two paths diverge, the same logical content produces two different hashes -- a bug that breaks deduplication, cache keys, and content-addressed storage. A pure known-answer test on one input type would not catch it; you need the equivalence assertion across types.
+
+<Info>
+This is the second leg of the discipline. A single known-answer vector proves the encoding is correct for *one* input shape. Cross-input-type equivalence proves every accepted input shape funnels into that same correct encoding.
+</Info>
+
+## The Transferable Rule
+
+For any hash, HMAC, or encoding function, write two kinds of assertions:
+
+1. **At least one known-answer vector** -- output pinned to a constant computed by an independent tool (`sha256sum`, `openssl`, a spec test vector, another language's stdlib).
+2. **Cross-input-type equivalence** -- every accepted input type (`string`, `ArrayBuffer`, `Buffer`) hashing to the same digest.
+
+The first catches encoding and algorithm bugs. The second catches input-path drift. Together they pin the function's behavior to an external ground truth, not just to itself.
+
+## JWT Signatures: Known-Answer Applies Here Too
+
+A JWT is signed data, so the same discipline transfers directly to authentication code -- from the **signature-vector** angle.
+
+HMAC-SHA256 (the `HS256` algorithm) is deterministic: a fixed secret plus a fixed payload yields exactly one signature. That means you can treat a JWT signature like any other known-answer vector -- pin the produced token (or its signature segment) against a value generated by an independent JWT tool, and a regression in your signing path will fail loudly.
+
+```ts
+import { describe, it, expect } from "vitest";
+import { createToken, verifyToken } from "../utils/jwt.js";
+
+const TEST_SECRET = "test-secret-key-that-is-long-enough-for-hs256";
+
+describe("JWT signing", () => {
+  it("verifies a token signed with the same secret", async () => {
+    const token = await createToken({ sub: "user-123" }, TEST_SECRET, "1h");
+
+    const payload = await verifyToken(token, TEST_SECRET);
+    expect(payload.sub).toBe("user-123");
+  });
+
+  it("rejects a token signed with a different secret", async () => {
+    const token = await createToken({ sub: "user-123" }, TEST_SECRET, "1h");
+
+    await expect(
+      verifyToken(token, "a-completely-different-secret-key"),
+    ).rejects.toThrow();
+  });
+});
+```
+
+The positive case confirms a valid signature round-trips; the negative case confirms a wrong secret is rejected rather than quietly accepted. Both are signature-vector assertions: they pin verification behavior to the cryptographic relationship between secret and payload.
+
+<Note>
+This page covers JWTs only from the known-answer / signature-vector angle -- the part that shares its discipline with hash testing. Time-based behavior such as token expiry (tested with `vi.setSystemTime`) is a clock-control concern and lives on the [Backend & Node.js Testing](./backend-testing.mdx) page.
+</Note>
+
+## Key Principles
+
+1. **Never rely on consistency alone.** `hash(x) === hash(x)` passes with a broken encoding. It is necessary, never sufficient.
+
+2. **Pin to an external constant.** The expected digest must come from a tool that does not share your code's encoding logic, so a bug cannot agree with itself.
+
+3. **Mind the reference bytes.** `echo -n` vs `echo`, UTF-8 vs UTF-16, trailing newlines -- the reference value is only useful if you generated it from the exact bytes you mean to hash.
+
+4. **Assert cross-input-type equivalence.** Every accepted input shape (`string`, `ArrayBuffer`, `Buffer`) must produce the same digest.
+
+5. **Treat signatures as vectors too.** Deterministic HMAC signatures (JWT `HS256`) get the same known-answer treatment: pin the valid case, reject the wrong-secret case.

@@ -125,6 +125,182 @@ export default defineConfig({
 });
 ```
 
+## ランタイムではなくバインディングをモックする
+
+上記のMiniflareセクションは、実際のエミュレートされたランタイムを起動します。ストレージのセマンティクスをテストするならそれが正解です。しかし自分のハンドラーロジックをテストするときには、それは過剰です。逆の選択肢は、Cloudflareバインディングの公開インターフェースをインメモリの`Map`で偽装し、Miniflareをまったく起動しないというものです。
+
+`KVNamespace`のようなCloudflareバインディングは、いくつかのメソッドを持つだけのオブジェクトにすぎません。`Map`を裏側に置いて手書きし、テスト対象のメソッドだけを実装し、`as unknown as KVNamespace`でキャストすれば十分です：
+
+```ts
+// test/helpers/mock-kv.ts
+export function createMockKV(): KVNamespace {
+  const store = new Map<string, string>();
+
+  return {
+    get(key: string): Promise<string | null> {
+      return Promise.resolve(store.get(key) ?? null);
+    },
+    put(key: string, value: string): Promise<void> {
+      store.set(key, value);
+      return Promise.resolve();
+    },
+    delete(key: string): Promise<void> {
+      store.delete(key);
+      return Promise.resolve();
+    },
+  } as unknown as KVNamespace;
+}
+```
+
+同じ手口は`R2Bucket`（`Map<string, ArrayBuffer>`上の`get`/`put`/`delete`）にも、`D1Database`にも使えます。なかでもD1のケースが最も示唆に富みます。SQLエンジンは不要で、クエリの部分文字列をキーにした小さなディスパッチャがあれば事足ります。
+
+```ts
+// test/helpers/mock-d1.ts
+interface ProductRow {
+  id: number;
+  name: string;
+}
+
+export function createMockD1(rows: ProductRow[]): D1Database {
+  function makeStatement(sql: string, params: unknown[] = []) {
+    return {
+      bind(...args: unknown[]) {
+        return makeStatement(sql, args);
+      },
+      async first() {
+        if (/where id = \?/i.test(sql)) {
+          return rows.find((r) => r.id === params[0]) ?? null;
+        }
+        return rows[0] ?? null;
+      },
+      async all() {
+        if (/from products/i.test(sql)) {
+          return { results: rows, success: true, meta: {} };
+        }
+        return { results: [], success: true, meta: {} };
+      },
+      async run() {
+        return { success: true, meta: { changes: 1 } };
+      },
+    };
+  }
+  return {
+    prepare(sql: string) {
+      return makeStatement(sql);
+    },
+    // a real miniflare D1 would test miniflare's SQLite, not this adapter's threading.
+  } as unknown as D1Database;
+}
+```
+
+このスタブのコメントこそが核心です（「本物のMiniflareのD1は、このアダプターの受け渡しではなく、MiniflareのSQLiteをテストすることになる」という意味です）。このスタブの上に組んだテストは、ハンドラーがバインディングを正しく受け渡し、正しい行で分岐することをアサートします。SQLiteが`WHERE`句をどう実行するかについては、何もアサートしませんし、すべきでもありません。ここで本物のSQLをMiniflareに流せば、それはあなたのコードではなくMiniflareのSQLiteエンジンをテストすることになります。
+
+ハンドラーのテストでは、素朴なファクトリから`env`を組み立て、アプリを直接呼び出します：
+
+```ts
+import { describe, it, expect } from "vitest";
+import { app } from "../src/index";
+import { createMockKV } from "./helpers/mock-kv";
+
+function createEnv(kv: KVNamespace) {
+  return { KV: kv } as Env;
+}
+
+describe("session handler (Map-stub)", () => {
+  it("returns 200 when the session exists", async () => {
+    const kv = createMockKV();
+    await kv.put("session:abc", JSON.stringify({ userId: 1 }));
+
+    const res = await app.request(
+      new Request("http://localhost/api/me", {
+        headers: { Cookie: "sid=abc" },
+      }),
+      {},
+      createEnv(kv),
+    );
+
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+<Tip>
+**判断基準 -- ここがギャップです。** SQLやストレージのセマンティクスをテストするとき（このクエリは正しい行を返すか、このR2マルチパートアップロードは正しく再結合されるか）には**Miniflare**を使います。ハンドラーの分岐と受け渡しをテストするとき（このルートは読むべきバインディングを読んでいるか、セッションが無いとき401を返すか）には**`Map`スタブ**を使います。要となる原則はこうです -- **テストすべきはあなたのロジックであって、プラットフォームのストレージエンジンではない。** Mapスタブは高速で、`wrangler.toml`を必要とせず、素のNodeで動き、状態を厳密にプリシードできます。
+</Tip>
+
+## 時間バケットロジックのテスト
+
+レートリミッター、スライディングウィンドウ、TTLキャッシュ、JWTの有効期限 -- これらはテストにおいて共通の問題を抱えています。その挙動が現在時刻に依存し、しかも境界（カウンターがリセットされる、あるいはトークンが失効する、まさにその瞬間）こそが最も間違えやすい部分だということです。テスト内でその境界を越えるためにスリープするのは遅く、不安定です。代わりにクロックを凍結しましょう。
+
+レシピは常に同じです -- **時間を凍結し、凍結された`now`からバケットキーを導出し、ストアをしきい値までプリロードし、境界をアサートする。**
+
+```ts
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { checkRateLimit } from "../rate-limit";
+import { createMockKV } from "./helpers/mock-kv";
+
+describe("checkRateLimit", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-18T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("blocks the 60th request in the same minute", async () => {
+    const kv = createMockKV();
+    const env = { RATE_LIMIT: kv, _kv: kv } as MockEnv;
+
+    // Derive the SAME bucket key the production code computes.
+    const now = Date.now();
+    const minBucket = Math.floor(now / 60_000);
+
+    // Pre-seed 59 prior requests this minute via the inspectable store.
+    env._kv._store.set(`rate:min:testhash:${minBucket}`, "59");
+
+    const result = await checkRateLimit("testhash", env);
+    expect(result.allowed).toBe(true);
+
+    env._kv._store.set(`rate:min:testhash:${minBucket}`, "60");
+    const blocked = await checkRateLimit("testhash", env);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfter).toBeGreaterThan(0);
+    expect(blocked.retryAfter).toBeLessThanOrEqual(60);
+  });
+});
+```
+
+これを成立させるのは2つの要素です。1つめは、テストがプロダクションコードと同一の`Math.floor(now / 60_000)`という式で`minBucket`を計算している点です -- クロックが凍結されているため両者は同じバケットに落ち着き、プリシードしたキーがそのままコードの読み取るキーになります。2つめは、モックKVが内部の`Map`を`_store`として意図的に露出させており、テストが`put`を経由せず直接状態を書き込める点です。
+
+<Info>
+**検査可能なモックストアという設計。** プロダクション忠実なモックなら内部の`Map`を隠すでしょう。しかし*テスト用*のモックは逆を行うべきです。`_store`（または`_kv._store`）をエスケープハッチとして露出させ、テストが状態を直接操作できるようにする -- ちょうど59件のエントリをシードする、ハンドラーが書き込んだ内容を検査する、あるいは値を壊して復旧処理をテストする、といった具合に。これがウィンドウカウンター、TTL、スライディングウィンドウのあらゆるテストの背後にある再利用可能なパターンです。ウィンドウが埋まるのを待つのではなく、ストアをしきい値に置いて境界をまたいでアサートするのです。
+</Info>
+
+同じクロック凍結の手法はJWTの有効期限にもそのまま使えます。`vi.setSystemTime`が`Date.now()`の返す値を制御するため、既知の`exp`を持つトークンを発行し、その瞬間の直前では受理され、直後では拒否されることをアサートできます：
+
+```ts
+it("accepts a token before exp and rejects it after", async () => {
+  vi.setSystemTime(new Date("2026-03-18T12:00:00.000Z"));
+  const token = await createToken({ sub: "user-1" }, TEST_SECRET, "1h");
+
+  // Still inside the hour: valid.
+  vi.setSystemTime(new Date("2026-03-18T12:59:00.000Z"));
+  await expect(verifyToken(token, TEST_SECRET)).resolves.toMatchObject({
+    sub: "user-1",
+  });
+
+  // One second past exp: rejected.
+  vi.setSystemTime(new Date("2026-03-18T13:00:01.000Z"));
+  await expect(verifyToken(token, TEST_SECRET)).rejects.toThrow();
+});
+```
+
+<Note>
+これはJWTテストのうち**時間ベースの有効期限**の側面だけを扱っています。ハードコードされたシークレットとペイロードに対して固定の署名をアサートする（既知解ベクトル）のは別の関心事であり、ここではなく暗号テストに属します。
+</Note>
+
 ## HTTP APIテスト
 
 ライブまたはデプロイされたエンドポイント（ステージング、プレビュー、本番）に対してテストするには、直接HTTPリクエストを使用します。
@@ -325,7 +501,7 @@ assert_eq() {
   local label="$1" actual="$2" expected="$3"
   if [ "$actual" = "$expected" ]; then
     echo "  PASS: $label"
-    PASS=$((PASS + 1))  # ((PASS++))はNG -- 下記の注意参照
+    PASS=$((PASS + 1))  # NOT ((PASS++)) -- see gotcha below
   else
     echo "  FAIL: $label (expected '$expected', got '$actual')"
     FAIL=$((FAIL + 1))

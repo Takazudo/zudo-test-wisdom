@@ -78,6 +78,121 @@ describe("mdx formatting", () => {
 **Idempotency testing** is a powerful invariant for any formatter or transformer: applying the operation twice should produce the same result as applying it once.
 </Tip>
 
+## Executing Emitted Code
+
+The examples above compare emitted output as **static text** -- read the file, assert on its contents. But some build tools *generate JavaScript that runs*: adapters that wrap a user handler, bundler wrappers, scaffolders. For these, a string-equality check proves the template was written -- it does **not** prove the generated code behaves correctly when executed. To verify that, you have to write the artifact, import it, and run it.
+
+<Info>
+This is a different question from the static-text comparison Level 3 usually covers. There, the assertion is "did the build produce the right file?". Here, it is "does the generated wrapper actually thread its inputs through to the inner handler at runtime?" -- a *codegen-threading* check you can only answer by executing the emitted module.
+</Info>
+
+The reusable recipe is **temp dir + dynamic import + env stub**:
+
+1. Write a synthetic inner bundle into an `mkdtemp` scratch directory.
+2. Run the emit step (`emitWorker()`) to produce a **real** `_worker.js`.
+3. `import(pathToFileURL(...))` the emitted file, then call `default.fetch(new Request(...), envStub)`.
+4. Assert that `(env, ctx)` are threaded through correctly -- the wrapper your build emits must pass `env` to the user handler.
+5. Clean the scratch directories in `afterEach`.
+
+```typescript
+// tests/emit-worker.test.ts
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { emitWorker } from "../src/build.js";
+
+let scratchDirs: string[] = [];
+
+afterEach(async () => {
+  for (const d of scratchDirs) {
+    await rm(d, { recursive: true, force: true });
+  }
+  scratchDirs = [];
+});
+
+async function scratch(): Promise<string> {
+  const d = await mkdtemp(join(tmpdir(), "emit-worker-"));
+  scratchDirs.push(d);
+  return d;
+}
+
+describe("emitWorker threads env/ctx into the inner bundle", () => {
+  it("the generated wrapper passes env through to the user handler", async () => {
+    const dir = await scratch();
+
+    // A synthetic inner bundle that reads env from the request scope
+    // the wrapper sets up (here via AsyncLocalStorage), then echoes it.
+    const inputPath = join(dir, "inner.mjs");
+    await writeFile(
+      inputPath,
+      `import { AsyncLocalStorage } from "node:async_hooks";
+const STORAGE_KEY = "__adapter_als__";
+function getStore() {
+  const g = globalThis;
+  let als = g[STORAGE_KEY];
+  if (!als) { als = new AsyncLocalStorage(); g[STORAGE_KEY] = als; }
+  return als.getStore();
+}
+export default {
+  async fetch(request) {
+    const store = getStore();
+    const env = store?.env ?? {};
+    return new Response(
+      JSON.stringify({
+        token: env.API_KEY ?? null,
+        ctxKind: typeof store?.ctx?.waitUntil,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  },
+};
+`,
+      "utf8",
+    );
+
+    // Run the real emit step to produce a real _worker.js.
+    const out = await emitWorker({
+      inputBundlePath: inputPath,
+      outdir: join(dir, "dist"),
+    });
+
+    // Import the emitted artifact as ESM and drive it with a
+    // synthetic Request + env + ctx -- no wrangler / miniflare needed.
+    const worker = (await import(pathToFileURL(out.workerPath).href)) as {
+      default: {
+        fetch: (
+          request: Request,
+          env: Record<string, unknown>,
+          ctx: { waitUntil: (p: Promise<unknown>) => void },
+        ) => Promise<Response>;
+      };
+    };
+
+    const envStub = { API_KEY: "sk-test-1234" };
+    const ctx = { waitUntil: () => {} };
+    const request = new Request("https://worker.test/api/foo", { method: "POST" });
+
+    const response = await worker.default.fetch(request, envStub, ctx);
+    const body = (await response.json()) as { token: string | null; ctxKind: string };
+
+    // The headline check: env actually reached the inner handler.
+    expect(body.token).toBe("sk-test-1234");
+    // ctx was threaded too -- its surface matches the runtime shape.
+    expect(body.ctxKind).toBe("function");
+  });
+});
+```
+
+<Tip>
+Keep the inner bundle **synthetic and self-contained** -- inline the read-side of whatever mechanism the wrapper uses (here, the `globalThis`-keyed `AsyncLocalStorage`). You are testing your emitted wrapper's threading, not the real user package, so you do not need to bundle it. The same pattern stubs *any* binding the wrapper treats opaquely (a database handle, a secret, a queue), because the wrapper just stores `env` verbatim and never inspects its members.
+</Tip>
+
+<Warning>
+This still is not a full runtime test. Importing the emitted module exercises it in **Node**, not in the real target runtime (Cloudflare Workers, Deno, an edge sandbox). Runtime-specific globals, the actual asset server, and platform request semantics are out of scope -- for those, you need Level 4 (or a real `wrangler dev` / miniflare run). What this *does* prove is the contract your codegen is responsible for: inputs in, inputs threaded through.
+</Warning>
+
 ## Blind Spots
 
 <Warning>

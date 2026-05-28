@@ -125,6 +125,182 @@ export default defineConfig({
 });
 ```
 
+## Mock the Binding, Not the Runtime
+
+The Miniflare section above runs a real emulated runtime. That is the right call when you are testing storage semantics -- but it is the wrong call when you are testing your own handler logic. The opposite choice is to fake a Cloudflare binding's public interface with an in-memory `Map` and never start Miniflare at all.
+
+A Cloudflare binding like `KVNamespace` is just an object with a handful of methods. You can hand-roll one backed by a `Map`, implement only the methods under test, and cast it with `as unknown as KVNamespace`:
+
+```ts
+// test/helpers/mock-kv.ts
+export function createMockKV(): KVNamespace {
+  const store = new Map<string, string>();
+
+  return {
+    get(key: string): Promise<string | null> {
+      return Promise.resolve(store.get(key) ?? null);
+    },
+    put(key: string, value: string): Promise<void> {
+      store.set(key, value);
+      return Promise.resolve();
+    },
+    delete(key: string): Promise<void> {
+      store.delete(key);
+      return Promise.resolve();
+    },
+  } as unknown as KVNamespace;
+}
+```
+
+The same trick works for `R2Bucket` (`get`/`put`/`delete` over a `Map<string, ArrayBuffer>`) and for `D1Database`. The D1 case is the most instructive: you do not need a SQL engine, only a tiny dispatcher keyed on a substring of the query.
+
+```ts
+// test/helpers/mock-d1.ts
+interface ProductRow {
+  id: number;
+  name: string;
+}
+
+export function createMockD1(rows: ProductRow[]): D1Database {
+  function makeStatement(sql: string, params: unknown[] = []) {
+    return {
+      bind(...args: unknown[]) {
+        return makeStatement(sql, args);
+      },
+      async first() {
+        if (/where id = \?/i.test(sql)) {
+          return rows.find((r) => r.id === params[0]) ?? null;
+        }
+        return rows[0] ?? null;
+      },
+      async all() {
+        if (/from products/i.test(sql)) {
+          return { results: rows, success: true, meta: {} };
+        }
+        return { results: [], success: true, meta: {} };
+      },
+      async run() {
+        return { success: true, meta: { changes: 1 } };
+      },
+    };
+  }
+  return {
+    prepare(sql: string) {
+      return makeStatement(sql);
+    },
+    // a real miniflare D1 would test miniflare's SQLite, not this adapter's threading.
+  } as unknown as D1Database;
+}
+```
+
+The comment in that stub is the whole point. A test built on this stub asserts that your handler threads the binding correctly and branches on the right rows -- it does not, and should not, assert anything about how SQLite executes a `WHERE` clause. Pushing real SQL through Miniflare here would test Miniflare's SQLite engine, not your code.
+
+Handler tests then assemble `env` from a plain factory and call the app directly:
+
+```ts
+import { describe, it, expect } from "vitest";
+import { app } from "../src/index";
+import { createMockKV } from "./helpers/mock-kv";
+
+function createEnv(kv: KVNamespace) {
+  return { KV: kv } as Env;
+}
+
+describe("session handler (Map-stub)", () => {
+  it("returns 200 when the session exists", async () => {
+    const kv = createMockKV();
+    await kv.put("session:abc", JSON.stringify({ userId: 1 }));
+
+    const res = await app.request(
+      new Request("http://localhost/api/me", {
+        headers: { Cookie: "sid=abc" },
+      }),
+      {},
+      createEnv(kv),
+    );
+
+    expect(res.status).toBe(200);
+  });
+});
+```
+
+<Tip>
+**The decision rule -- this is the gap.** Use **Miniflare** when you are testing SQL or storage semantics (does this query return the right rows, does this R2 multipart upload reassemble correctly). Use a **`Map`-stub** when you are testing your handler's branching and threading (does this route read the binding it should, does it return 401 when the session is missing). The load-bearing principle: **test YOUR logic, not the platform's storage engine.** Map-stubs are faster, need no `wrangler.toml`, run in plain Node, and let you pre-seed exact state.
+</Tip>
+
+## Testing Time-Bucketed Logic
+
+Rate limiters, sliding windows, TTL caches, and JWT expiry all share one problem for tests: their behavior depends on the current time, and the boundary -- the exact instant a counter resets or a token expires -- is the part most likely to be wrong. Sleeping in a test to cross that boundary is slow and flaky. Freeze the clock instead.
+
+The recipe is always the same: **freeze time, derive the bucket key from the frozen `now`, pre-load the store to the threshold, then assert the boundary.**
+
+```ts
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { checkRateLimit } from "../rate-limit";
+import { createMockKV } from "./helpers/mock-kv";
+
+describe("checkRateLimit", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-18T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("blocks the 60th request in the same minute", async () => {
+    const kv = createMockKV();
+    const env = { RATE_LIMIT: kv, _kv: kv } as MockEnv;
+
+    // Derive the SAME bucket key the production code computes.
+    const now = Date.now();
+    const minBucket = Math.floor(now / 60_000);
+
+    // Pre-seed 59 prior requests this minute via the inspectable store.
+    env._kv._store.set(`rate:min:testhash:${minBucket}`, "59");
+
+    const result = await checkRateLimit("testhash", env);
+    expect(result.allowed).toBe(true);
+
+    env._kv._store.set(`rate:min:testhash:${minBucket}`, "60");
+    const blocked = await checkRateLimit("testhash", env);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfter).toBeGreaterThan(0);
+    expect(blocked.retryAfter).toBeLessThanOrEqual(60);
+  });
+});
+```
+
+Two pieces make this work. First, the test computes `minBucket` with the exact same `Math.floor(now / 60_000)` formula the production code uses -- because the clock is frozen, both sides land in the identical bucket, so the pre-seeded key is the one the code will read. Second, the mock KV deliberately exposes its internal `Map` as `_store` so the test can write state directly, without going through `put`.
+
+<Info>
+**The inspectable-mock-store design.** A production-faithful mock would hide its internal `Map`. A *test* mock should do the opposite: expose `_store` (or `_kv._store`) as an escape hatch so tests can arbitrage state directly -- seed exactly 59 entries, inspect what the handler wrote, or corrupt a value to test recovery. This is the reusable pattern behind every windowed-counter, TTL, and sliding-window test: you do not wait for the window to fill, you place the store at the threshold and assert across the boundary.
+</Info>
+
+The same frozen-clock technique covers JWT expiry. Because `vi.setSystemTime` controls what `Date.now()` returns, you can mint a token with a known `exp` and assert it is accepted just before that instant and rejected just after:
+
+```ts
+it("accepts a token before exp and rejects it after", async () => {
+  vi.setSystemTime(new Date("2026-03-18T12:00:00.000Z"));
+  const token = await createToken({ sub: "user-1" }, TEST_SECRET, "1h");
+
+  // Still inside the hour: valid.
+  vi.setSystemTime(new Date("2026-03-18T12:59:00.000Z"));
+  await expect(verifyToken(token, TEST_SECRET)).resolves.toMatchObject({
+    sub: "user-1",
+  });
+
+  // One second past exp: rejected.
+  vi.setSystemTime(new Date("2026-03-18T13:00:01.000Z"));
+  await expect(verifyToken(token, TEST_SECRET)).rejects.toThrow();
+});
+```
+
+<Note>
+This covers only the **time-based expiry** edge of JWT testing. Asserting a fixed signature against a hardcoded secret and payload (known-answer vectors) is a different concern that belongs with crypto testing, not here.
+</Note>
+
 ## HTTP API Testing
 
 For testing against live or deployed endpoints (staging, preview, production), use direct HTTP requests.
