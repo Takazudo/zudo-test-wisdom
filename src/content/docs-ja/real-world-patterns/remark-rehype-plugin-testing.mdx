@@ -1,0 +1,240 @@
+---
+title: remark/rehypeプラグインのテスト
+description: ASTプラグインを2つの相補的なレイヤーでテストする -- ユニット制御のための手組みツリーファクトリと、パイプライン全体の一致を保証するゴールデンフィクスチャ群。
+sidebar_position: 7
+---
+
+remarkやrehypeのプラグインは、構文木（markdownならmdast、HTMLならhast）を走査して書き換えるだけの関数です。それゆえ、markdownを`remark-parse`に通して結果を目視で確認する、というテストをやりたくなります。しかし検証すべきものは大きく2つに分かれ、それぞれ別の手法を必要とします：
+
+- **ユニット：** ある入力ノードに対して、変換が正しいノード形状を生成するか。エッジケースを含めて入力を完全に制御したい。markdownでは表現しづらいケースもここで扱います。
+- **インテグレーション：** パイプライン全体 -- パース、すべてのプラグイン、文字列化 -- が、期待どおりのHTMLを正確に出力し続けるか。そしてその出力を、別言語への移植の参照として使えるか。
+
+この2つは相補的な両輪であって、二者択一ではありません。ユニットテストはノード形状の制御を、インテグレーションテストは組み上がったパイプラインの検証と言語横断の一致を可能にします。
+
+## 前半：mdastツリーファクトリ（ユニット）
+
+プラグインのユニットテストを快適にする要は、**入力ツリーを手組みし**、プラグインの`Transformer`を合成した`Root`に直接適用することです -- `remark-parse`を介しません。markdownのパースはノイズ（テキストノード、位置情報、空白の扱い）を持ち込み、さらに悪いことに、特定のノード形状を意図どおりに作るのが難しい、あるいは不可能になります。手組みのツリーなら、テストしたいノードをぴったり構築できます。むき出しの`definition`ノード、不正なURL、特定の入れ子の深さ、といった具合です。
+
+小さなファクトリをいくつか用意するだけで大きな効果があります：
+
+```typescript
+import type { Root, Link, Paragraph, Definition } from "mdast";
+
+function makeLink(url: string): Link {
+  return { type: "link", url, children: [{ type: "text", value: "link" }] };
+}
+
+function makeDefinition(url: string): Definition {
+  return { type: "definition", url, identifier: "ref", label: "ref" };
+}
+
+function makeTree(...links: (Link | Definition)[]): Root {
+  return {
+    type: "root",
+    children: links.map((link) =>
+      link.type === "definition"
+        ? link
+        : ({
+            type: "paragraph",
+            children: [link],
+          } as Paragraph),
+    ),
+  };
+}
+```
+
+これらを使えば、テストはプラグインのファクトリを呼び、返ってきたトランスフォーマを合成ツリーに適用し、書き換えられたノードをその場でアサートします：
+
+```typescript
+import { resolve } from "node:path";
+import { describe, it, expect } from "vitest";
+import { remarkResolveMarkdownLinks } from "../remark-resolve-markdown-links";
+import { createTempProject, touch, cleanupTempProject } from "./test-helpers";
+
+it("resolves a relative .mdx link to a URL", () => {
+  touch(rootDir, "src/content/docs/guides/getting-started.mdx");
+  touch(rootDir, "src/content/docs/guides/other-doc.mdx");
+
+  const link = makeLink("./other-doc.mdx");
+  const tree = makeTree(link);
+  const file = {
+    path: resolve(rootDir, "src/content/docs/guides/getting-started.mdx"),
+  };
+
+  const plugin = remarkResolveMarkdownLinks(baseOptions());
+  plugin(tree, file);
+
+  expect(link.url).toBe("/docs/guides/other-doc/");
+});
+```
+
+`link`はツリーが保持しているのと同一のオブジェクト参照なので、`plugin(tree, file)`のあとに`link.url`をアサートすれば、書き換え結果を直接読めます -- ツリーを再走査する必要はありません。
+
+<Tip>
+手組みのツリーはエッジケースで真価を発揮します。`definition`ノード（参照スタイルのリンク先）、ハッシュとクエリ文字列を持つURL、3段落の奥にネストしたリンク -- どれもファクトリなら1行ですが、markdownのサンプルとして書いて安定させようとすると厄介です。
+</Tip>
+
+### 決定論的なファイルシステム上のコンテキスト
+
+上記のリンクリゾルバはツリーだけでは動作しません -- 相対パスを実際のファイルシステムに対して解決し、リンク先が存在するかを判定します。これを決定論的に保つため、テストごとに作り直す使い捨てのプロジェクトディレクトリを与えます：
+
+```typescript
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+
+/** Create a unique temporary directory for testing. */
+export function createTempProject(): string {
+  const dir = resolve(
+    tmpdir(),
+    `md-plugins-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Create a file (and parent dirs) with minimal markdown content. */
+export function touch(base: string, filePath: string): void {
+  const full = resolve(base, filePath);
+  mkdirSync(resolve(full, ".."), { recursive: true });
+  writeFileSync(full, "# Test");
+}
+
+/** Remove a temporary directory. */
+export function cleanupTempProject(dir: string): void {
+  rmSync(dir, { recursive: true, force: true });
+}
+```
+
+これらをライフサイクルに組み込み、各テストがディスク上のクリーンで隔離されたツリーから始まるようにします：
+
+```typescript
+describe("remarkResolveMarkdownLinks", () => {
+  let rootDir: string;
+
+  beforeEach(() => {
+    rootDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanupTempProject(rootDir);
+  });
+
+  // ...tests call touch(rootDir, "...") to lay down the files they need
+});
+```
+
+<Note>
+ユニークなサフィックス（`Date.now()`とランダムな36進文字列）により、並列テストワーカーが同じディレクトリで衝突することはなく、`afterEach`のクリーンアップが一時フォルダの実行間のリークを防ぎます。これはテストごとにインメモリDBを用意するのと同じ隔離の規律です -- ただしリゾルバが読むのは実際のファイルシステムなので、本物のファイルシステム上で行うだけです。
+</Note>
+
+## 後半：ゴールデンフィクスチャ群（インテグレーション）
+
+ユニットテストは各変換を単体で証明します。しかし、すべてのプラグインが順に走ったあとで、*組み上がった*パイプラインが正しいHTMLを出力し続けるかは証明できません。それには、実物の`.mdx`フィクスチャ群を実際の`unified()`パイプラインに通し、出力をリポジトリに入れた`expected-html/*.html`ファイルと比較します。
+
+```typescript
+import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { resolve, dirname, basename } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, it, expect } from "vitest";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkGfm from "remark-gfm";
+import remarkRehype from "remark-rehype";
+import rehypeRaw from "rehype-raw";
+import rehypeStringify from "rehype-stringify";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const fixturesDir = resolve(here, "../../__fixtures__");
+const expectedDir = resolve(fixturesDir, "expected-html");
+const updateMode = process.env.UPDATE_FIXTURES === "1";
+
+function buildProcessor() {
+  return unified()
+    .use(remarkParse)
+    .use(remarkGfm)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(rehypeRaw)
+    .use(rehypeStringify, { allowDangerousHtml: true });
+}
+```
+
+フィクスチャのループが各`.mdx`をレンダリングし、そのアサーションはただ1つの環境変数フラグに依存します：
+
+```typescript
+describe("md-plugins fixture corpus", () => {
+  const fixtures = readdirSync(fixturesDir)
+    .filter((f) => f.endsWith(".mdx"))
+    .sort();
+
+  for (const file of fixtures) {
+    const name = basename(file, ".mdx");
+    const expectedPath = resolve(expectedDir, `${name}.html`);
+
+    it(`renders ${file}`, async () => {
+      const src = readFileSync(resolve(fixturesDir, file), "utf8");
+      const html = String(await buildProcessor().process(src));
+
+      if (updateMode || !existsSync(expectedPath)) {
+        writeFileSync(expectedPath, html, "utf8");
+      }
+
+      const expected = readFileSync(expectedPath, "utf8");
+      expect(html).toBe(expected);
+    });
+  }
+});
+```
+
+### UPDATE_FIXTURESトグル
+
+`process.env.UPDATE_FIXTURES === "1"`の分岐こそが、ゴールデンテストを保守可能にするものです。通常の実行では、各フィクスチャの出力がディスク上のファイルと一致することをアサートします。意図的にパイプラインを変更したときは、フラグを立てて一度実行し、期待ファイルを再生成します：
+
+```bash
+UPDATE_FIXTURES=1 pnpm vitest run fixtures
+```
+
+そのうえで、`expected-html/*.html`ファイルに生じた差分を、他のあらゆる変更と同じようにレビューします。意外な差分は意図しないリグレッションであり、想定どおりの差分が新しいベースラインです。このフラグはファイルが初めて存在しないときにも自動で書き込むため、フィクスチャの追加は新しい`.mdx`を置くだけで済みます。
+
+<Warning>
+赤いテストを緑にするためにフィクスチャを無闇に再生成してはいけません。ゴールデンコーパスの価値のすべては、予期しない差分がシグナルになる点にあります。差分を読み、自分が意図した変更と一致することを確認し、そのうえではじめて再生成されたHTMLをコミットしてください。
+</Warning>
+
+### 一致のオラクルとしてのコーパス
+
+ここがゴールデンコーパスがリグレッション検出を超えて本領を発揮するところです。すべてのフィクスチャについて信頼できるJSの参照出力が手に入れば、その出力は同じパイプラインを別言語へ移植する際の**一致のオラクル（parity oracle）**になります。変換をRustで再実装しているなら、同一のフィクスチャに対してRustのパイプラインを走らせ、その出力するHTMLをJSが生成した`expected-html/*.html`と**バイト単位で**比較します。
+
+これが、変換パイプラインを言語をまたいで安全に移植する方法です。参照実装が真実を定義し、コーパスがその真実をディスクに固定し、一致は判断を要することなく文字列の一致そのものになります。あるプラグインがRust移植版とバイト単位で一致すれば、JS版を安心して引退させられます -- フィクスチャ群全体にわたって両者が同一の出力を生むことを、コーパスが証明してくれるからです。
+
+<Info>
+フィクスチャは二役をこなします。今日のJSパイプラインに対するリグレッションガードであり、明日のRust移植版に対する受け入れテストでもあります。同じ`.html`ファイルが、修正なしで両方の役割を果たします。
+</Info>
+
+### 本番との乖離をすべてコメントに記録する
+
+ゴールデンコーパスが信頼に足るのは、それが実際に本番を反映しているときだけです。実際にはテストハーネスが本番スタック全体を起動できないことが多く、パイプラインの*近似*コピーを立ち上げることになります。フィクスチャを誠実に保つ規律は、**意図的な乖離をすべてコメントに記録する**ことです。そうすれば将来の読み手は、コーパスがどこで本番との一致をやめるのかを正確に把握できます：
+
+```typescript
+/**
+ * Pipeline composition mirrors the production config as closely as possible
+ * without booting the full stack. Notable documented divergences:
+ *
+ *   - Shiki is not run; the captured HTML therefore does not include
+ *     syntax-highlighted spans.
+ *   - The filesystem-dependent link resolver is NOT run -- it needs a real
+ *     source map the fixtures do not have.
+ *   - MDX JSX (e.g. <Note>...</Note>) is parsed as raw HTML via rehype-raw,
+ *     not as live MDX components -- that is an MDX-runtime concern.
+ *
+ * Set UPDATE_FIXTURES=1 to (re)write expected-html/*.html. Otherwise the
+ * test asserts each fixture's pipeline output matches the on-disk file.
+ */
+```
+
+<Danger>
+記録されていない乖離こそが、ゴールデンコーパスが静かに本番から外れていく原因です。テストパイプラインがShikiやリンクリゾルバを省いているのに誰もそれを書き残していなければ、次の保守者はフィクスチャが出荷物を反映していると思い込み、緑のコーパスが見逃したリグレッションをそのまま出荷します。コメントが仕様そのものです。要となる情報として扱ってください。
+</Danger>
+
+## 両輪を組み合わせる
+
+入力ノードを外科的に制御したいとき -- エッジケース、不正な入力、特殊なネスト -- そしてパーサのノイズなしに結果のノード形状をアサートしたいときは、ツリーファクトリを使います。組み上がったパイプライン全体が期待どおりのHTMLを正確に出力し続けるという確信が欲しいとき、とりわけその出力が言語横断の一致の参照として機能しなければならないときは、ゴールデンコーパスを使います。成熟したASTプラグインのテストスイートは両方を使います。変換ロジックには高速で焦点の絞られたユニットテストを、エンドツーエンドの契約を固定する小さなゴールデンコーパスを。

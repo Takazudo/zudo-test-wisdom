@@ -1,0 +1,240 @@
+---
+title: Testing remark/rehype Plugins
+description: Two complementary layers for AST plugins -- hand-built tree factories for unit control, and a golden-fixture corpus for whole-pipeline parity.
+sidebar_position: 7
+---
+
+A remark or rehype plugin is just a function that walks and mutates a syntax tree (mdast for markdown, hast for HTML). That makes it tempting to test by feeding markdown through `remark-parse` and eyeballing the result. But there are two distinct things worth verifying, and they call for two distinct techniques:
+
+- **Unit:** does the transform produce the right node shape for a given input node? You want full control over the input, including edge cases that are awkward to express in markdown.
+- **Integration:** does the whole pipeline -- parse, every plugin, stringify -- still emit the exact HTML you expect, and can that output double as a reference for a port to another language?
+
+These are complementary halves, not alternatives. Unit tests give you node-shape control; integration tests validate the assembled pipeline and unlock cross-language parity.
+
+## Half 1: mdast tree factories (unit)
+
+The trick that makes plugin unit tests pleasant is to **build the input tree by hand** and run the plugin's `Transformer` directly on a synthetic `Root` -- no `remark-parse` round-trip. Parsing markdown introduces noise (text nodes, position data, whitespace handling) and, worse, makes some node shapes hard or impossible to produce on demand. Hand-built trees let you construct exactly the node you want to test: a bare `definition` node, a malformed URL, a specific nesting depth.
+
+A few tiny factories go a long way:
+
+```typescript
+import type { Root, Link, Paragraph, Definition } from "mdast";
+
+function makeLink(url: string): Link {
+  return { type: "link", url, children: [{ type: "text", value: "link" }] };
+}
+
+function makeDefinition(url: string): Definition {
+  return { type: "definition", url, identifier: "ref", label: "ref" };
+}
+
+function makeTree(...links: (Link | Definition)[]): Root {
+  return {
+    type: "root",
+    children: links.map((link) =>
+      link.type === "definition"
+        ? link
+        : ({
+            type: "paragraph",
+            children: [link],
+          } as Paragraph),
+    ),
+  };
+}
+```
+
+With those, a test calls the plugin factory, invokes the returned transformer on the synthetic tree, and asserts on the mutated node in place:
+
+```typescript
+import { resolve } from "node:path";
+import { describe, it, expect } from "vitest";
+import { remarkResolveMarkdownLinks } from "../remark-resolve-markdown-links";
+import { createTempProject, touch, cleanupTempProject } from "./test-helpers";
+
+it("resolves a relative .mdx link to a URL", () => {
+  touch(rootDir, "src/content/docs/guides/getting-started.mdx");
+  touch(rootDir, "src/content/docs/guides/other-doc.mdx");
+
+  const link = makeLink("./other-doc.mdx");
+  const tree = makeTree(link);
+  const file = {
+    path: resolve(rootDir, "src/content/docs/guides/getting-started.mdx"),
+  };
+
+  const plugin = remarkResolveMarkdownLinks(baseOptions());
+  plugin(tree, file);
+
+  expect(link.url).toBe("/docs/guides/other-doc/");
+});
+```
+
+Because `link` is the same object reference the tree holds, asserting `link.url` after `plugin(tree, file)` reads the mutation directly -- no need to walk the tree again.
+
+<Tip>
+Hand-built trees shine on edge cases. A `definition` node (a reference-style link target), a URL with a hash and a query string, a link nested three paragraphs deep -- each is a one-liner with a factory, but a fiddly markdown sample to write and keep stable.
+</Tip>
+
+### Deterministic on-disk context
+
+The link resolver above does not work on the tree alone -- it resolves relative paths against a real filesystem to decide whether a target exists. To keep that deterministic, give it a throwaway project directory built fresh for every test:
+
+```typescript
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+
+/** Create a unique temporary directory for testing. */
+export function createTempProject(): string {
+  const dir = resolve(
+    tmpdir(),
+    `md-plugins-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Create a file (and parent dirs) with minimal markdown content. */
+export function touch(base: string, filePath: string): void {
+  const full = resolve(base, filePath);
+  mkdirSync(resolve(full, ".."), { recursive: true });
+  writeFileSync(full, "# Test");
+}
+
+/** Remove a temporary directory. */
+export function cleanupTempProject(dir: string): void {
+  rmSync(dir, { recursive: true, force: true });
+}
+```
+
+Wire them into the lifecycle so each test starts from a clean, isolated tree on disk:
+
+```typescript
+describe("remarkResolveMarkdownLinks", () => {
+  let rootDir: string;
+
+  beforeEach(() => {
+    rootDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanupTempProject(rootDir);
+  });
+
+  // ...tests call touch(rootDir, "...") to lay down the files they need
+});
+```
+
+<Note>
+The unique suffix (`Date.now()` plus a random base-36 string) means parallel test workers never collide on the same directory, and `afterEach` cleanup keeps the temp folder from leaking between runs. This is the same isolation discipline as an in-memory DB per test -- just on the real filesystem, because that is what the resolver reads.
+</Note>
+
+## Half 2: golden-fixture corpus (integration)
+
+Unit tests prove each transform in isolation. They cannot prove the *assembled* pipeline still emits the right HTML once every plugin runs in order. For that, drive a corpus of real `.mdx` fixtures through the actual `unified()` pipeline and compare the output to checked-in `expected-html/*.html` files.
+
+```typescript
+import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { resolve, dirname, basename } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, it, expect } from "vitest";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkGfm from "remark-gfm";
+import remarkRehype from "remark-rehype";
+import rehypeRaw from "rehype-raw";
+import rehypeStringify from "rehype-stringify";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const fixturesDir = resolve(here, "../../__fixtures__");
+const expectedDir = resolve(fixturesDir, "expected-html");
+const updateMode = process.env.UPDATE_FIXTURES === "1";
+
+function buildProcessor() {
+  return unified()
+    .use(remarkParse)
+    .use(remarkGfm)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(rehypeRaw)
+    .use(rehypeStringify, { allowDangerousHtml: true });
+}
+```
+
+The fixture loop renders each `.mdx`, and the assertion depends on a single environment flag:
+
+```typescript
+describe("md-plugins fixture corpus", () => {
+  const fixtures = readdirSync(fixturesDir)
+    .filter((f) => f.endsWith(".mdx"))
+    .sort();
+
+  for (const file of fixtures) {
+    const name = basename(file, ".mdx");
+    const expectedPath = resolve(expectedDir, `${name}.html`);
+
+    it(`renders ${file}`, async () => {
+      const src = readFileSync(resolve(fixturesDir, file), "utf8");
+      const html = String(await buildProcessor().process(src));
+
+      if (updateMode || !existsSync(expectedPath)) {
+        writeFileSync(expectedPath, html, "utf8");
+      }
+
+      const expected = readFileSync(expectedPath, "utf8");
+      expect(html).toBe(expected);
+    });
+  }
+});
+```
+
+### The UPDATE_FIXTURES toggle
+
+The `process.env.UPDATE_FIXTURES === "1"` branch is what makes golden tests maintainable. In normal runs the test asserts each fixture's output equals the on-disk file. When you intentionally change the pipeline, run it once with the flag set to regenerate the expected files:
+
+```bash
+UPDATE_FIXTURES=1 pnpm vitest run fixtures
+```
+
+Then you review the resulting diff in the `expected-html/*.html` files like any other change. A surprising diff means an unintended regression; an expected diff is your new baseline. The flag also auto-writes the file the first time it does not exist, so adding a fixture is just dropping in a new `.mdx`.
+
+<Warning>
+Never regenerate fixtures blindly to make a red test go green. The whole value of a golden corpus is that an unexpected diff is a signal. Read the diff, confirm it matches the change you intended, and only then commit the regenerated HTML.
+</Warning>
+
+### The corpus as a parity oracle
+
+Here is where the golden corpus earns its keep beyond regression catching. Once you have a trusted JS reference output for every fixture, that output becomes a **parity oracle** for a port of the same pipeline to another language. If you are reimplementing the transform in Rust, you run the Rust pipeline over the identical fixtures and diff its HTML against the JS-generated `expected-html/*.html`, **byte for byte**.
+
+This is the safe way to port a transform pipeline across languages: the reference implementation defines truth, the corpus pins that truth to disk, and parity is a literal string comparison rather than a judgment call. When a plugin reaches byte-for-byte parity with its Rust port, you can retire the JS version with confidence -- the corpus proves the two produce identical output across the whole fixture set.
+
+<Info>
+The fixtures do double duty: a regression guard for the JS pipeline today, and the acceptance test for the Rust port tomorrow. The same `.html` files serve both roles without modification.
+</Info>
+
+### Document every divergence from prod
+
+A golden corpus is only trustworthy if it actually mirrors production. In practice the test harness usually cannot boot the entire production stack, so it stands up a *near*-copy of the pipeline. The discipline that keeps the fixtures honest is to **document every deliberate divergence in a comment**, so a future reader knows exactly where the corpus stops matching prod:
+
+```typescript
+/**
+ * Pipeline composition mirrors the production config as closely as possible
+ * without booting the full stack. Notable documented divergences:
+ *
+ *   - Shiki is not run; the captured HTML therefore does not include
+ *     syntax-highlighted spans.
+ *   - The filesystem-dependent link resolver is NOT run -- it needs a real
+ *     source map the fixtures do not have.
+ *   - MDX JSX (e.g. <Note>...</Note>) is parsed as raw HTML via rehype-raw,
+ *     not as live MDX components -- that is an MDX-runtime concern.
+ *
+ * Set UPDATE_FIXTURES=1 to (re)write expected-html/*.html. Otherwise the
+ * test asserts each fixture's pipeline output matches the on-disk file.
+ */
+```
+
+<Danger>
+An undocumented divergence is how a golden corpus silently drifts from prod. If the test pipeline skips Shiki or a link resolver and nobody wrote it down, the next maintainer assumes the fixtures reflect what ships -- and ships a regression the green corpus failed to catch. The comment is the spec; treat it as load-bearing.
+</Danger>
+
+## Putting the halves together
+
+Reach for tree factories when you need surgical control over an input node -- edge cases, malformed input, exotic nesting -- and want to assert on the resulting node shape without parser noise. Reach for the golden corpus when you need confidence that the whole assembled pipeline still emits the exact HTML you expect, and especially when that output has to serve as a cross-language parity reference. A mature AST-plugin test suite uses both: fast, focused unit tests for the transform logic, and a small golden corpus pinning the end-to-end contract.
