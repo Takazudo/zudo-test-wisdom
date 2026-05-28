@@ -501,7 +501,7 @@ assert_eq() {
   local label="$1" actual="$2" expected="$3"
   if [ "$actual" = "$expected" ]; then
     echo "  PASS: $label"
-    PASS=$((PASS + 1))  # ((PASS++))はNG -- 下記の注意参照
+    PASS=$((PASS + 1))  # NOT ((PASS++)) -- see gotcha below
   else
     echo "  FAIL: $label (expected '$expected', got '$actual')"
     FAIL=$((FAIL + 1))
