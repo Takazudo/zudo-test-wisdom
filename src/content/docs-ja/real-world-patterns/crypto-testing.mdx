@@ -1,0 +1,140 @@
+---
+title: 暗号 & ハッシュのテスト
+description: ハッシュ・HMAC・署名関数に対する既知の答えによるテスト。
+sidebar_position: 6
+---
+
+## 「同じ入力なら同じ出力」という罠
+
+ハッシュ関数に対して最初に書きたくなるテストは、整合性チェックでしょう。同じ入力を2回ハッシュし、結果が一致することをアサートするものです。
+
+```ts
+import { describe, it, expect } from "vitest";
+import { hashContent } from "../hash.js";
+
+describe("hashContent", () => {
+  it("produces consistent output for the same input", async () => {
+    const hash1 = await hashContent("hello world");
+    const hash2 = await hashContent("hello world");
+
+    expect(hash1).toBe(hash2);
+  });
+});
+```
+
+このテストはパスします。しかし、ほとんど何も証明していません。
+
+文字列をUTF-8ではなくUTF-16でエンコードしてしまうハッシュ関数、誤ったバイト範囲をハッシュする関数、あるいはアルゴリズムそのものを間違えている関数であっても、*同じ入力*に対しては毎回*同じ出力*を返します。決定性はほぼあらゆる純粋関数が持つ性質であり、ダイジェストに流し込まれているバイトが意図したものかどうかは何も教えてくれません。
+
+<Warning>
+整合性テスト（`hash(x) === hash(x)`）も一意性テスト（`hash(x) !== hash(y)`）も、エンコードが間違っていてもどちらもパスします。これらが確認しているのは関数が決定的であることであって、*正しい*ことではありません。エンコードのバグはそのまま素通りします。
+</Warning>
+
+## 既知の答えによるテスト：外部のダイジェストに固定する
+
+解決策は、出力を**独立したツール**で計算した具体的なダイジェストに対してアサートすることです。そのツールは、あなたのコードのエンコードロジックを共有していないものを選びます。`"hello world"`のSHA-256は、アルゴリズムによって値が固定され、どこでも再現できます。
+
+```ts
+it("matches the known SHA-256 digest of 'hello world'", async () => {
+  const hash = await hashContent("hello world");
+
+  // Known external digest -- verify with: echo -n "hello world" | sha256sum
+  expect(hash).toBe(
+    "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+  );
+});
+```
+
+この定数は、アプリケーションのコードを一切関与させずに、シェルから再生成できます。
+
+```bash
+echo -n "hello world" | sha256sum
+# b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+```
+
+<Tip>
+`echo`の`-n`フラグは重要です。これがないと`echo`は末尾に改行を付け加え、`"hello world\n"`をハッシュすることになり、まったく異なるダイジェストが生成されます。これはこのテストが捕捉しようとしているのとまさに同種のバイトレベルのミスです。参照値は正しく生成しましょう。
+</Tip>
+
+期待値があなたのコードベースの外部から来ているため、UTF-16のバグや1バイトずれたバイトスライスは、自分自身と黙って一致するのではなく、テストを*失敗*させるようになります。これが、関数が整合的であることをテストするのと、正しいことをテストするのとの違いです。
+
+## 入力型をまたいだ等価性
+
+ハッシュ関数は複数の入力型を受け付けることがよくあります。`string`、`ArrayBuffer`、`Buffer`などです。概念上は、同じバイトであればどのような形で渡されても同じダイジェストを生成するはずです。しかし実際には、各入力経路はそれぞれ独自のエンコード処理を持っており、それらが食い違うことがあります。
+
+文字列とそのバイトバッファ等価物が同一にハッシュされることをアサートします。
+
+```ts
+it("hashes a string and its ArrayBuffer identically", async () => {
+  const text = "hello world";
+  const arrayBuffer = new TextEncoder().encode(text).buffer;
+
+  const hashFromString = await hashContent(text);
+  const hashFromBuffer = await hashContent(arrayBuffer);
+
+  expect(hashFromBuffer).toBe(hashFromString);
+});
+```
+
+この2つの経路が食い違うと、同じ論理的内容が2つの異なるハッシュを生成してしまいます。これは重複排除、キャッシュキー、コンテンツアドレス指定ストレージを壊すバグです。1つの入力型に対する純粋な既知の答えテストだけでは捕捉できません。型をまたいだ等価性のアサーションが必要です。
+
+<Info>
+これがこの規律の2本目の柱です。1つの既知の答えのベクターは、*1つの*入力形状についてエンコードが正しいことを証明します。入力型をまたいだ等価性は、受け付けるすべての入力形状が同じ正しいエンコードへと集約されることを証明します。
+</Info>
+
+## 応用できるルール
+
+あらゆるハッシュ・HMAC・エンコード関数に対して、2種類のアサーションを書きましょう。
+
+1. **少なくとも1つの既知の答えのベクター** -- 出力を、独立したツール（`sha256sum`、`openssl`、仕様のテストベクター、別言語の標準ライブラリ）で計算した定数に固定する。
+2. **入力型をまたいだ等価性** -- 受け付けるすべての入力型（`string`、`ArrayBuffer`、`Buffer`）が同じダイジェストにハッシュされること。
+
+1つ目はエンコードとアルゴリズムのバグを捕捉します。2つ目は入力経路のずれを捕捉します。両者を合わせることで、関数の振る舞いを自分自身ではなく外部の基準値に固定できます。
+
+## JWTの署名：ここでも既知の答えが効く
+
+JWTは署名されたデータなので、同じ規律が認証コードにそのまま転用できます。**署名ベクター**の観点からです。
+
+HMAC-SHA256（`HS256`アルゴリズム）は決定的です。固定されたシークレットと固定されたペイロードからは、ちょうど1つの署名が生成されます。つまりJWTの署名も、他の既知の答えのベクターと同じように扱えます。生成されたトークン（またはその署名部分）を、独立したJWTツールで生成した値に固定しておけば、署名処理のリグレッションは大きな声で失敗してくれます。
+
+```ts
+import { describe, it, expect } from "vitest";
+import { createToken, verifyToken } from "../utils/jwt.js";
+
+const TEST_SECRET = "test-secret-key-that-is-long-enough-for-hs256";
+
+describe("JWT signing", () => {
+  it("verifies a token signed with the same secret", async () => {
+    const token = await createToken({ sub: "user-123" }, TEST_SECRET, "1h");
+
+    const payload = await verifyToken(token, TEST_SECRET);
+    expect(payload.sub).toBe("user-123");
+  });
+
+  it("rejects a token signed with a different secret", async () => {
+    const token = await createToken({ sub: "user-123" }, TEST_SECRET, "1h");
+
+    await expect(
+      verifyToken(token, "a-completely-different-secret-key"),
+    ).rejects.toThrow();
+  });
+});
+```
+
+正常系は有効な署名がラウンドトリップすることを確認し、異常系は誤ったシークレットが黙って受理されるのではなく拒否されることを確認します。どちらも署名ベクターのアサーションであり、検証の振る舞いをシークレットとペイロードの暗号学的な関係に固定しています。
+
+<Note>
+このページではJWTを既知の答え／署名ベクターの観点からのみ扱います。ハッシュテストと規律を共有する部分です。トークンの有効期限（`vi.setSystemTime`でテストする）のような時間ベースの振る舞いは時刻制御の関心事であり、[バックエンド & Node.js テスト](./backend-testing.mdx)のページで扱います。
+</Note>
+
+## 重要な原則
+
+1. **整合性だけに頼らない。** `hash(x) === hash(x)`はエンコードが壊れていてもパスします。必要条件ではありますが、決して十分条件ではありません。
+
+2. **外部の定数に固定する。** 期待されるダイジェストは、あなたのコードのエンコードロジックを共有しないツールから得る必要があります。そうすればバグが自分自身と一致してしまうことはありません。
+
+3. **参照バイトに注意する。** `echo -n`か`echo`か、UTF-8かUTF-16か、末尾の改行があるか -- 参照値は、ハッシュしようとしているまさにそのバイトから生成して初めて役に立ちます。
+
+4. **入力型をまたいだ等価性をアサートする。** 受け付けるすべての入力形状（`string`、`ArrayBuffer`、`Buffer`）が同じダイジェストを生成しなければなりません。
+
+5. **署名もベクターとして扱う。** 決定的なHMAC署名（JWTの`HS256`）には、同じ既知の答えの扱いを適用します。正常系を固定し、誤ったシークレットの系を拒否させます。
