@@ -52,6 +52,102 @@ export default defineConfig({
 Run `npx playwright test --project=ci` in CI and `npx playwright test --project=interactive` locally when you need full keyboard/clipboard testing.
 </Tip>
 
+## Quarantining Flakes: The Retries-Asymmetry Trap
+
+Beyond the CI-safe vs `@interactive` split, there is a third tag worth knowing: `@flaky`. It exists because of a subtle trap — **CI and your local pre-push gate often run with different retry budgets**, so a test can be green in one and red in the other.
+
+The trap starts here:
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  // CI retries twice; local runs get zero retries.
+  retries: process.env.CI ? 2 : 0,
+});
+```
+
+With `retries: 2` in CI, a test that passes on its second or third attempt is reported **green**. Run the exact same test on a local `b4push` gate with `retries: 0` and it goes **red on the first failure**. The test did not change — only the retry budget did. This is the insight to internalize: **"flaky" is gate-relative.** A test is only as flaky as the strictest gate it has to clear.
+
+When you have a known-flaky test that already lives on `main`, deleting it loses coverage. Instead, tag it `@flaky` in the title and quarantine it from the strict local gate without removing it:
+
+```bash
+# scripts/run-b4push.sh -- exclude @flaky from the strict local gate
+CHROMIUM_INVERT="@interactive|@flaky"
+WEBKIT_INVERT="@flaky"
+
+# Chromium step: skip both @interactive and @flaky
+pnpm test:e2e --project=chromium --grep-invert="$CHROMIUM_INVERT"
+
+# WebKit @interactive step: run @interactive but still drop @flaky
+pnpm test:e2e --project=webkit --grep="@interactive" --grep-invert="$WEBKIT_INVERT"
+```
+
+The Chromium step adds `@flaky` to its `--grep-invert` (alongside `@interactive`), and the WebKit `@interactive` step also excludes `@flaky`. The tests stay in the suite — CI still runs them and tolerates the occasional retry — but they no longer trip the zero-retry local gate.
+
+<Warning>
+`@flaky` is a quarantine, not a permanent skip. Tag only tests that are **already** known-flaky on `main`; never tag a brand-new test to make a gate pass. When you fix the underlying race, remove the tag in the same PR — otherwise the list silently grows and you lose real coverage.
+</Warning>
+
+<Tip>
+Keep escape hatches for the local gate so a flaky machine never blocks a push: e.g. `SKIP_E2E_WEBKIT=1` to skip just the WebKit pass, `SKIP_E2E=1` to skip the whole E2E stage, and a `RUN_FLAKY=1` opt-in to run the quarantined tests when verifying a fix.
+</Tip>
+
+## Editor Input in E2E
+
+Driving a code editor (CodeMirror, Monaco, ProseMirror, or any `contenteditable`) from Playwright is harder than `page.fill()`. If the editor has a vim mode, `page.keyboard.type("hello")` is a disaster: the leading `h` moves the cursor left, `i` enters insert mode, and the rest is interpreted as commands rather than text.
+
+The reliable approach is to select all existing content via the **DOM Selection API**, then push the new content with `page.keyboard.insertText()`. `insertText` dispatches a synthetic `input` event that the editor handles directly, **bypassing vim-mode command interpretation entirely**:
+
+```typescript
+// e2e/helpers.ts
+import type { Page } from "@playwright/test";
+import { expect } from "@playwright/test";
+import os from "os";
+
+// Platform-aware modifier: Meta on macOS, Control on Linux/Windows
+export const mod = os.platform() === "darwin" ? "Meta" : "Control";
+
+export async function setEditorContent(page: Page, content: string) {
+  const editor = page.locator(".cm-content");
+  await editor.waitFor({ timeout: 5000 });
+  await editor.click();
+
+  // Select all content via the DOM Selection API (works regardless of vim mode)
+  await page.evaluate(() => {
+    const el = document.querySelector(".cm-content");
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  });
+
+  // insertText dispatches an input event the editor handles directly,
+  // bypassing vim-mode command interpretation entirely.
+  await page.keyboard.insertText(content);
+
+  // Wait for the Lezer parse + decoration updates to land before asserting.
+  const firstLine = content.split("\n").find((l) => l.trim()) || content;
+  await expect(page.locator(".cm-content")).toContainText(firstLine.slice(0, 20), {
+    timeout: 5000,
+  });
+
+  // Arbitrary timeout — acceptable ONLY because 500ms is the known auto-save
+  // debounce constant. Features like split-pane read content back from the
+  // backend, so the test must wait >= the debounce or it races the persist.
+  await page.waitForTimeout(500);
+}
+```
+
+The platform-aware `mod` helper lets the same spec drive editor shortcuts on macOS (`Meta`) and Linux/Windows (`Control`) without branching in every test.
+
+<Warning>
+That `waitForTimeout(500)` is the **legitimate exception** to the usual "never use an arbitrary `waitForTimeout`" rule. An arbitrary wait is acceptable only when it is **keyed to a known application constant** — here, the 500ms auto-save debounce — and you **document why** in a comment. A bare `waitForTimeout(500)` with no rationale is still a flake waiting to happen; tie it to a real constant or replace it with a proper `expect` wait.
+</Warning>
+
 ## Console Error Monitoring
 
 Extend Playwright's test fixture to automatically fail on console errors:
@@ -94,6 +190,44 @@ test("home page has no console errors", async ({ page, consoleErrors }) => {
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
+
+### Filtering benign errors with a curated allowlist
+
+The `expect(errors).toEqual([])` assertion above works on a pristine app — but real suites quickly hit a wall. There are almost always *benign* errors: framework dev warnings, third-party SDK noise, adapters that fail gracefully outside their real runtime. A strict empty-array assertion turns every one of those into a red test, and the usual reaction — loosening the check until it stops complaining — throws away the regression-catching value entirely.
+
+The fix is an `assertNoConsoleErrors()` that filters a **curated allowlist**. The discipline that keeps it honest: **every allowlist entry carries a why-comment** justifying why that specific message is safe to ignore.
+
+```typescript
+// e2e/helpers.ts
+import { expect } from "@playwright/test";
+
+export function assertNoConsoleErrors(errors: string[]) {
+  const unexpected = errors.filter((msg) => {
+    // React DevTools install nag — dev-only, not an app error.
+    if (msg.includes("Download the React DevTools")) return false;
+    // Favicon 404 — the mock server has no favicon; harmless.
+    if (msg.includes("Failed to load resource") && msg.includes("favicon")) return false;
+    // Tauri listen() fails in browser/mock mode: @tauri-apps/api's transformCallback
+    // is undefined outside the WebView runtime. The error is caught internally and
+    // the mock adapter registers its own in-memory listeners instead.
+    if (msg.includes("Failed to register Tauri event listener")) return false;
+    // React warns on an iframe rendered with src="" — known v1 limitation of the
+    // preview pane when no URL is seeded; the iframe renders harmlessly.
+    if (msg.includes('An empty string ("") was passed to the %s attribute') && msg.includes("src")) {
+      return false;
+    }
+    return true;
+  });
+  expect(
+    unexpected,
+    `Unexpected console errors:\n${unexpected.join("\n")}`,
+  ).toHaveLength(0);
+}
+```
+
+<Warning>
+The why-comment on each entry is the load-bearing part, not bureaucratic ceremony. Without a rationale, an allowlist silently rots into "ignore everything": months later nobody remembers whether an entry guards a real known-issue or was added to mute a genuine regression, so the safe move becomes never removing anything. A one-line *why* lets the next reader delete the entry the day its underlying cause is fixed — which is exactly when the allowlist should shrink, not grow.
+</Warning>
 
 ## CI Image Interception for Speed
 

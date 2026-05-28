@@ -52,6 +52,102 @@ export default defineConfig({
 CIでは `npx playwright test --project=ci` を実行し、フルキーボード/クリップボードテストが必要な場合はローカルで `npx playwright test --project=interactive` を実行します。
 </Tip>
 
+## フレイキーテストの隔離：リトライ回数の非対称性という罠
+
+CI安全テスト vs `@interactive` の分割に加えて、知っておく価値のある3つ目のタグがあります：`@flaky` です。このタグが存在する理由は、ある微妙な罠にあります。**CIとローカルのプッシュ前ゲートは、しばしば異なるリトライ回数（リトライバジェット）で実行される**ため、同じテストが一方ではグリーン、もう一方ではレッドになりうるのです。
+
+罠はここから始まります：
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  // CI retries twice; local runs get zero retries.
+  retries: process.env.CI ? 2 : 0,
+});
+```
+
+CIで `retries: 2` が設定されていると、2回目や3回目の試行でパスするテストは**グリーン**として報告されます。まったく同じテストを `retries: 0` のローカル `b4push` ゲートで実行すると、**最初の失敗でレッド**になります。テスト自体は変わっていません。変わったのはリトライ回数だけです。ここで腑に落とすべき洞察はこれです：**「フレイキーかどうか」はゲート相対的である。** テストは、それがクリアしなければならない最も厳しいゲートの分だけフレイキーなのです。
+
+すでに `main` に存在する既知のフレイキーテストがある場合、削除してしまうとカバレッジが失われます。そうではなく、タイトルに `@flaky` タグを付けて、削除することなく厳格なローカルゲートから隔離します：
+
+```bash
+# scripts/run-b4push.sh -- exclude @flaky from the strict local gate
+CHROMIUM_INVERT="@interactive|@flaky"
+WEBKIT_INVERT="@flaky"
+
+# Chromium step: skip both @interactive and @flaky
+pnpm test:e2e --project=chromium --grep-invert="$CHROMIUM_INVERT"
+
+# WebKit @interactive step: run @interactive but still drop @flaky
+pnpm test:e2e --project=webkit --grep="@interactive" --grep-invert="$WEBKIT_INVERT"
+```
+
+Chromiumステップは（`@interactive` に加えて）`--grep-invert` に `@flaky` を追加し、WebKitの `@interactive` ステップも `@flaky` を除外します。テストはスイートに残ったまま（CIは引き続き実行し、ときおりのリトライを許容します）ですが、リトライ回数ゼロのローカルゲートを引っかけることはなくなります。
+
+<Warning>
+`@flaky` は隔離であって、恒久的なスキップではありません。**すでに** `main` 上で既知のフレイキーと分かっているテストにのみタグを付けてください。新規テストにタグを付けてゲートを通そうとしてはいけません。根本的なレース条件を修正したら、同じPR内でタグを削除してください。そうしないとリストが知らぬ間に膨らみ、本物のカバレッジが失われていきます。
+</Warning>
+
+<Tip>
+フレイキーなマシンがプッシュをブロックしないよう、ローカルゲートには脱出口を用意しておきましょう。例：WebKitパスだけをスキップする `SKIP_E2E_WEBKIT=1`、E2Eステージ全体をスキップする `SKIP_E2E=1`、そして修正の検証時に隔離されたテストを実行するためのオプトイン `RUN_FLAKY=1`。
+</Tip>
+
+## E2Eでのエディター入力
+
+コードエディター（CodeMirror、Monaco、ProseMirror、あるいは任意の `contenteditable`）をPlaywrightから操作するのは、`page.fill()` よりも厄介です。エディターにvimモードがある場合、`page.keyboard.type("hello")` は悲惨なことになります。先頭の `h` でカーソルが左に移動し、`i` でインサートモードに入り、残りはテキストではなくコマンドとして解釈されてしまうのです。
+
+確実な方法は、**DOM Selection API** で既存コンテンツをすべて選択し、`page.keyboard.insertText()` で新しいコンテンツを流し込むことです。`insertText` はエディターが直接処理する合成 `input` イベントを発火させ、**vimモードのコマンド解釈を完全にバイパスします**：
+
+```typescript
+// e2e/helpers.ts
+import type { Page } from "@playwright/test";
+import { expect } from "@playwright/test";
+import os from "os";
+
+// Platform-aware modifier: Meta on macOS, Control on Linux/Windows
+export const mod = os.platform() === "darwin" ? "Meta" : "Control";
+
+export async function setEditorContent(page: Page, content: string) {
+  const editor = page.locator(".cm-content");
+  await editor.waitFor({ timeout: 5000 });
+  await editor.click();
+
+  // Select all content via the DOM Selection API (works regardless of vim mode)
+  await page.evaluate(() => {
+    const el = document.querySelector(".cm-content");
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  });
+
+  // insertText dispatches an input event the editor handles directly,
+  // bypassing vim-mode command interpretation entirely.
+  await page.keyboard.insertText(content);
+
+  // Wait for the Lezer parse + decoration updates to land before asserting.
+  const firstLine = content.split("\n").find((l) => l.trim()) || content;
+  await expect(page.locator(".cm-content")).toContainText(firstLine.slice(0, 20), {
+    timeout: 5000,
+  });
+
+  // Arbitrary timeout — acceptable ONLY because 500ms is the known auto-save
+  // debounce constant. Features like split-pane read content back from the
+  // backend, so the test must wait >= the debounce or it races the persist.
+  await page.waitForTimeout(500);
+}
+```
+
+プラットフォームを判別する `mod` ヘルパーにより、同一のspecがmacOS（`Meta`）とLinux/Windows（`Control`）の両方でエディターのショートカットを操作できます。テストごとに分岐を書く必要はありません。
+
+<Warning>
+この `waitForTimeout(500)` は、通常の「任意の `waitForTimeout` を決して使うな」というルールの**正当な例外**です。任意の待機が許容されるのは、それが**既知のアプリケーション定数にひも付けられている**場合（ここでは500msの自動保存デバウンス）に限り、かつコメントでその**理由を文書化している**ときだけです。理由のない裸の `waitForTimeout(500)` は依然としてフレイキーの火種です。実在する定数にひも付けるか、適切な `expect` 待機に置き換えてください。
+</Warning>
+
 ## コンソールエラーモニタリング
 
 Playwrightのテストフィクスチャを拡張して、コンソールエラー時に自動的にテストを失敗させます：
@@ -94,6 +190,44 @@ test("home page has no console errors", async ({ page, consoleErrors }) => {
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
+
+### 許容リスト（allowlist）で無害なエラーをフィルタする
+
+上記の `expect(errors).toEqual([])` というアサーションは、まっさらなアプリでは機能します。しかし実際のスイートはすぐに壁にぶつかります。たいていの場合、*無害な*エラーが必ず存在するのです。フレームワークの開発時警告、サードパーティSDKのノイズ、本来のランタイム外でグレースフルに失敗するアダプターなど。厳格な空配列アサーションは、それらすべてをレッドのテストに変えてしまいます。そして典型的な対処――文句が出なくなるまでチェックを緩める――は、リグレッションを捕捉するという価値そのものを捨て去ることになります。
+
+解決策は、**精選された許容リスト（curated allowlist）**でフィルタする `assertNoConsoleErrors()` です。これを健全に保つための規律はこうです：**許容リストのすべてのエントリは、なぜそのメッセージを無視してよいのかを正当化するwhyコメントを伴う**こと。
+
+```typescript
+// e2e/helpers.ts
+import { expect } from "@playwright/test";
+
+export function assertNoConsoleErrors(errors: string[]) {
+  const unexpected = errors.filter((msg) => {
+    // React DevTools install nag — dev-only, not an app error.
+    if (msg.includes("Download the React DevTools")) return false;
+    // Favicon 404 — the mock server has no favicon; harmless.
+    if (msg.includes("Failed to load resource") && msg.includes("favicon")) return false;
+    // Tauri listen() fails in browser/mock mode: @tauri-apps/api's transformCallback
+    // is undefined outside the WebView runtime. The error is caught internally and
+    // the mock adapter registers its own in-memory listeners instead.
+    if (msg.includes("Failed to register Tauri event listener")) return false;
+    // React warns on an iframe rendered with src="" — known v1 limitation of the
+    // preview pane when no URL is seeded; the iframe renders harmlessly.
+    if (msg.includes('An empty string ("") was passed to the %s attribute') && msg.includes("src")) {
+      return false;
+    }
+    return true;
+  });
+  expect(
+    unexpected,
+    `Unexpected console errors:\n${unexpected.join("\n")}`,
+  ).toHaveLength(0);
+}
+```
+
+<Warning>
+各エントリのwhyコメントは官僚的な儀式ではなく、本質的に重要な部分です。理由がなければ、許容リストは知らぬ間に「すべてを無視する」リストへと腐っていきます。数か月後、誰もそのエントリが本物の既知問題を守っているのか、それとも本物のリグレッションを黙らせるために追加されたのかを覚えておらず、結果として「何も削除しない」が安全策になってしまうのです。1行の*理由*があれば、次に読む人は根本原因が修正されたその日にエントリを削除できます。許容リストが本来あるべき姿――膨らむのではなく縮む――になるのは、まさにそのときなのです。
+</Warning>
 
 ## CI画像インターセプトによる高速化
 
