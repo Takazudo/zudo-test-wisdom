@@ -78,6 +78,121 @@ describe("mdx formatting", () => {
 **冪等性テスト**はフォーマッターやトランスフォーマーにとって強力な不変条件です：操作を2回適用した結果は、1回適用した結果と同じでなければなりません。
 </Tip>
 
+## 出力されたコードを実行する
+
+ここまでの例は、出力を**静的なテキスト**として比較するものでした。ファイルを読み、その内容に対してアサーションを行います。しかし、ビルドツールの中には*実行されるJavaScriptを生成する*ものがあります。ユーザーのハンドラをラップするアダプタ、バンドラのラッパー、スキャフォルダなどです。これらに対しては、文字列の一致チェックではテンプレートが書き出されたことしか証明できません。生成されたコードが実行時に正しく振る舞うことは**証明できない**のです。それを検証するには、成果物を書き出し、インポートし、実際に動かす必要があります。
+
+<Info>
+これはレベル3が通常カバーする静的テキストの比較とは別の問いです。後者でのアサーションは「ビルドが正しいファイルを生成したか？」です。一方ここでの問いは「生成されたラッパーは、実行時に入力を内側のハンドラへ確かに引き渡しているか？」というものです。これは*コード生成における引き渡し（threading）*のチェックであり、出力されたモジュールを実行してはじめて答えられます。
+</Info>
+
+再利用できるレシピは、**一時ディレクトリ + 動的インポート + envスタブ**です。
+
+1. 合成した内側のバンドルを`mkdtemp`で作ったスクラッチディレクトリに書き出す。
+2. 出力ステップ（`emitWorker()`）を実行して、**実際の**`_worker.js`を生成する。
+3. 出力されたファイルを`import(pathToFileURL(...))`し、`default.fetch(new Request(...), envStub)`を呼び出す。
+4. `(env, ctx)`が正しく引き渡されていることをアサートする。ビルドが出力するラッパーは、`env`をユーザーのハンドラへ渡さなければなりません。
+5. `afterEach`でスクラッチディレクトリをクリーンアップする。
+
+```typescript
+// tests/emit-worker.test.ts
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { emitWorker } from "../src/build.js";
+
+let scratchDirs: string[] = [];
+
+afterEach(async () => {
+  for (const d of scratchDirs) {
+    await rm(d, { recursive: true, force: true });
+  }
+  scratchDirs = [];
+});
+
+async function scratch(): Promise<string> {
+  const d = await mkdtemp(join(tmpdir(), "emit-worker-"));
+  scratchDirs.push(d);
+  return d;
+}
+
+describe("emitWorker threads env/ctx into the inner bundle", () => {
+  it("the generated wrapper passes env through to the user handler", async () => {
+    const dir = await scratch();
+
+    // A synthetic inner bundle that reads env from the request scope
+    // the wrapper sets up (here via AsyncLocalStorage), then echoes it.
+    const inputPath = join(dir, "inner.mjs");
+    await writeFile(
+      inputPath,
+      `import { AsyncLocalStorage } from "node:async_hooks";
+const STORAGE_KEY = "__adapter_als__";
+function getStore() {
+  const g = globalThis;
+  let als = g[STORAGE_KEY];
+  if (!als) { als = new AsyncLocalStorage(); g[STORAGE_KEY] = als; }
+  return als.getStore();
+}
+export default {
+  async fetch(request) {
+    const store = getStore();
+    const env = store?.env ?? {};
+    return new Response(
+      JSON.stringify({
+        token: env.API_KEY ?? null,
+        ctxKind: typeof store?.ctx?.waitUntil,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  },
+};
+`,
+      "utf8",
+    );
+
+    // Run the real emit step to produce a real _worker.js.
+    const out = await emitWorker({
+      inputBundlePath: inputPath,
+      outdir: join(dir, "dist"),
+    });
+
+    // Import the emitted artifact as ESM and drive it with a
+    // synthetic Request + env + ctx -- no wrangler / miniflare needed.
+    const worker = (await import(pathToFileURL(out.workerPath).href)) as {
+      default: {
+        fetch: (
+          request: Request,
+          env: Record<string, unknown>,
+          ctx: { waitUntil: (p: Promise<unknown>) => void },
+        ) => Promise<Response>;
+      };
+    };
+
+    const envStub = { API_KEY: "sk-test-1234" };
+    const ctx = { waitUntil: () => {} };
+    const request = new Request("https://worker.test/api/foo", { method: "POST" });
+
+    const response = await worker.default.fetch(request, envStub, ctx);
+    const body = (await response.json()) as { token: string | null; ctxKind: string };
+
+    // The headline check: env actually reached the inner handler.
+    expect(body.token).toBe("sk-test-1234");
+    // ctx was threaded too -- its surface matches the runtime shape.
+    expect(body.ctxKind).toBe("function");
+  });
+});
+```
+
+<Tip>
+内側のバンドルは**合成かつ自己完結**に保ちましょう。ラッパーが使う仕組みの読み取り側（ここでは`globalThis`にキーを置いた`AsyncLocalStorage`）をインライン化します。テストしているのは出力されたラッパーの引き渡しであって、実際のユーザーパッケージではないため、それをバンドルする必要はありません。同じパターンで、ラッパーが中身を見ずに扱う*あらゆる*バインディング（データベースハンドル、シークレット、キューなど）をスタブ化できます。ラッパーは`env`をそのまま保存するだけで、そのメンバーを一切検査しないからです。
+</Tip>
+
+<Warning>
+それでもこれは完全なランタイムテストではありません。出力されたモジュールをインポートして実行するのは**Node**上であり、本来のターゲットランタイム（Cloudflare Workers、Deno、エッジのサンドボックス）ではありません。ランタイム固有のグローバル、実際のアセットサーバー、プラットフォーム独自のリクエストの挙動はスコープ外です。それらにはレベル4（あるいは実際の`wrangler dev` / miniflareの実行）が必要です。このテストが*証明できる*のは、コード生成が責任を負う契約です。入力を渡し、その入力が引き渡されること、これだけです。
+</Warning>
+
 ## ブラインドスポット
 
 <Warning>
