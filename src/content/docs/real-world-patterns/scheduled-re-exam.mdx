@@ -1,0 +1,231 @@
+---
+title: Scheduled Re-exam & Night Exam
+description: Operating heavy, platform-bound test lanes on a schedule -- the CI re-exam workflow, deduped failure issues, on-demand dispatch, and the local night exam.
+sidebar_position: 8
+---
+
+## Why a Local-Only Heavy Lane Fails as the Safety Net
+
+Some test lanes can never run on PR CI: pixel assertions that need a hardware GPU, keyboard-shortcut delivery that is only trustworthy on a real OS. The [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) covers how a test gets classified that way; this page covers what to do operationally once it has. The tempting answer is "run those lanes on the developer's machine before pushing" -- the local heavy lane, [tier T4](../decision-guide/execution-tiers.mdx). As a convenience, that is fine. As the *only* safety net, it fails in three ways:
+
+- **It is bypassable.** A local gate is a script someone may or may not run. Under deadline pressure, on a borrowed machine, or behind a `--no-verify`, it silently does not happen.
+- **It is machine-dependent.** Consider a Tauri text-editor app whose keyboard-shortcut e2e specs are only trustworthy on real WebKit/macOS: on a Linux/WSL2 host the same suite false-reds dozens of specs, while a real macOS machine is the gold standard. Whether the local gate even *means anything* depends on whose machine ran it.
+- **It leaves no paper trail.** Nobody can answer "when did this lane last pass, and on what hardware?" A green that only ever existed in one terminal's scrollback is not a regression gate.
+
+<Note>
+**AI agents are "the other contributors".** Every argument above used to be about teammates; now it is also about coding agents. An agent working in a sandbox, in CI, or on a Linux host is exactly the contributor who cannot run your macOS-only lane -- and it will bypass the local gate without malice, every time. A safety net that requires the right person on the right machine to remember a step is not a net.
+</Note>
+
+The fix is not to abandon the local lane -- it is to stop asking it to be the enforcement layer. Keep it for speed and convenience, and add a **scheduled CI re-exam**: the heavy lanes re-run on capable hardware on a schedule, with a paper trail and automatic issue filing.
+
+## Two Commands, Two Budgets: b4push and exam
+
+Before building the scheduled tier, split the local commands. The pre-push convenience pass and the whole-regression heavy run are different jobs and need different names and different time budgets:
+
+| Command  | Contents                                                          | Budget             | Who runs it                                                              |
+| -------- | ----------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------ |
+| `b4push` | lint gates, typecheck, affected unit tests, build, CI-safe smoke   | bounded, 5--10 min | everyone, before every push, on any machine                              |
+| `exam`   | the whole-regression heavy run: GPU, WebKit/macOS, long flows      | open-ended         | opt-in and platform-gated: scheduled CI, or the capable machine at night |
+
+The split prevents a specific failure mode: one command slowly accreting both jobs. The moment the pre-push pass exceeds its budget, people -- and agents -- start skipping it, and then *nothing* runs before push. `exam` is allowed to be slow precisely because nobody sits waiting for it; `b4push` stays trusted precisely because it is fast.
+
+The name is deliberate. The project periodically re-takes its whole exam, instead of pretending every push can afford to.
+
+## The Scheduled CI Re-exam Workflow
+
+A complete skeleton. It runs on a schedule *and* accepts manual dispatch, executes only the tagged heavy lanes (`@gpu`, `@interactive`, `@macos-only` -- see the tag taxonomy on [Execution Tiers](../decision-guide/execution-tiers.mdx)), and files a deduped issue on failure:
+
+```yaml
+# .github/workflows/exam.yml
+name: exam
+
+on:
+  schedule:
+    # Nightly at 03:00 UTC -- pick a quiet hour for your timezone
+    - cron: "0 3 * * *"
+  # On-demand runs for pre-merge escalation (see below)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  exam:
+    # GitHub-hosted macOS runners are Apple silicon from macos-14 onward
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps webkit
+
+      # Run only the tagged heavy lanes -- everything else already ran on PR CI
+      - name: Run heavy lanes
+        run: pnpm test:e2e --grep "@gpu|@interactive|@macos-only"
+
+      - name: File or update the failure tracking issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh
+```
+
+### Runner Notes
+
+- **GitHub-hosted macOS runners are Apple silicon** (`macos-14` and later): real WebKit, Metal-backed rendering. For a canvas/GPU-heavy web app whose pixel-level specs fail on software-rendering CI runners, this alone can be the difference between false-red and trustworthy.
+- **Third-party hosted macOS providers** exist for when the GitHub-hosted pool is too slow or too expensive for the suite.
+- **A self-hosted runner on your own hardware is an escalation, not a default.** If you do escalate: schedule-only on `main`, never PR-triggered on a public repo, and pair it with offline detection -- e.g. a companion job on a hosted runner that alerts when the self-hosted job has not reported within N hours -- so a sleeping machine is visible rather than silently green-by-absence.
+
+<Warning>
+**Never let PRs trigger a self-hosted runner on a public repository.** A PR-triggered self-hosted runner executes code from anyone who opens a pull request, on your machine. Keep self-hosted exam jobs schedule-only on `main`.
+</Warning>
+
+## One Tracking Issue, Never One Per Run
+
+A nightly job that stays red for a week must not file seven issues. Per-run filing buries the signal under duplicates and trains everyone to ignore the label. The rule: **one open tracking issue per workflow** -- comment on it while the failure persists, close it when the exam goes green, and let the next failure open a fresh one.
+
+The `if: failure()` step in the skeleton above calls this script:
+
+```bash
+#!/usr/bin/env bash
+# scripts/file-exam-issue.sh -- one tracking issue per workflow, never one per run
+set -euo pipefail
+
+LABEL="exam-failure"
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+# Collect failing spec names from your reporter's output
+# (example: Playwright's JSON reporter written to playwright-report/report.json)
+FAILED_SPECS="$(jq -r '.. | objects | select(.ok == false) | .file? // empty' \
+  playwright-report/report.json | sort -u)"
+
+BODY="Scheduled exam failed.
+
+Run: ${RUN_URL}
+
+Failing specs:
+
+\`\`\`
+${FAILED_SPECS}
+\`\`\`"
+
+# Is there already an open tracking issue?
+EXISTING="$(gh issue list --label "$LABEL" --state open \
+  --json number --jq '.[0].number // empty')"
+
+if [ -n "$EXISTING" ]; then
+  # Yes: append this run to it -- do NOT open a duplicate
+  gh issue comment "$EXISTING" --body "$BODY"
+else
+  # No: create the single tracking issue with the fixed label
+  gh issue create \
+    --title "exam: scheduled heavy run is failing" \
+    --label "$LABEL" \
+    --body "$BODY"
+fi
+```
+
+Every report carries the three things a fix session needs: the fixed label (so the dedup query finds it), the failing spec names, and the run URL.
+
+## On-Demand Dispatch: The Pre-Merge Escalation
+
+The standing objection to scheduled testing is feedback latency: a regression merged this morning is invisible until tomorrow. `workflow_dispatch` bounds that objection. When a change touches code that only the scheduled tier covers, do not merge on hope -- dispatch the exam against the branch and wait for the verdict:
+
+```bash
+# The change touches code covered only by scheduled-tier tests?
+# Run the exam on the branch BEFORE merging -- do not wait for tonight's cron.
+gh workflow run exam.yml --ref my-feature-branch
+
+# Follow the run to its verdict
+gh run watch "$(gh run list --workflow=exam.yml --limit 1 \
+  --json databaseId --jq '.[0].databaseId')"
+```
+
+This turns the scheduled tier's main weakness into a bounded cost: the *default* feedback loop is nightly, and the changes that genuinely cannot wait get a manual escape hatch.
+
+## The Night Exam: A Project-Scope Agent Skill
+
+The scheduled CI job is deliberately thin: run, report, file. The richer version of the same idea runs where the tests are most trustworthy -- on the gold-standard machine itself, overnight, with an agent doing the parts plain CI cannot.
+
+Define it as a **project-scope agent skill**: a slash-command-style entry point checked into the repository's agent configuration, so the procedure is versioned, reviewable, and identical every night. Invoked manually before sleep:
+
+```bash
+# Before sleep, on the gold-standard machine
+/exam          # run heavy lanes, triage failures, file deduped issues
+/exam --fix    # ...and additionally pick up to 3 issues and fix them in-session
+```
+
+The skill's pipeline:
+
+1. **Preflight** -- refuse to start unless the tree is clean, the branch is `main`, and it is up to date with the remote
+2. **Keep-awake wrapper** -- run under `caffeinate -i` so the machine does not sleep mid-suite
+3. **Run the platform-gated heavy lanes** -- the same tags the CI exam runs
+4. **Agent triage** -- cluster the failures, then separate known environment-noise signatures from real regressions
+5. **Deduped issues per failure cluster** -- one issue per cluster, not one per spec and not one per run
+6. **`--fix` mode** -- pick up to N of the filed issues and fix them in-session, fixes ready for morning review
+7. **Morning summary** -- one message: what ran, what failed, what was noise, what was filed, what was fixed
+
+The first two steps are plain shell:
+
+```bash
+# Preflight -- refuse to run on a dirty or stale tree
+git status --porcelain | grep -q . && { echo "dirty tree"; exit 1; }
+[ "$(git branch --show-current)" = "main" ] || { echo "not on main"; exit 1; }
+git pull --ff-only
+
+# Keep the machine awake for the whole run (macOS)
+caffeinate -i pnpm test:e2e --grep "@gpu|@interactive|@macos-only"
+```
+
+The triage step is the reason this is an agent skill and not a cron script. On the gold-standard machine a red is *probably* real, but every long-lived heavy suite accumulates known noise signatures: a first-run font-cache warning, a timing-sensitive first frame after cold boot. The agent clusters the failures, matches them against the noise signatures recorded in the project's agent instructions, and files issues only for the remainder. That judgment call -- "these three reds are one regression, that fourth red is Tuesday's known noise" -- is exactly what a plain CI job cannot do.
+
+<Note>
+**Keep the scheduled CI job anyway.** The night exam depends on a human remembering to run it and a machine staying awake -- exactly the failure modes that disqualify local-only lanes. The pairing is the point: the night exam is the rich lane with triage and fixes; the scheduled CI re-exam is the thin backstop that runs even when nobody remembered.
+</Note>
+
+## Scoped Heavy Runs at Implementation Time
+
+Both the cron and the night exam are after-the-fact: they catch the regression hours after the change landed. While *implementing* a change that touches code covered only by heavy-lane tests, do not wait for tonight -- run the related heavy specs now, scoped to the change, on the capable host:
+
+```bash
+# The change touched the shortcut engine -- run just its heavy specs,
+# on the capable host, before declaring the work done
+pnpm test:e2e --grep "@interactive" e2e/shortcuts-*.spec.ts
+```
+
+The hard part is not running the specs -- it is knowing *which* specs a change implicates. That requires a change-to-spec mapping, kept mechanical with two conventions:
+
+- **Issue-numbered spec filenames** -- a name like `e2e/issue-123-shortcut-paste.spec.ts` ties the spec to the change that motivated it and makes it greppable
+- **A module-to-spec table in the project's agent instructions** -- so an agent (or a person) can look up which heavy specs a change implicates:
+
+```markdown
+<!-- In the project's agent instructions: change-to-spec mapping -->
+
+| When a change touches... | Run these heavy specs first            |
+| ------------------------ | -------------------------------------- |
+| src/shortcuts/**         | e2e/shortcuts-*.spec.ts (@interactive) |
+| src/render/gpu/**        | e2e/render-*.spec.ts (@gpu)            |
+| src/export/video/**      | e2e/export-video.spec.ts (@gpu)        |
+```
+
+<Tip>
+Make the scoped run a stated requirement in the agent instructions, not folklore: "when a change touches code covered only by heavy-lane tests, run the mapped specs on a capable host (or dispatch the exam workflow on the branch) before declaring the work done."
+</Tip>
+
+## The Layered Result
+
+| Surface                  | Runs                                  | When                            | On failure                              |
+| ------------------------ | ------------------------------------- | ------------------------------- | --------------------------------------- |
+| `b4push` (local)         | fast bounded pass                     | before every push               | fix before pushing                      |
+| PR CI                    | CI-safe gates                         | every PR                        | merge blocked                           |
+| Scheduled exam (CI)      | tagged heavy lanes on a macOS runner  | nightly cron + manual dispatch  | deduped tracking issue                  |
+| Night exam (local skill) | heavy lanes + agent triage            | manually, before sleep          | issues per cluster, optional `--fix`    |
+| Scoped heavy run (local) | only the specs related to the change  | during implementation           | fix before declaring done               |
+
+No single surface is the safety net; the layering is. Which tests belong in the heavy lanes at all is decided by the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx), and the tier vocabulary (T0--T4) used throughout is defined on [Execution Tiers](../decision-guide/execution-tiers.mdx).
