@@ -256,3 +256,11 @@ jobs:
 <Warning>
 Note that Tauri E2E tests in CI require WebKit dependencies. On Ubuntu, this means `npx playwright install webkit --with-deps`. On macOS runners, WebKit is already available.
 </Warning>
+
+## The Scheduled Re-exam as Safety Net
+
+Tauri keyboard-shortcut and native-platform tests fall into the **platform-incapable** category: they are only trustworthy on real WebKit/macOS. The CI configuration above covers the CI-safe layers (frontend unit tests and DOM-only Playwright specs), but the thin native-integration layer — `@interactive` and `@macos-only` tagged specs — requires a scheduled macOS job as the safety net.
+
+The local heavy lane (`exam`) is convenient but bypassable; it is also machine-dependent (the same suite false-reds dozens of specs on a Linux/WSL2 host). A **scheduled CI re-exam on a macOS runner** provides the paper trail that makes these platform-bound specs part of a real regression gate.
+
+See [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) for the complete workflow: the cron + `workflow_dispatch` skeleton, deduped failure issue filing, and on-demand pre-merge dispatch.

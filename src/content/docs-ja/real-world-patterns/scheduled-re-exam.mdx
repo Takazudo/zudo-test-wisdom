@@ -1,0 +1,234 @@
+---
+title: 定期再試験 & 夜間試験
+description: 重くプラットフォーム依存なテストレーンをスケジュール実行で運用する -- CI再試験ワークフロー、重複排除されたIssue起票、オンデマンドディスパッチ、ローカル夜間試験。
+sidebar_position: 8
+---
+
+## ローカル専用の重いレーンがセーフティネットにならない理由
+
+PRのCIでは決して実行できないテストレーンがあります：ハードウェアGPUを必要とするピクセルアサーション、実OSでしか信頼できないキーボードショートカットの配送など。テストがそのように分類される経緯は[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx)で扱います。このページは、分類された*後*の運用をどうするかを扱います。安直な答えは「プッシュ前に開発者のマシンでそのレーンを実行する」 -- ローカルの重いレーン、つまり[ティアT4](../decision-guide/execution-tiers.mdx)です。利便性としてはそれで構いません。しかし*唯一の*セーフティネットとしては、3つの点で破綻します：
+
+- **バイパス可能である。** ローカルゲートは、誰かが実行するかもしれないし、しないかもしれないスクリプトにすぎません。締切のプレッシャー下、借り物のマシン上、あるいは`--no-verify`の陰で、それは静かに実行されなくなります。
+- **マシン依存である。** キーボードショートカットのe2eスペックが実WebKit/macOS上でしか信頼できないTauri製テキストエディタアプリを考えてみてください：Linux/WSL2ホストでは同じスイートが何十ものスペックを偽の赤（false-red）にし、実macOSマシンこそがゴールドスタンダードです。ローカルゲートに*意味があるかどうか*すら、誰のマシンで実行されたかに依存します。
+- **記録（ペーパートレイル）が残らない。** 「このレーンが最後に通ったのはいつ、どのハードウェア上で？」に誰も答えられません。ある1つのターミナルのスクロールバックの中にしか存在しなかった緑は、リグレッションゲートではありません。
+
+<Note>
+**AIエージェントは「もう一人のコントリビュータ」です。** 上の議論はかつてはチームメイトについてのものでしたが、いまではコーディングエージェントにもそのまま当てはまります。サンドボックス内、CI内、あるいはLinuxホスト上で作業するエージェントは、まさにあなたのmacOS専用レーンを実行できないコントリビュータであり、悪意なくローカルゲートを毎回バイパスします。正しい人が正しいマシンで手順を覚えていることを要求するセーフティネットは、ネットではありません。
+</Note>
+
+解決策はローカルレーンを捨てることではなく、それに強制レイヤーの役割を求めるのをやめることです。速度と利便性のためにローカルレーンは残しつつ、**スケジュールCI再試験**を追加します：重いレーンを、能力のあるハードウェア上でスケジュール実行し、記録を残し、自動でIssueを起票するのです。
+
+## 2つのコマンド、2つの予算：b4push と exam
+
+スケジュールティアを作る前に、ローカルコマンドを分割します。プッシュ前の利便性パスと、全リグレッションの重い実行は別の仕事であり、別の名前と別の時間予算が必要です：
+
+| コマンド | 内容                                                                  | 予算           | 誰が実行するか                                                             |
+| -------- | --------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------------- |
+| `b4push` | lintゲート、型チェック、影響範囲のユニットテスト、ビルド、CIセーフなスモーク | 上限付き、5--10分 | 全員、毎プッシュ前、どのマシンでも                                          |
+| `exam`   | 全リグレッションの重い実行：GPU、WebKit/macOS、長時間フロー              | 上限なし        | オプトインかつプラットフォームゲート付き：スケジュールCI、または夜間の対応マシン |
+
+この分割は特定の失敗モードを防ぎます：1つのコマンドが両方の仕事を徐々に抱え込んでいくことです。プッシュ前パスが予算を超過した瞬間、人も -- エージェントも -- それをスキップし始め、プッシュ前には*何も*実行されなくなります。`exam`が遅くてよいのは、誰もそれを待って座っていないからこそであり、`b4push`が信頼され続けるのは、速いからこそです。
+
+この名前は意図的なものです。すべてのプッシュが試験全体を受けられるふりをする代わりに、プロジェクトが定期的に試験（exam）全体を受け直すのです。
+
+## スケジュールCI再試験ワークフロー
+
+完全なスケルトンです。スケジュール実行*と*手動ディスパッチの両方を受け付け、タグ付けされた重いレーン（`@gpu`、`@interactive`、`@macos-only` -- タグ分類は[実行ティア](../decision-guide/execution-tiers.mdx)を参照）だけを実行し、失敗時には重複排除されたIssueを起票します：
+
+```yaml
+# .github/workflows/exam.yml
+name: exam
+
+on:
+  schedule:
+    # Nightly at 03:00 UTC -- pick a quiet hour for your timezone
+    - cron: "0 3 * * *"
+  # On-demand runs for pre-merge escalation (see below)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  exam:
+    # GitHub-hosted macOS runners are Apple silicon from macos-14 onward
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps webkit
+
+      # Run only the tagged heavy lanes -- everything else already ran on PR CI
+      # The json reporter feeds file-exam-issue.sh below; list keeps the live log readable
+      - name: Run heavy lanes
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report/report.json
+        run: pnpm test:e2e --grep "@gpu|@interactive|@macos-only" --reporter=list,json
+
+      - name: File or update the failure tracking issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh
+```
+
+### ランナーに関する注意
+
+- **GitHubホストのmacOSランナーはAppleシリコンです**（`macos-14`以降）：実WebKit、Metalバックエンドのレンダリング。ソフトウェアレンダリングのCIランナー上ではピクセルレベルのスペックが失敗する、canvas/GPUヘビーなWebアプリにとっては、これだけで偽の赤と信頼できる結果の分かれ目になり得ます。
+- **サードパーティのホスト型macOSプロバイダ**も存在します。GitHubホストのプールではスイートに対して遅すぎる、または高すぎる場合の選択肢です。
+- **自前ハードウェアのセルフホストランナーはエスカレーションであって、デフォルトではありません。** エスカレーションする場合：`main`上でスケジュール実行のみ、パブリックリポジトリでは決してPRトリガーにしない、そしてオフライン検知と組み合わせること -- 例えば、セルフホストジョブがN時間以内に報告してこなかったら警告する、ホスト型ランナー上のコンパニオンジョブ -- これにより、眠っているマシンが「沈黙による緑」ではなく、見える形になります。
+
+<Warning>
+**パブリックリポジトリでは、PRがセルフホストランナーをトリガーできるようにしては絶対にいけません。** PRトリガーのセルフホストランナーは、プルリクエストを開いた誰のコードでも、あなたのマシン上で実行してしまいます。セルフホストのexamジョブは`main`上のスケジュール実行のみに保ちます。
+</Warning>
+
+## 1つのトラッキングIssue、実行ごとに1つではなく
+
+1週間赤いままのナイトリージョブが、7つのIssueを起票してはいけません。実行ごとの起票はシグナルを重複の山に埋もれさせ、全員にそのラベルを無視することを学習させます。ルールは：**ワークフローごとにオープンなトラッキングIssueは1つ** -- 失敗が続く間はそこにコメントし、examが緑に戻ったらクローズし、次の失敗には新しいIssueを開かせます。
+
+上のスケルトンの`if: failure()`ステップは、このスクリプトを呼びます：
+
+```bash
+#!/usr/bin/env bash
+# scripts/file-exam-issue.sh -- one tracking issue per workflow, never one per run
+set -euo pipefail
+
+LABEL="exam-failure"
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+# Collect failing spec names from your reporter's output
+# (example: Playwright's JSON reporter written to playwright-report/report.json)
+FAILED_SPECS="$(jq -r '.. | objects | select(.ok == false) | .file? // empty' \
+  playwright-report/report.json | sort -u)"
+
+BODY="Scheduled exam failed.
+
+Run: ${RUN_URL}
+
+Failing specs:
+
+\`\`\`
+${FAILED_SPECS}
+\`\`\`"
+
+# Is there already an open tracking issue?
+EXISTING="$(gh issue list --label "$LABEL" --state open \
+  --json number --jq '.[0].number // empty')"
+
+if [ -n "$EXISTING" ]; then
+  # Yes: append this run to it -- do NOT open a duplicate
+  gh issue comment "$EXISTING" --body "$BODY"
+else
+  # No: create the single tracking issue with the fixed label
+  gh issue create \
+    --title "exam: scheduled heavy run is failing" \
+    --label "$LABEL" \
+    --body "$BODY"
+fi
+```
+
+各レポートには、修正セッションが必要とする3つの情報が含まれます：固定ラベル（重複排除クエリがIssueを見つけるため）、失敗したスペック名、そして実行URLです。
+
+## オンデマンドディスパッチ：マージ前のエスカレーション
+
+スケジュールテストへの定番の反論はフィードバックの遅延です：今朝マージされたリグレッションは明日まで見えない、というものです。`workflow_dispatch`はこの反論に上限を設けます。スケジュールティアでしかカバーされていないコードに変更が触れるときは、希望的観測でマージしないこと -- そのブランチに対してexamをディスパッチし、判定を待ちます：
+
+```bash
+# The change touches code covered only by scheduled-tier tests?
+# Run the exam on the branch BEFORE merging -- do not wait for tonight's cron.
+gh workflow run exam.yml --ref my-feature-branch
+
+# Follow the run to its verdict
+gh run watch "$(gh run list --workflow=exam.yml --limit 1 \
+  --json databaseId --jq '.[0].databaseId')"
+```
+
+これにより、スケジュールティアの最大の弱点が上限付きのコストに変わります：*デフォルト*のフィードバックループは夜間で、本当に待てない変更には手動の脱出ハッチが用意されている、というわけです。
+
+## 夜間試験：プロジェクトスコープのエージェントスキル
+
+スケジュールCIジョブは意図的に薄く作ります：実行し、報告し、起票するだけ。同じアイデアのよりリッチなバージョンは、テストが最も信頼できる場所 -- ゴールドスタンダードのマシンそのもの -- の上で、夜間に、素のCIにはできない部分をエージェントが担う形で実行します。
+
+これを**プロジェクトスコープのエージェントスキル**として定義します：リポジトリのエージェント設定にチェックインされたスラッシュコマンド形式のエントリポイントです。手順がバージョン管理され、レビュー可能で、毎晩同一になります。就寝前に手動で起動します：
+
+```bash
+# Before sleep, on the gold-standard machine
+/exam          # run heavy lanes, triage failures, file deduped issues
+/exam --fix    # ...and additionally pick up to 3 issues and fix them in-session
+```
+
+スキルのパイプライン：
+
+1. **プリフライト** -- ツリーがクリーンで、ブランチが`main`で、リモートに対して最新でない限り、開始を拒否する
+2. **スリープ防止ラッパー** -- スイートの途中でマシンが眠らないよう`caffeinate -i`の下で実行する
+3. **プラットフォームゲート付きの重いレーンを実行** -- CIのexamと同じタグを実行する
+4. **エージェントによるトリアージ** -- 失敗をクラスタリングし、既知の環境ノイズシグネチャを本物のリグレッションから分離する
+5. **失敗クラスタごとに重複排除されたIssue** -- クラスタごとに1つ。スペックごとでも実行ごとでもなく
+6. **`--fix`モード** -- 起票されたIssueから最大N件を拾い、そのセッション内で修正し、朝のレビューに備える
+7. **朝のサマリー** -- 1つのメッセージ：何が実行され、何が失敗し、何がノイズで、何が起票され、何が修正されたか
+
+最初の2ステップは素のシェルです：
+
+```bash
+# Preflight -- refuse to run on a dirty or stale tree
+git status --porcelain | grep -q . && { echo "dirty tree"; exit 1; }
+[ "$(git branch --show-current)" = "main" ] || { echo "not on main"; exit 1; }
+git pull --ff-only
+
+# Keep the machine awake for the whole run (macOS)
+caffeinate -i pnpm test:e2e --grep "@gpu|@interactive|@macos-only"
+```
+
+トリアージのステップこそが、これがcronスクリプトではなくエージェントスキルである理由です。ゴールドスタンダードのマシン上では赤は*おそらく*本物ですが、長く生きている重いスイートには既知のノイズシグネチャが蓄積していきます：初回実行のフォントキャッシュ警告、コールドブート直後のタイミング依存のファーストフレームなど。エージェントは失敗をクラスタリングし、プロジェクトのエージェント指示に記録されたノイズシグネチャと照合し、残ったものだけをIssueにします。この判断 -- 「この3つの赤は1つのリグレッション、4つ目の赤は火曜日からある既知のノイズ」 -- こそ、素のCIジョブには決してできないことです。
+
+<Note>
+**それでもスケジュールCIジョブは残します。** 夜間試験は、人間が実行を覚えていることと、マシンが起きたままでいることに依存します -- まさにローカル専用レーンを失格にしたのと同じ失敗モードです。ペアであることに意味があります：夜間試験はトリアージと修正を備えたリッチなレーン、スケジュールCI再試験は誰も覚えていなかった夜にも必ず実行される薄いバックストップです。
+</Note>
+
+## 実装時のスコープを絞った重いテスト実行
+
+cronも夜間試験も事後的なものです：変更が取り込まれてから何時間も後にリグレッションを捕まえます。重いレーンのテストでしかカバーされていないコードに触れる変更を*実装している*ときは、今夜を待たないこと -- 関連する重いスペックだけを、変更にスコープを絞って、対応できるホスト上で今すぐ実行します：
+
+```bash
+# The change touched the shortcut engine -- run just its heavy specs,
+# on the capable host, before declaring the work done
+pnpm test:e2e --grep "@interactive" e2e/shortcuts-*.spec.ts
+```
+
+難しいのはスペックの実行ではなく、変更が*どの*スペックに関係するかを知ることです。それには変更→スペックのマッピングが必要で、2つの規約で機械的に保てます：
+
+- **Issue番号付きのスペックファイル名** -- `e2e/issue-123-shortcut-paste.spec.ts`のような名前は、スペックをその動機となった変更に紐付け、grepで見つけられるようにします
+- **プロジェクトのエージェント指示内のモジュール→スペック表** -- エージェント（または人）が、変更がどの重いスペックに関係するかを引けるようにします：
+
+```markdown
+<!-- In the project's agent instructions: change-to-spec mapping -->
+
+| When a change touches... | Run these heavy specs first            |
+| ------------------------ | -------------------------------------- |
+| src/shortcuts/**         | e2e/shortcuts-*.spec.ts (@interactive) |
+| src/render/gpu/**        | e2e/render-*.spec.ts (@gpu)            |
+| src/export/video/**      | e2e/export-video.spec.ts (@gpu)        |
+```
+
+<Tip>
+スコープを絞った実行は、口伝ではなくエージェント指示内の明文化された要件にします：「重いレーンのテストでしかカバーされていないコードに変更が触れた場合、作業完了を宣言する前に、マッピングされたスペックを対応ホスト上で実行する（またはそのブランチでexamワークフローをディスパッチする）」。
+</Tip>
+
+## レイヤー化された全体像
+
+| サーフェス                     | 実行内容                                 | タイミング                       | 失敗時                                  |
+| ------------------------------ | ---------------------------------------- | -------------------------------- | --------------------------------------- |
+| `b4push`（ローカル）           | 高速な上限付きパス                       | 毎プッシュ前                     | プッシュ前に修正                         |
+| PR CI                          | CIセーフなゲート                         | すべてのPR                       | マージブロック                           |
+| スケジュールexam（CI）         | macOSランナー上のタグ付き重いレーン      | 夜間cron + 手動ディスパッチ      | 重複排除されたトラッキングIssue          |
+| 夜間試験（ローカルスキル）     | 重いレーン + エージェントトリアージ      | 就寝前に手動                     | クラスタごとのIssue、任意で`--fix`       |
+| スコープ付き重い実行（ローカル）| 変更に関連するスペックのみ               | 実装中                           | 完了宣言の前に修正                       |
+
+どの単一のサーフェスもセーフティネットではなく、レイヤリングこそがネットです。そもそもどのテストが重いレーンに属するべきかは[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx)が決め、全体で使われるティアの語彙（T0--T4）は[実行ティア](../decision-guide/execution-tiers.mdx)で定義されています。
