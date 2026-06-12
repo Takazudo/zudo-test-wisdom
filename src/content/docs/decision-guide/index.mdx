@@ -74,3 +74,10 @@ Escalation to [Level 6 (AI-based)](../testing-levels/level-6-ai-based-verificati
 2. **L5 cannot reach the assertion.** There is no DOM element with a stable bounding rect, computed styles don't apply (the surface is `<canvas>`), and screenshot pixel-diff is too noisy.
 
 If only one of the two is true, the right answer is the other tier. L6 is the final resort, not "the next thing to try when L5 is hard."
+
+## After Choosing a Level: Decide Where It Runs
+
+Picking the right testing level answers what the test can see. A second decision remains: **where and when does the test run?** That is the execution tier — and it is a separate axis.
+
+- [Execution Tiers](./execution-tiers.mdx) — defines T0 (inner loop) through T4 (local heavy lane), when each applies, and the migration rule for moving tests between tiers.
+- [Heavy Test Decision Rule](./heavy-test-decision.mdx) — the per-test procedure for a test that feels too heavy for PR CI: demote, delete, or classify by *why* it is heavy and assign the matching tier.

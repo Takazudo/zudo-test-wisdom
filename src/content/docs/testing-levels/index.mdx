@@ -48,3 +48,13 @@ Not every task requires Level 5 — and Level 6 is reserved for genuine corner c
 - **Canvas / photo-editor / zoom-resize where L4 is intractable AND L5 cannot reach** -- Level 6, as a one-time final resort
 
 See the [Decision Guide](/pj/zudo-test-wisdom/docs/decision-guide) for a detailed mapping table.
+
+## Two Axes: Level and Tier
+
+Testing levels answer one question: **what can a test see?** A unit test sees pure logic; an E2E test sees a real browser. But there is a second, orthogonal question: **where and when does the test run?** That is answered by the **execution tier** — inner loop, PR CI gate, scheduled re-exam, or local heavy lane.
+
+Every test has a position on both axes. "Too heavy for PR CI" is a tier question, not a level question. When a test is too expensive to run on every PR, the answer is to assign it a different tier — not to rewrite it at a lower level.
+
+Verification artifacts (one-time "it was done" proofs) and regression gates (repeatable deterministic checks) are the two roles a test can play. Tests graduate from verification to regression explicitly — never by default.
+
+See [Execution Tiers](../decision-guide/execution-tiers.mdx) for the full tier definitions and the migration rule.

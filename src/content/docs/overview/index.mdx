@@ -13,8 +13,8 @@ This site covers **frontend testing strategy** for AI-assisted development. The 
 
 These are the core topics documented here, all based on patterns extracted from real production projects:
 
-- **Testing Levels** -- The 5-level escalation ladder from unit tests to visual verification, each with increasing coverage and decreasing blind spots
-- **Decision Guide** -- Which testing level to use based on what changed, common failure patterns when the wrong level is chosen, and required behaviors for AI agents
+- **Testing Levels** -- The 6-level escalation ladder from unit tests to AI-based visual verification, each with increasing coverage and decreasing blind spots
+- **Decision Guide** -- Which testing level to use based on what changed, where and when a test should run (execution tiers), common failure patterns when the wrong level is chosen, and required behaviors for AI agents
 - **Real-World Patterns** -- Battle-tested Vitest configurations, Playwright E2E patterns, Tauri desktop app testing, and backend/Node.js testing approaches
 - **Tools Reference** -- Quick lookup of tools and commands for each testing level
 
@@ -35,6 +35,7 @@ Testing should escalate, not repeat. When a lower-level test passes but the prob
 3. **Level 3** -- Build Output Verification (read built files)
 4. **Level 4** -- E2E Browser Tests (Playwright, headless browser)
 5. **Level 5** -- Deterministic + Visual Verification (verify-ui + headless browser)
+6. **Level 6** -- AI-Based Visual Verification (final resort, not for CI)
 
 ## How to Use This Guide
 
