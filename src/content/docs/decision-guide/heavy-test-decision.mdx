@@ -1,0 +1,142 @@
+---
+title: Heavy Test Decision Rule
+description: What to do when an E2E test is too heavy for PR CI — fix, demote, or delete, then classify why it is heavy and assign the right tier.
+sidebar_position: 5
+---
+
+## The Question This Page Answers
+
+Sooner or later, every project with E2E tests hits the same moment: a test looks valuable, but it is too slow, too hardware-dependent, or too unreliable for the PR gate. The instinctive question is "where else can this test run?" — but that is the *second* question. Where and when a test runs is a tier question, answered by [Execution Tiers](./execution-tiers.mdx). The *first* question is whether the test deserves a tier at all.
+
+Every heavy test leaves this page through one of three exits:
+
+- **Fix** — keep the test, classify *why* it is heavy, and assign it the matching tier
+- **Demote** — rewrite the assertion at a lower testing level
+- **Delete** — remove the test and watch what happens
+
+<Warning>
+**A strategy that only finds homes for heavy tests will faithfully preserve tests that should die.** If the decision rule has no demote and delete branches, every slow, redundant, or worthless test gets carried into a scheduled tier and runs forever at real cost. Branch 0 exists to filter those tests out first.
+</Warning>
+
+## Branch 0: Before Assigning Any Tier
+
+Before classifying a heavy test by its heaviness, ask two questions in order.
+
+### (a) Is the assertion expressible at a lower level?
+
+If what the test actually asserts can be expressed by a component test or a unit test, **demote it**. A 90-second browser flow that ends in "the computed total equals 42" is a unit test wearing an E2E costume. Demotion makes the assertion faster, more deterministic, and cheaper — with no loss of meaning.
+
+### (b) Has it never caught a real regression, and is it not a critical user journey?
+
+If both are true, **delete it** — then watch the production bug rate for roughly three months. If nothing surfaces that the test would have caught, it was dead weight. If something does, you have learned exactly which assertion matters, and you can write a better, cheaper test for it.
+
+Only survivors of Branch 0 get a tier.
+
+## The Decision Flow
+
+```mermaid
+flowchart TD
+  A[E2E test feels too heavy for PR CI] --> B0{Branch 0:<br/>should it exist at this level?}
+  B0 -->|assertion expressible lower| DEM[Demote<br/>component / unit level]
+  B0 -->|never caught a real bug<br/>AND not a critical journey| DEL[Delete<br/>watch prod bugs ~3 months]
+  B0 -->|keep| C{WHY is it heavy?}
+  C -->|slow but CI-capable| R1[stays on CI<br/>workers, shard, only-changed<br/>tag: @heavy]
+  C -->|needs hardware GPU /<br/>video encoder| R2[tag: @gpu<br/>night exam + scheduled macOS tier]
+  C -->|needs real keyboard /<br/>macOS / native webview| R3[tag: @interactive @macos-only<br/>night exam + scheduled macOS CI]
+  C -->|fails randomly| R4[tag: @flaky + issue URL<br/>quarantine: fix / demote / delete<br/>runs allowed-to-fail in scheduled tier]
+```
+
+## Classify by Why It Is Heavy
+
+"Too heavy" is not one condition. There are four distinct reasons a test can feel too heavy for PR CI, and each demands a different treatment. Conflating them is how projects end up with tests that are local-only (bypassable), deleted out of frustration, or scheduled when they could have stayed on the PR.
+
+### 1. Slow but CI-capable
+
+The test runs fine on CI runners — it just takes long. This category **stays on CI**:
+
+- Tune test-runner **workers** first; parallelism is the cheapest win
+- **Shard** across runners only past roughly 100 tests *and* 30 minutes of runtime
+- Use `--only-changed` as a lossy PR prefilter, backstopped by a scheduled full run
+
+Tag: `@heavy`. Never make this category local-only — slowness alone is not a reason to leave the enforced gate.
+
+### 2. Environment-incapable
+
+The test needs hardware the CI runner does not have: a real GPU, a hardware video encoder. Software rendering on a standard CI runner produces different pixels, so pixel-level assertions fail for environmental reasons, not product reasons. Case B — a canvas/GPU-heavy pattern-generation web app whose pixel-level specs fail on software-rendering CI runners — is the canonical example.
+
+The treatment is the **scheduled tier (T3) on capable hardware**, plus the local heavy lane.
+
+<Note>
+**Demotion does not help here.** A component test runs in the same GPU-less environment as the E2E test — moving the assertion down a level changes nothing about the hardware it executes on. This is the one category where the lower-level rewrite, normally the cheapest exit, is structurally unavailable.
+</Note>
+
+### 3. Platform-incapable
+
+The test is only trustworthy on a specific platform: real OS keyboard delivery, a native webview, macOS-only behavior. Case C — a Tauri text-editor app whose keyboard-shortcut e2e specs are only trustworthy on real WebKit/macOS — is the canonical example.
+
+The treatment is a **layered split**, not one monolithic heavy suite:
+
+1. **Mocked-IPC frontend tests** — the webview UI logic against a mocked native bridge; CI-safe, stays in the PR gate
+2. **Native-side mock-runtime tests** — the native layer's logic against a mock runtime; also CI-safe
+3. **A thin native-integration layer** — the few specs that genuinely need the real platform; tagged `@interactive` / `@macos-only`, run as a T3 scheduled macOS job with on-demand `workflow_dispatch` for pre-merge escalation
+
+Most of the suite's protection moves into the CI-safe layers; only the thin remainder is scheduled. See [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) for how that scheduled job is built.
+
+### 4. Flaky — Not a Heaviness Category at All
+
+A test that fails randomly is not heavy — it is broken. Flakiness routinely gets misfiled as heaviness ("it needs retries, it slows the pipeline down") and shipped off to a scheduled tier, where it keeps flaking with even less visibility. Flaky tests go to the quarantine pipeline below — with a deadline, not a new home.
+
+## Tag Taxonomy
+
+The classification result is recorded as a tag on the test itself, so the tier mapping stays mechanical and grep-able:
+
+| Tag | Meaning | Tier |
+|---|---|---|
+| (untagged) | CI-safe; the default for every new e2e test | T1/T2 |
+| `@smoke` | critical-journey subset (optional) | T1 |
+| `@heavy` | slow but CI-capable | T2/T3 |
+| `@gpu` | needs hardware GPU / video encoder | T3 + local heavy |
+| `@interactive` | needs real keyboard / shortcut engine | T3 (macOS) + local heavy (macOS) |
+| `@macos-only` | trustworthy only on real macOS | T3 (macOS) |
+| `@flaky` | quarantined; inline issue URL required | T3 allowed-to-fail |
+| `@verification` | one-time proof artifact | no gate |
+
+`@verification` marks one-time proof artifacts — specs written to prove a change worked once, not to guard it forever. They belong to no gate; see [Required Testing Behavior](./required-behavior.mdx) for how promotion from verification to regression must happen.
+
+## Classifying a New Test: Mechanical Rules
+
+For a *new* test, classification must not require judgment. Apply the first rule that matches:
+
+1. Reads pixels or depends on GPU timing → `@gpu`
+2. Needs the OS to deliver real keyboard events → `@interactive`
+3. Runtime over ~60 seconds, or a multi-minute flow → `@heavy`
+4. Otherwise → **untagged**
+
+The default matters most: **a new e2e test is untagged and CI-safe unless one of these rules forces a tag.** An agent (or a developer) never starts from "which special tier does my test deserve?" — it starts from "my test runs in the PR gate" and tags only when a rule fires.
+
+## The Quarantine Pipeline for `@flaky`
+
+Quarantine is a pipeline with an exit, not a parking lot:
+
+1. **Tagging requires a paper trail.** `@flaky` is only valid with an inline issue URL right next to it:
+
+```ts
+// quarantined: https://github.com/your-org/your-app/issues/123
+test("drag preview follows cursor @flaky", async ({ page }) => {
+  // ...
+});
+```
+
+2. **Excluded from strict gates.** A quarantined test must not block a PR — otherwise quarantine means nothing.
+3. **It still runs — allowed-to-fail — in the scheduled tier.** A `@flaky` tag that runs nowhere is a graveyard: results stop being collected and the test silently rots. Running allowed-to-fail in T3 keeps fresh failure data flowing into the tracking issue.
+4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it.
+
+<Tip>
+A test that only passes on retry belongs in this pipeline too — pass-on-retry is a triage signal, not a success.
+</Tip>
+
+## Where to Go Next
+
+- [Execution Tiers](./execution-tiers.mdx) — the definitions of T0–T4 and when a project should adopt each one
+- [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) — how the scheduled tier (T3) is actually built: cron, macOS runners, deduped issue filing, on-demand dispatch
+- [Required Testing Behavior](./required-behavior.mdx) — the agent-facing rules: never tag `@flaky` without a linked open issue, promote verification specs explicitly, and more
