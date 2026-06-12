@@ -4,7 +4,7 @@ description: Mandatory behaviors for AI agents when testing frontend code.
 sidebar_position: 3
 ---
 
-## The Five Rules
+## The Five Core Rules
 
 Every AI agent working on frontend code must follow these five rules when testing:
 
@@ -86,6 +86,95 @@ Verification complete:
 
 This transparency helps the user decide if additional testing is needed.
 
+## The Four Execution Rules
+
+Agents operating inside a tiered test suite must also follow these four rules. For background on verification artifacts, tier tags, and the graduation lifecycle, see [Execution Tiers](./execution-tiers.mdx).
+
+### Rule 6 — Verification Tests Do Not Graduate Themselves
+
+Agent-authored verification specs are tagged `@verification` and excluded from all gates. Promotion to a tier is an explicit, deliberate step:
+
+1. Remove the `@verification` tag
+2. Assign the appropriate tier tag (e.g., `@heavy`, `@gpu`)
+3. Confirm the spec fits within the target suite's time budget
+
+An agent never promotes its own verification test. It proposes promotion in the PR description and leaves the decision to the reviewer.
+
+```
+# PR description excerpt
+## Verification spec — graduation proposal
+- spec: tests/banner-render.spec.ts
+- currently: @verification (excluded from gates)
+- proposed tier: T1 (untagged CI-safe e2e)
+- rationale: stable for 5 runs, sub-2s, no platform dependency
+- action needed: reviewer removes @verification tag and assigns tier
+```
+
+<Note>
+The concept of verification artifacts versus regression gates, and the full graduation lifecycle, lives on the [Execution Tiers](./execution-tiers.mdx) page. This rule carries only the enforceable agent behavior: tag it, propose promotion, never self-promote.
+</Note>
+
+### Rule 7 — Red Checks Block the Author
+
+Any red check on a PR you authored is blocking for you, regardless of whether the failing check is marked required in the repository settings. The only exception: the failing test carries `@flaky` with a linked open issue.
+
+```
+# Blocked — do not merge
+PR #42 authored by agent-session-A
+  ✗  unit: auth-service.test.ts — 1 failed
+     (not a required check, but authored by this session)
+  → investigate and fix before declaring done
+
+# Not blocked — exception applies
+  ✗  e2e: flaky-animation.spec.ts @flaky — see issue #38
+     (quarantined; allowed-to-fail in scheduled tier)
+  → merge may proceed; issue #38 tracks the fix
+```
+
+<Warning>
+"The check is not required" is not a valid reason to ignore a red result on your own PR. Required-check status is a CI configuration detail — your authorship obligation is independent of it.
+</Warning>
+
+### Rule 8 — Never Game the Gate
+
+Never introduce any of the following without a linked open issue reference:
+
+- `test.skip` on an existing test
+- `@flaky` tag on a test that was previously passing
+- Loosened screenshot tolerance (e.g., raised pixel threshold)
+- Deleted assertions
+
+Making a gate pass by editing existing assertions requires a fresh-context review of the test diff — do not apply such edits in the same session that authored the original change.
+
+```
+# Wrong — no issue reference
+test.skip('banner renders correctly', () => { ... })
+
+# Wrong — no issue reference
+expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
+
+# Right
+test.skip('banner renders correctly', () => { ... })
+// @flaky: issue #55 — animation timing non-deterministic on CI
+```
+
+### Rule 9 — Scoped Heavy Verification
+
+When a change touches code that is covered only by heavy-lane tests (tagged `@heavy`, `@gpu`, `@interactive`, or `@macos-only`), run the related heavy specs on a capable host before declaring the work done. Alternatively, dispatch the exam workflow on the branch.
+
+See [Heavy Test Decision Rule](./heavy-test-decision.mdx) for how to identify which tests count as heavy-lane and which host is required.
+
+```
+# Before declaring done — change touches GPU rendering path
+$ gh workflow run exam.yml --ref my-feature-branch
+# or, if running locally on a capable host:
+$ pnpm exec playwright test --grep "@gpu" tests/gpu-render.spec.ts
+```
+
+<Warning>
+Declaring work done while heavy-lane coverage for the changed code is unrun is equivalent to skipping the gate. The scheduled re-exam will catch it, but the delay creates a regression window.
+</Warning>
+
 ## Summary Checklist
 
 Before declaring any fix complete:
@@ -95,3 +184,7 @@ Before declaring any fix complete:
 - [ ] If test passes but user reports failure, escalated to next level
 - [ ] For CSS/visual changes, used Level 5
 - [ ] Reported what was and was not tested
+- [ ] New verification specs are tagged `@verification` and not self-promoted
+- [ ] All red checks on own PR are resolved or carry `@flaky` with a linked issue
+- [ ] No `test.skip`, `@flaky`, or loosened tolerances introduced without a linked issue
+- [ ] If change touches heavy-lane-only code, related heavy specs were run on a capable host
