@@ -66,8 +66,11 @@ jobs:
       - run: pnpm exec playwright install --with-deps webkit
 
       # Run only the tagged heavy lanes -- everything else already ran on PR CI
+      # The json reporter feeds file-exam-issue.sh below; list keeps the live log readable
       - name: Run heavy lanes
-        run: pnpm test:e2e --grep "@gpu|@interactive|@macos-only"
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report/report.json
+        run: pnpm test:e2e --grep "@gpu|@interactive|@macos-only" --reporter=list,json
 
       - name: File or update the failure tracking issue
         if: failure()
