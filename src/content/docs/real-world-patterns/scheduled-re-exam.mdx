@@ -182,6 +182,24 @@ Every report carries the three things a fix session needs: the fixed label (so t
 Commit the script's executable bit before the first run: `git update-index --chmod=+x scripts/file-exam-issue.sh`. To test the script locally without touching real issues, run it with `DRY_RUN=1` -- the `run_gh()` wrapper echoes the intended `gh` command instead of executing it, so you can verify both paths against a fixture `report.json`.
 </Note>
 
+### Pin Reporter-Parsing Fixtures to a Real Captured Report
+
+The script above parses Playwright's JSON reporter output. If you write a unit test for that parser (or for any script that consumes a tool's machine-generated output), the fixture used in the test must be a **real artifact captured from the tool itself** -- not a hand-authored shape that matches your assumption of the schema.
+
+The rule: when you unit-test a script that parses a tool's machine output -- a test runner's JSON reporter, a coverage JSON, a bundler stats file -- commit a trimmed sample of the tool's actual output as the fixture. The concrete recipe:
+
+1. Run the tool once under real conditions.
+2. Save its JSON output, trimmed to a representative subset, as `__fixtures__/real-report.json`.
+3. Write the parser's unit test against that file.
+
+When the tool changes its schema in a future version, the test fails loudly -- instead of agreeing forever with a fabricated structure that no longer matches reality.
+
+**The tell that this trap is in play:** the parser's unit tests are green, but the script produces empty or garbage output when run against real data from a fresh tool invocation. This is the classic signature of a fixture that matches the assumption rather than reality.
+
+<Warning>
+Synthetic fixtures are safe only when **you own the contract**. For a third-party tool's output you cannot author truth -- you can only capture it. Hand-authored fixtures are the right choice when the reader owns the schema being tested: for example, mdast tree factories in [remark/rehype plugin tests](./remark-rehype-plugin-testing.mdx) (you own the mdast contract) or synthetic inner-bundle objects in [level-3 build-output tests](../testing-levels/level-3-build-output.mdx) (you own the bundle shape). For a tool like Playwright, Jest, or Vite whose output schema is theirs to change, capturing a real artifact is the only way to stay honest.
+</Warning>
+
 ## On-Demand Dispatch: The Pre-Merge Escalation
 
 The standing objection to scheduled testing is feedback latency: a regression merged this morning is invisible until tomorrow. `workflow_dispatch` bounds that objection. When a change touches code that only the scheduled tier covers, do not merge on hope -- dispatch the exam against the branch and wait for the verdict:
