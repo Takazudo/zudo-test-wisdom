@@ -41,6 +41,21 @@ If `b4push` creeps past its budget, trim it in this order -- and require per-ste
 
 Require `--reporter=verbose` (or equivalent) at each step so timing is visible in the log. If the trimmed `b4push` still exceeds its budget, resist the temptation to just rename the time limit upward. An enforced 25-minute gate beats an aspirational 10-minute one that gets skipped -- but if the gate is genuinely 25 minutes, name it honestly and measure it. The real failure mode is a budget that exists only in the README.
 
+#### Heavy-compile / native (cargo, Rust, ...) projects
+
+The cut-order above subsets **tests** -- it assumes the cost scales with how many specs run. For a native project where the dominant pre-push cost is **compilation**, that axis is the wrong one. A Rust workspace embedding V8 takes 15--30 min for the first cold `cargo` build; *any* compiling step (`cargo clippy`, `cargo test`) blows the budget on a cold tree, and there is no turborepo/nx "affected" for cargo to subset along. Trimming test count does not help when the budget is bounded by compile time, not spec count.
+
+The native analogue of the cut-order moves the cut along the compilation axis instead:
+
+1. **The bounded budget presumes a warm incremental tree.** It only holds when the prior build's artifacts are still on disk; on a cold tree no test-subsetting recovers it.
+2. **Keep the full compiling suite in CI**, not `b4push`. CI is the authoritative T1 gate (see [Execution Tiers](../decision-guide/execution-tiers.mdx)) and runs the full `cargo clippy` / `cargo test` on a warm cache. `b4push` is not the place to pay first-cold-compile cost.
+3. **`b4push` runs only the non-compiling fast checks** -- `fmt`, format, typecheck, JS tests -- **plus warm-tree lint** (a `cargo clippy` that reuses the incremental tree, which is cheap when warm and the budget-buster when cold).
+4. **Gate the full local compile/test behind an opt-in env flag**, e.g. `B4PUSH_FULL=1`, so the contributor who wants the full local pass can ask for it while the default stays bounded and CI remains the enforcement layer.
+
+<Tip>
+Same principle as the JS cut-order, different axis: there the cut is by test count, here it is by compilation. The default `b4push` stays fast and trusted; the cold-compile cost lives in CI, which is the gate that actually blocks the merge.
+</Tip>
+
 ## The Scheduled CI Re-exam Workflow
 
 <Note>
