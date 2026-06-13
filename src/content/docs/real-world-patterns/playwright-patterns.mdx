@@ -71,12 +71,13 @@ export default defineConfig({
 
 In this config, a spec whose filename starts with anything other than `fixtureA`, `fixtureB`, or `fixtureC` matches no project and is collected by zero projects. Playwright runs without error — it simply has nothing to run — and no test failure reveals it. The missing spec produces no result to fail.
 
-The fix mirrors the single-source-of-truth meta-test pattern: a tiny script that asserts every `e2e/*.spec.ts` filename starts with a known project prefix, wired into both the local pre-push gate and CI:
+The fix mirrors the single-source-of-truth meta-test pattern: a tiny script that asserts every e2e spec filename starts with a known project prefix, wired into both the local pre-push gate and CI. Enumerate specs **recursively** with `find` (not `ls e2e/*.spec.ts`, which only globs the top level and would silently miss a spec nested in a subdirectory — the very hole this guard exists to close):
 
 ```bash
 # Every e2e spec must start with a known project prefix, or it runs nowhere.
+# find recurses into subdirectories; `ls e2e/*.spec.ts` would miss e2e/<dir>/*.spec.ts.
 known='fixtureA|fixtureB|fixtureC'
-bad=$(ls e2e/*.spec.ts | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
 [ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
 ```
 
@@ -347,15 +348,24 @@ export { expect };
 // e2e/app.spec.ts
 import { test, expect } from "./fixtures";
 
+const CONSOLE_SETTLE_MS = 1000;
+
 test("home page has no console errors", async ({ page, consoleErrors }) => {
   await page.goto("/");
   await expect(page.locator("h1")).toBeVisible();
+
+  // wait-ok: this test asserts the ABSENCE of console errors, so it must keep
+  // observing past first paint — late console/pageerror events (a failed lazy
+  // chunk, a post-hydration warning) fire after the heading is visible. There is
+  // no positive event to poll for, so hold a bounded settle window before the
+  // fixture teardown asserts. This is the documented absence-window exception.
+  await page.waitForTimeout(CONSOLE_SETTLE_MS);
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
 
 <Tip>
-`waitForLoadState("networkidle")` is the canonical anti-pattern for SPA navigations that fire no network requests — it can resolve before the view is ready. Use a web-first assertion (like `expect(...).toBeVisible()`) or an event-keyed wait as the real completion signal. See [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) for the full catalog and recipe.
+Replacing `waitForLoadState("networkidle")` with `expect(...).toBeVisible()` is the right move for asserting that a view *is ready* — `networkidle` is the canonical anti-pattern for SPA navigations that fire no network requests. But a console-error monitor asserts the *absence* of errors over a window, so it also needs the bounded `wait-ok:` settle above to catch errors that fire after first paint — a positive readiness assertion alone would end the test too early and green-light late errors. See [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) for the full catalog, including the absence-window exception.
 </Tip>
 
 ### Filtering benign errors with a curated allowlist

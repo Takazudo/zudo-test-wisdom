@@ -93,27 +93,43 @@ flowchart TD
 
 インナーループは数秒ではなく数分になります。さらに悪いことに、N個のサーバーを並行して起動するとポートレースのリスクが乗算されます：`EADDRINUSE` の衝突とサーバー間のスタートタイムのずれが断続的なテスト失敗として現れ、フレーキーなテストのように見えますが、実際にはトポロジーの問題です。正しい修正はこのポートレースの表面をリトライで隔離するのではなく、設計で除去することです -- フレーキーネスがトポロジー見直しのシグナルである場合については、[重いテストの判断ルール](./heavy-test-decision.mdx)も参照してください。
 
-### メカニズム1：env varでビルドと`webServer`を1つのフィクスチャに絞る
+### メカニズム1：env varでビルド・`webServer`・specを1つのフィクスチャに絞る
 
-`FIXTURE=<name>` という単一のenv varを導入し、**ビルドステップと`webServer`配列の両方**を対象フィクスチャだけに絞ります。インナーループは1つのサイトをビルドして1つのサーバーを起動するだけ -- N方向のスタッガーもポートレースもありません。CI（env varが未設定）では引き続きN個のサイトをビルド・サーブします。
+`FIXTURE=<name>` という単一のenv varを導入し、ビルドステップ、`webServer`配列、**そしてspecの集合**を対象フィクスチャだけに絞ります。サーバーだけを絞るのでは不十分です：`FIXTURE=site-a` がsite-aのサーバーだけを起動しても、Playwrightが依然としてsite-bとsite-cのspecを収集すれば、それらのspecは起動されていないサーバーに対して走って失敗します。同じenv varで`projects`配列も絞り、対象フィクスチャのspecだけが収集されるようにします。こうするとインナーループは1つのサイトをビルドし、1つのサーバーを起動し、1つのフィクスチャのspecを走らせるだけ -- N方向のスタッガーもポートレースもありません。CI（env varが未設定）では引き続きN個すべてをビルド・サーブ・テストします。
 
 ```ts
 // playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
 const target = process.env.FIXTURE; // e.g. "site-a"
 
-const allServers = [
-  { command: "pnpm build:site-a && pnpm preview:site-a", url: "http://localhost:4001", name: "site-a" },
-  { command: "pnpm build:site-b && pnpm preview:site-b", url: "http://localhost:4002", name: "site-b" },
-  { command: "pnpm build:site-c && pnpm preview:site-c", url: "http://localhost:4003", name: "site-c" },
+const fixtures = [
+  { name: "site-a", port: 4001 },
+  { name: "site-b", port: 4002 },
+  { name: "site-c", port: 4003 },
 ];
 
+// One fixture when FIXTURE is set, all N otherwise (CI).
+const selected = target ? fixtures.filter((f) => f.name === target) : fixtures;
+
 export default defineConfig({
-  webServer: target ? allServers.filter((s) => s.name === target) : allServers,
-  // ...
+  // Boot only the selected fixtures' preview servers...
+  webServer: selected.map((f) => ({
+    command: `pnpm build:${f.name} && pnpm preview:${f.name}`,
+    url: `http://localhost:${f.port}`,
+    name: f.name,
+  })),
+  // ...and collect only their specs. Without this, FIXTURE=site-a still runs
+  // site-b / site-c specs against servers that were never booted.
+  projects: selected.map((f) => ({
+    name: f.name,
+    testMatch: `**/${f.name}/**/*.spec.ts`,
+    use: { baseURL: `http://localhost:${f.port}` },
+  })),
 });
 ```
 
-開発時は `FIXTURE=site-a pnpm test` — 1回のビルド、1つのサーバー、数秒でフィードバック。
+開発時は `FIXTURE=site-a pnpm test` — 1回のビルド、1つのサーバー、site-aのspecだけ、数秒でフィードバック。
 
 ### メカニズム2：変更がなければリビルドをスキップする
 

@@ -71,12 +71,13 @@ export default defineConfig({
 
 この設定では、`fixtureA`・`fixtureB`・`fixtureC` 以外で始まるファイル名のスペックはどのプロジェクトにもマッチせず、ゼロのプロジェクトに収集されます。Playwrightはエラーなく実行されます――単に実行するものがないだけです――そしてテストの失敗もこれを明かしません。存在しない実行は失敗する結果を生み出さないからです。
 
-修正策は、シングルソース・オブ・トゥルースのメタテストパターンと同様です。ローカルのプッシュ前ゲートとCIの両方に組み込む、小さなスクリプトで `e2e/*.spec.ts` のすべてのファイル名が既知のプロジェクトプレフィックスで始まることをアサートします：
+修正策は、シングルソース・オブ・トゥルースのメタテストパターンと同様です。ローカルのプッシュ前ゲートとCIの両方に組み込む小さなスクリプトで、すべてのe2eスペックのファイル名が既知のプロジェクトプレフィックスで始まることをアサートします。スペックの列挙は `find` で**再帰的に**行ってください（`ls e2e/*.spec.ts` はトップレベルしか展開せず、サブディレクトリにネストしたスペックを見逃します -- まさにこのガードが塞ぐべき穴です）：
 
 ```bash
 # Every e2e spec must start with a known project prefix, or it runs nowhere.
+# find recurses into subdirectories; `ls e2e/*.spec.ts` would miss e2e/<dir>/*.spec.ts.
 known='fixtureA|fixtureB|fixtureC'
-bad=$(ls e2e/*.spec.ts | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
 [ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
 ```
 
@@ -347,15 +348,24 @@ export { expect };
 // e2e/app.spec.ts
 import { test, expect } from "./fixtures";
 
+const CONSOLE_SETTLE_MS = 1000;
+
 test("home page has no console errors", async ({ page, consoleErrors }) => {
   await page.goto("/");
   await expect(page.locator("h1")).toBeVisible();
+
+  // wait-ok: this test asserts the ABSENCE of console errors, so it must keep
+  // observing past first paint — late console/pageerror events (a failed lazy
+  // chunk, a post-hydration warning) fire after the heading is visible. There is
+  // no positive event to poll for, so hold a bounded settle window before the
+  // fixture teardown asserts. This is the documented absence-window exception.
+  await page.waitForTimeout(CONSOLE_SETTLE_MS);
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
 
 <Tip>
-`waitForLoadState("networkidle")` は、リクエストを発火しないSPAナビゲーションで使われる典型的なアンチパターンです — ビューが準備できる前に解決することがあります。実際の完了シグナルとして、ウェブファーストのアサーション（`expect(...).toBeVisible()` など）やイベントキーの待機を使用してください。詳しいカタログとレシピは [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) を参照してください。
+`waitForLoadState("networkidle")` を `expect(...).toBeVisible()` に置き換えるのは、ビューが*準備できた*ことをアサートするには正しい手です — `networkidle` は、リクエストを発火しないSPAナビゲーションで使われる典型的なアンチパターンだからです。ただしコンソールエラー監視はある時間枠にわたってエラーの*不在*をアサートするため、初回描画の後に発火するエラーを捉えられるよう、上記の上限つき `wait-ok:` の沈静化待機も必要です — 準備完了のアサーションだけではテストが早く終わりすぎ、遅れて発生するエラーをグリーンで通してしまいます。不在ウィンドウの例外を含む全カタログとレシピは [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) を参照してください。
 </Tip>
 
 ### 許容リスト（allowlist）で無害なエラーをフィルタする
