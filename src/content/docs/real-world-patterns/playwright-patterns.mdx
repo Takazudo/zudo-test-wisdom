@@ -237,6 +237,7 @@ The baseline file records the per-file **count** of unannotated waits — not li
 ```
 
 Rules:
+
 - `actual > baseline` — new bare wait added; CI fails.
 - `actual < baseline` — baseline is stale; CI fails with "shrink the baseline to N". The baseline may only **decrease**, never increase without a matching annotation.
 - File absent from baseline — implicit count of 0; any unannotated wait fails immediately.

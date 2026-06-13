@@ -124,12 +124,12 @@ Before entering the pipeline, confirm there is at least one verifiable green run
 
 1. **Tagging requires a paper trail.** `@flaky` is only valid with an inline issue URL right next to it:
 
-```ts
-// quarantined: https://github.com/your-org/your-app/issues/123
-test("drag preview follows cursor @flaky", async ({ page }) => {
-  // ...
-});
-```
+   ```ts
+   // quarantined: https://github.com/your-org/your-app/issues/123
+   test("drag preview follows cursor @flaky", async ({ page }) => {
+     // ...
+   });
+   ```
 
 2. **Excluded from strict gates.** A quarantined test must not block a PR — otherwise quarantine means nothing.
 3. **It still runs — allowed-to-fail — in the scheduled tier.** A `@flaky` tag that runs nowhere is a graveyard: results stop being collected and the test silently rots. Running allowed-to-fail in T3 keeps fresh failure data flowing into the tracking issue.

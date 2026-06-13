@@ -124,12 +124,12 @@ flowchart TD
 
 1. **タグ付けには証跡が必須です。** `@flaky` は、すぐ隣にインラインのissue URLがあるときだけ有効です：
 
-```ts
-// quarantined: https://github.com/your-org/your-app/issues/123
-test("drag preview follows cursor @flaky", async ({ page }) => {
-  // ...
-});
-```
+   ```ts
+   // quarantined: https://github.com/your-org/your-app/issues/123
+   test("drag preview follows cursor @flaky", async ({ page }) => {
+     // ...
+   });
+   ```
 
 2. **厳格なゲートからは除外されます。** 隔離されたテストがPRをブロックしてはいけません — さもなければ隔離の意味がありません。
 3. **それでも実行されます — スケジュール実行ティアで、失敗許容（allowed-to-fail）として。** どこでも実行されない `@flaky` タグは墓場です：結果が収集されなくなり、テストは静かに腐っていきます。T3で失敗許容として実行し続けることで、新鮮な失敗データがトラッキングissueへ流れ込み続けます。
