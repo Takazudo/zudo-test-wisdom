@@ -198,31 +198,45 @@ test("no update-depth errors on startup", async ({ page }) => {
 set -euo pipefail
 
 BASELINE_FILE="e2e/wait-debt-baseline.txt"
+SPEC_DIR="e2e"
 
-# Nothing to check if the baseline hasn't been introduced yet.
+# Nothing to check until the baseline has been introduced (existence guard).
 [ -f "$BASELINE_FILE" ] || exit 0
 
+# Count waitForTimeout calls that lack a // wait-ok: comment in the 2 lines above.
+count_unannotated() {
+  local path="$1" hits
+  [ -f "$path" ] || { echo 0; return; }
+  hits=$(grep -n "waitForTimeout" "$path" 2>/dev/null || true)
+  [ -n "$hits" ] || { echo 0; return; }
+  printf '%s\n' "$hits" | while IFS=":" read -r lineno _rest; do
+    start=$(( lineno - 2 )); [ "$start" -lt 1 ] && start=1
+    sed -n "${start},$((lineno - 1))p" "$path" | grep -q "wait-ok:" || echo found
+  done | wc -l | tr -d ' '
+}
+
+# Expected count for a path: its baseline line, or 0 if absent (the implicit-zero rule).
+expected_for() {
+  awk -v p="$1" '$2 == p { print $1; found=1 } END { if (!found) print 0 }' "$BASELINE_FILE"
+}
+
+# Check EVERY spec file (so a file absent from the baseline is held to an implicit 0),
+# unioned with the baseline's own paths (to catch a now-deleted file that still has an entry).
 failed=0
-
-while IFS=" " read -r expected_count path; do
-  # Count waitForTimeout calls that lack a // wait-ok: comment in the 2 lines above.
-  actual=$(grep -n "waitForTimeout" "$path" 2>/dev/null | while IFS=":" read -r lineno _rest; do
-    # Check the two preceding lines for the wait-ok marker.
-    start=$(( lineno - 2 ))
-    [ "$start" -lt 1 ] && start=1
-    if ! sed -n "${start},$((lineno - 1))p" "$path" | grep -q "wait-ok:"; then
-      echo "found"
-    fi
-  done | wc -l | tr -d ' ')
-
-  if [ "$actual" -gt "$expected_count" ]; then
-    echo "FAIL $path: $actual unannotated waits (baseline $expected_count) — annotate new waits with // wait-ok: <why>"
+checked=""
+for path in $(find "$SPEC_DIR" -type f -name '*.spec.ts' 2>/dev/null) $(awk '{ print $2 }' "$BASELINE_FILE"); do
+  case " $checked " in *" $path "*) continue ;; esac
+  checked="$checked $path"
+  expected=$(expected_for "$path")
+  actual=$(count_unannotated "$path")
+  if [ "$actual" -gt "$expected" ]; then
+    echo "FAIL $path: $actual unannotated waits (baseline $expected) — annotate new waits with // wait-ok: <why>"
     failed=1
-  elif [ "$actual" -lt "$expected_count" ]; then
-    echo "FAIL $path: baseline is stale ($expected_count → $actual) — shrink the baseline to $actual"
+  elif [ "$actual" -lt "$expected" ]; then
+    echo "FAIL $path: baseline is stale ($expected → $actual) — shrink the baseline to $actual"
     failed=1
   fi
-done < "$BASELINE_FILE"
+done
 
 exit "$failed"
 ```
