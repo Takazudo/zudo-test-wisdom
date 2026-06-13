@@ -52,6 +52,38 @@ export default defineConfig({
 Run `npx playwright test --project=ci` in CI and `npx playwright test --project=interactive` locally when you need full keyboard/clipboard testing.
 </Tip>
 
+## Guard against specs that match no project
+
+The CI-safe / interactive split above uses a **catch-all** `testMatch: /.*\.spec\.ts/` on the `ci` project, so every spec is collected by at least one project — the catch-all is exactly what prevents the trap described here. The trap only appears once you move to a **partitioned** setup where each project maps to a disjoint filename prefix (e.g. one project per fixture or app):
+
+```typescript
+// playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    { name: "fixtureA", testMatch: /fixtureA[^/]*\.spec\.ts/ },
+    { name: "fixtureB", testMatch: /fixtureB[^/]*\.spec\.ts/ },
+    { name: "fixtureC", testMatch: /fixtureC[^/]*\.spec\.ts/ },
+  ],
+});
+```
+
+In this config, a spec whose filename starts with anything other than `fixtureA`, `fixtureB`, or `fixtureC` matches no project and is collected by zero projects. Playwright runs without error — it simply has nothing to run — and no test failure reveals it. The missing spec produces no result to fail.
+
+The fix mirrors the single-source-of-truth meta-test pattern: a tiny script that asserts every `e2e/*.spec.ts` filename starts with a known project prefix, wired into both the local pre-push gate and CI:
+
+```bash
+# Every e2e spec must start with a known project prefix, or it runs nowhere.
+known='fixtureA|fixtureB|fixtureC'
+bad=$(ls e2e/*.spec.ts | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+[ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
+```
+
+<Warning>
+The guard script, not the config, is what makes a filename-prefix project split safe. A green Playwright run only proves that the specs which were collected passed — it cannot prove that every spec ran. If a spec falls outside every project's `testMatch` pattern, Playwright drops it silently. The guard is the only thing that catches a spec the config silently skipped.
+</Warning>
+
 ## Quarantining Flakes: The Retries-Asymmetry Trap
 
 Beyond the CI-safe vs `@interactive` split, there is a third tag worth knowing: `@flaky`. It exists because of a subtle trap — **CI and your local pre-push gate often run with different retry budgets**, so a test can be green in one and red in the other.

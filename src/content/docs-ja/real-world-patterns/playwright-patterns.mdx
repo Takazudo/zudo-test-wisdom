@@ -52,6 +52,38 @@ export default defineConfig({
 CIでは `npx playwright test --project=ci` を実行し、フルキーボード/クリップボードテストが必要な場合はローカルで `npx playwright test --project=interactive` を実行します。
 </Tip>
 
+## いずれのプロジェクトにも一致しないスペックを防ぐ
+
+上記のCI安全 / interactive分割では `ci` プロジェクトに**キャッチオール**の `testMatch: /.*\.spec\.ts/` を使っているため、すべてのスペックが少なくとも1つのプロジェクトに収集されます。このキャッチオールこそが、ここで説明する罠を防いでいるものです。この罠が現れるのは、各プロジェクトがファイル名のプレフィックスで互いに重ならない形に**分割**されたセットアップ（例：フィクスチャやアプリごとに1プロジェクト）に移行したときです：
+
+```typescript
+// playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    { name: "fixtureA", testMatch: /fixtureA[^/]*\.spec\.ts/ },
+    { name: "fixtureB", testMatch: /fixtureB[^/]*\.spec\.ts/ },
+    { name: "fixtureC", testMatch: /fixtureC[^/]*\.spec\.ts/ },
+  ],
+});
+```
+
+この設定では、`fixtureA`・`fixtureB`・`fixtureC` 以外で始まるファイル名のスペックはどのプロジェクトにもマッチせず、ゼロのプロジェクトに収集されます。Playwrightはエラーなく実行されます――単に実行するものがないだけです――そしてテストの失敗もこれを明かしません。存在しない実行は失敗する結果を生み出さないからです。
+
+修正策は、シングルソース・オブ・トゥルースのメタテストパターンと同様です。ローカルのプッシュ前ゲートとCIの両方に組み込む、小さなスクリプトで `e2e/*.spec.ts` のすべてのファイル名が既知のプロジェクトプレフィックスで始まることをアサートします：
+
+```bash
+# Every e2e spec must start with a known project prefix, or it runs nowhere.
+known='fixtureA|fixtureB|fixtureC'
+bad=$(ls e2e/*.spec.ts | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+[ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
+```
+
+<Warning>
+ガードスクリプトこそが、ファイル名プレフィックスによるプロジェクト分割を安全にするものです。設定ではありません。Playwrightのグリーンなランは、収集されたスペックがパスしたことを証明するだけで、すべてのスペックが実行されたことを証明できません。あるスペックがどのプロジェクトの `testMatch` パターンにも該当しない場合、Playwrightは無言でそれを除外します。設定が静かにスキップしたスペックを捕まえるのは、このガードだけです。
+</Warning>
+
 ## フレイキーテストの隔離：リトライ回数の非対称性という罠
 
 CI安全テスト vs `@interactive` の分割に加えて、知っておく価値のある3つ目のタグがあります：`@flaky` です。このタグが存在する理由は、ある微妙な罠にあります。**CIとローカルのプッシュ前ゲートは、しばしば異なるリトライ回数（リトライバジェット）で実行される**ため、同じテストが一方ではグリーン、もう一方ではレッドになりうるのです。
