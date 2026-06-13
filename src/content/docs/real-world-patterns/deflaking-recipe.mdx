@@ -8,6 +8,18 @@ sidebar_position: 9
 
 Every E2E flake has a cause. The five below cover the overwhelming majority of cases in practice, and each has a deterministic fix.
 
+<Note>
+**These five are browser-specific; native suites flake for different reasons.** The catalog below (`waitForTimeout`, `networkidle`, animations, hydration races) is the E2E/browser shape of flakiness. A native suite — a Rust/cargo project, a Go service, any non-browser test runner — flakes for a parallel set of causes:
+
+- **Non-deterministic scheduling** — tests that depend on thread/task interleaving (the native analogue of a hydration race).
+- **Fixed `sleep`/timeout deadlines** — a hard-coded `sleep(N)` waiting for async work is the same guess as a bare `waitForTimeout(N)`; poll the real condition or await the completion signal instead.
+- **Port races (`EADDRINUSE`)** — two parallel tests binding the same fixed port; bind to port `0` (OS-assigned) or serialize the tests that need a real port.
+- **Shared global / process state** — a static, a singleton, or an env var mutated by one test and read by another; the native analogue of test-order coupling. Isolate per-test state.
+- **Filesystem ordering** — relying on directory-listing order or a shared temp path; use a unique temp dir per test and never assume `read_dir` order.
+
+For how to quarantine a native flake mechanically (`#[ignore]` + `cargo test -- --ignored`), see [the Rust/cargo note in the quarantine pipeline](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky).
+</Note>
+
 ### 1. Timing waits (bare `waitForTimeout`)
 
 A bare `waitForTimeout(N)` is a guess: "I think N milliseconds will be enough." It is wrong on a slow CI runner, wrong after a deploy that made the app faster, and wrong after one that made it slower. The fix is a **web-first assertion or an event-keyed wait** that resolves the moment the app reaches the state you actually need — not after an arbitrary delay.

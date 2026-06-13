@@ -139,6 +139,23 @@ Before entering the pipeline, confirm there is at least one verifiable green run
 A test that only passes on retry belongs in this pipeline too — pass-on-retry is a triage signal, not a success.
 </Tip>
 
+<Note>
+**Quarantining a Rust/cargo flake — the same pipeline, no test-title grep.** The pipeline above is described with Playwright's `@flaky`-title-substring convention, but the three mechanics are language-agnostic. On a Rust/cargo project, `#[ignore]` provides all three directly:
+
+```rust
+// quarantined: https://github.com/your-org/your-app/issues/123
+#[test]
+#[ignore = "flaky: https://github.com/your-org/your-app/issues/123"]
+fn drag_preview_follows_cursor() {
+    // ...
+}
+```
+
+- **Paper trail.** The `#[ignore = "..."]` reason string keeps the mandatory inline issue URL right next to the test — the cargo analogue of the `@flaky`-title-substring convention.
+- **Excluded from the strict gate.** `cargo test` skips `#[ignore]` tests by default, so a quarantined flake no longer blocks the gate — the analogue of `--grep-invert "@flaky"`.
+- **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs only the quarantined set, and `cargo test -- --include-ignored` runs everything; schedule one of these as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue.
+</Note>
+
 <Warning>
 **Quarantine suspends product coverage, not just test coverage.** While a test is quarantined, the behavior it guards is unguarded — regressions in that behavior will not be caught until the test is fixed. Treat every quarantine fix as two verifications: first confirm the test mechanics are sound, then confirm the product behavior itself still holds. A fixed flake that immediately fails for a *different* reason is the pipeline working correctly, not a fix gone wrong.
 
