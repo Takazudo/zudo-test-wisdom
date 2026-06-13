@@ -153,7 +153,7 @@ fn drag_preview_follows_cursor() {
 
 - **証跡。** `#[ignore = "..."]` の理由文字列が、必須のインラインissue URLをテストのすぐ隣に保ちます — `@flaky`-タイトル部分文字列の慣習に対応するcargoの仕組みです。
 - **厳格なゲートからの除外。** `cargo test` はデフォルトで `#[ignore]` のテストをスキップするため、隔離されたflakeはゲートをブロックしなくなります — `--grep-invert "@flaky"` に対応します。
-- **それでもどこかで、失敗許容として実行される。** `cargo test -- --ignored` は隔離されたセットだけを実行し、`cargo test -- --include-ignored` はすべてを実行します。どちらかをT3の失敗許容ジョブとしてスケジュールすれば、新鮮な失敗データがトラッキングissueへ流れ込み続けます。
+- **それでもどこかで、失敗許容として実行される。** `cargo test -- --ignored` は無視（ignore）されたセットを実行し、`cargo test -- --include-ignored` はすべてを実行します。どちらかをT3の失敗許容ジョブとしてスケジュールすれば、新鮮な失敗データがトラッキングissueへ流れ込み続けます。注意：`--ignored` は*すべての* `#[ignore]` テストにマッチするため、スイートが遅いテストや手動テストにも `#[ignore]` を使っている場合は、名前フィルタ（例：命名規則を決めて `cargo test flaky_ -- --ignored`）で実行範囲を絞り、無関係な無視テストがflakeのシグナルを汚染しないようにしてください — `#[ignore]` は、flake専用の `@flaky` タイトル部分文字列よりも広いマーカーです。
 </Note>
 
 <Warning>

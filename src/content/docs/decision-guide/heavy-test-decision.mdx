@@ -153,7 +153,7 @@ fn drag_preview_follows_cursor() {
 
 - **Paper trail.** The `#[ignore = "..."]` reason string keeps the mandatory inline issue URL right next to the test — the cargo analogue of the `@flaky`-title-substring convention.
 - **Excluded from the strict gate.** `cargo test` skips `#[ignore]` tests by default, so a quarantined flake no longer blocks the gate — the analogue of `--grep-invert "@flaky"`.
-- **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs only the quarantined set, and `cargo test -- --include-ignored` runs everything; schedule one of these as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue.
+- **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs the ignored set and `cargo test -- --include-ignored` runs everything; schedule one as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue. Caveat: `--ignored` matches *every* `#[ignore]` test, so if your suite also uses `#[ignore]` for slow or manual tests, narrow the run with a name filter (e.g. `cargo test flaky_ -- --ignored` over a naming convention) so unrelated ignored tests do not pollute the flake signal — `#[ignore]` is a broader marker than the flake-specific `@flaky` title substring.
 </Note>
 
 <Warning>
