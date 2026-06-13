@@ -118,6 +118,10 @@ The default matters most: **a new e2e test is untagged and CI-safe unless one of
 
 Quarantine is a pipeline with an exit, not a parking lot:
 
+**Step 0 of quarantine:** verify the test has ever passed (not pass-by-skip) on some host; if it cannot pass, it is **broken, not flaky** — fix or delete immediately, no quarantine.
+
+Before entering the pipeline, confirm there is at least one verifiable green run of the exact assertion on any CI host. Pass-by-skip does not count — Playwright reports skips as `-` rather than `✓`, so check the distinction carefully. A test that has never produced a genuine green run is not flaky; it is broken. Sending it to quarantine would suspend product coverage without any chance of recovery. Note that this step is distinct from Branch 0 (which asks whether the test deserves a tier at all): Step 0 asks whether the test can even pass anywhere. See [Playwright Patterns](../real-world-patterns/playwright-patterns.mdx) for notes on `test.skip` preconditions — a precondition that "should always hold" must be a hard assertion, not a conditional skip that can silently degrade into a permanent vacuous green.
+
 1. **Tagging requires a paper trail.** `@flaky` is only valid with an inline issue URL right next to it:
 
 ```ts
@@ -134,6 +138,12 @@ test("drag preview follows cursor @flaky", async ({ page }) => {
 <Tip>
 A test that only passes on retry belongs in this pipeline too — pass-on-retry is a triage signal, not a success.
 </Tip>
+
+<Warning>
+**Quarantine suspends product coverage, not just test coverage.** While a test is quarantined, the behavior it guards is unguarded — regressions in that behavior will not be caught until the test is fixed. Treat every quarantine fix as two verifications: first confirm the test mechanics are sound, then confirm the product behavior itself still holds. A fixed flake that immediately fails for a *different* reason is the pipeline working correctly, not a fix gone wrong.
+
+Worked case: a drag-and-drop spec was quarantined because Playwright-WebKit never reliably commits native HTML5 drops — a mechanical flake. While it sat in quarantine, the asserted behavior had silently broken: the feature's backend was deleted in a refactor, and the regression shipped unnoticed for days.
+</Warning>
 
 ## Where to Go Next
 
