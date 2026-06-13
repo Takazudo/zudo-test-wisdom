@@ -94,6 +94,22 @@ Chromiumステップは（`@interactive` に加えて）`--grep-invert` に `@fl
 フレイキーなマシンがプッシュをブロックしないよう、ローカルゲートには脱出口を用意しておきましょう。例：WebKitパスだけをスキップする `SKIP_E2E_WEBKIT=1`、E2Eステージ全体をスキップする `SKIP_E2E=1`、そして修正の検証時に隔離されたテストを実行するためのオプトイン `RUN_FLAKY=1`。
 </Tip>
 
+## 前提条件としての `test.skip` — pass-by-skip という罠
+
+`test.skip` は本物の環境依存に使うものです。特定のOSでしか意味をなさないテスト、あるいは特定のサービスが到達可能なときだけ実行すべきテストなどが該当します。それであっても、自分たちのゴールドスタンダードなCIホストでそのspecが**実際に実行されているか**を監査してください。自分たちが所有するすべての環境でスキップが発火するなら、それは恒久的な **pass-by-skip** です。テストが実行されなかったからグリーンなのであって、動作が正しいからグリーンなのではありません。そのテストは **broken, not flaky**（フレイキーではなく壊れている）です。
+
+常に成立すべき前提条件は、ハードアサーションに書くべきです：
+
+```typescript
+// Anti-pattern: silently skips when user is null, hiding a broken setup
+test.skip(!user, "no user");
+
+// Correct: fails loudly if setup is broken
+expect(user).toBeTruthy();
+```
+
+Step 0ゲートについては[デシジョンガイド — 重いテストをいつ書くか](../decision-guide/heavy-test-decision.mdx)を参照してください。前提条件がそもそもテストに属するかどうかの判断基準が記載されています。
+
 ## E2Eでのエディター入力
 
 コードエディター（CodeMirror、Monaco、ProseMirror、あるいは任意の `contenteditable`）をPlaywrightから操作するのは、`page.fill()` よりも厄介です。エディターにvimモードがある場合、`page.keyboard.type("hello")` は悲惨なことになります。先頭の `h` でカーソルが左に移動し、`i` でインサートモードに入り、残りはテキストではなくコマンドとして解釈されてしまうのです。
@@ -135,9 +151,8 @@ export async function setEditorContent(page: Page, content: string) {
     timeout: 5000,
   });
 
-  // Arbitrary timeout — acceptable ONLY because 500ms is the known auto-save
-  // debounce constant. Features like split-pane read content back from the
-  // backend, so the test must wait >= the debounce or it races the persist.
+  // wait-ok: 500ms is the known auto-save debounce constant; split-pane reads
+  // content back from the backend, so the test must wait >= the debounce or it races the persist.
   await page.waitForTimeout(500);
 }
 ```
@@ -145,8 +160,124 @@ export async function setEditorContent(page: Page, content: string) {
 プラットフォームを判別する `mod` ヘルパーにより、同一のspecがmacOS（`Meta`）とLinux/Windows（`Control`）の両方でエディターのショートカットを操作できます。テストごとに分岐を書く必要はありません。
 
 <Warning>
-この `waitForTimeout(500)` は、通常の「任意の `waitForTimeout` を決して使うな」というルールの**正当な例外**です。任意の待機が許容されるのは、それが**既知のアプリケーション定数にひも付けられている**場合（ここでは500msの自動保存デバウンス）に限り、かつコメントでその**理由を文書化している**ときだけです。理由のない裸の `waitForTimeout(500)` は依然としてフレイキーの火種です。実在する定数にひも付けるか、適切な `expect` 待機に置き換えてください。
+この `waitForTimeout(500)` は、通常の「任意の `waitForTimeout` を決して使うな」というルールの**正当な例外**です。任意の待機が許容されるのは、それが**既知のアプリケーション定数にひも付けられている**場合（ここでは500msの自動保存デバウンス）に限り、かつ `// wait-ok: <why>` マーカーでその**理由を文書化している**ときだけです。理由のない裸の `waitForTimeout(500)` は依然としてフレイキーの火種です。実在する定数にひも付けるか、適切な `expect` 待機に置き換えてください。
+
+もう一つの正当なクラスがあります：ある時間ウィンドウの中で**障害が発生しないこと**をアサートするspecです。たとえば、Reactの「Maximum update depth exceeded」スタートアップループを防ぐガード — アプリをマウントして、N msの間エラーが発火しないことをアサートします。このsleepを条件待機に変換すると**アサーションが骨抜きになります**。ポーリングする対象となる正の事象がないため、ポーリングは即座に解決し、ウィンドウの監視をやめてしまうのです。sleepは残す、定数に名前を付ける、理由を注釈する、絶対に変換しない：
+
+```typescript
+const POST_MOUNT_LOOP_SETTLE_MS = 2000;
+
+test("no update-depth errors on startup", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.goto("/");
+
+  // wait-ok: asserting ABSENCE of errors over a time window — no positive
+  // event to poll for; converting to a condition wait would gut the assertion.
+  await page.waitForTimeout(POST_MOUNT_LOOP_SETTLE_MS);
+
+  expect(errors.filter((e) => e.includes("Maximum update depth"))).toEqual([]);
+});
+```
 </Warning>
+
+## Wait負債をラチェットで削減する
+
+`// wait-ok: <why>` アノテーションのない `waitForTimeout` はすべて負債項目です。正しいかもしれないけれど、一目では判断できない。ラチェットベースラインは、その状況を見えない蓄積から、追跡・減少可能なカウントへと変えます。
+
+### チェックスクリプト
+
+スクリプトは、アノテーションのない `waitForTimeout` 呼び出し（直前2行以内に `// wait-ok:` コメントがないもの）をgrepし、コミット済みベースラインとファイル単位のカウントを比較します：
+
+```bash
+#!/usr/bin/env bash
+# scripts/check-wait-debt.sh
+set -euo pipefail
+
+BASELINE_FILE="e2e/wait-debt-baseline.txt"
+SPEC_DIR="e2e"
+
+# Nothing to check until the baseline has been introduced (existence guard).
+[ -f "$BASELINE_FILE" ] || exit 0
+
+# Count waitForTimeout calls that lack a // wait-ok: comment in the 2 lines above.
+count_unannotated() {
+  local path="$1" hits
+  [ -f "$path" ] || { echo 0; return; }
+  hits=$(grep -n "waitForTimeout" "$path" 2>/dev/null || true)
+  [ -n "$hits" ] || { echo 0; return; }
+  printf '%s\n' "$hits" | while IFS=":" read -r lineno _rest; do
+    start=$(( lineno - 2 )); [ "$start" -lt 1 ] && start=1
+    sed -n "${start},$((lineno - 1))p" "$path" | grep -q "wait-ok:" || echo found
+  done | wc -l | tr -d ' '
+}
+
+# Expected count for a path: its baseline line, or 0 if absent (the implicit-zero rule).
+expected_for() {
+  awk -v p="$1" '$2 == p { print $1; found=1 } END { if (!found) print 0 }' "$BASELINE_FILE"
+}
+
+# Check EVERY spec file (so a file absent from the baseline is held to an implicit 0),
+# unioned with the baseline's own paths (to catch a now-deleted file that still has an entry).
+failed=0
+checked=""
+for path in $(find "$SPEC_DIR" -type f -name '*.spec.ts' 2>/dev/null) $(awk '{ print $2 }' "$BASELINE_FILE"); do
+  case " $checked " in *" $path "*) continue ;; esac
+  checked="$checked $path"
+  expected=$(expected_for "$path")
+  actual=$(count_unannotated "$path")
+  if [ "$actual" -gt "$expected" ]; then
+    echo "FAIL $path: $actual unannotated waits (baseline $expected) — annotate new waits with // wait-ok: <why>"
+    failed=1
+  elif [ "$actual" -lt "$expected" ]; then
+    echo "FAIL $path: baseline is stale ($expected → $actual) — shrink the baseline to $actual"
+    failed=1
+  fi
+done
+
+exit "$failed"
+```
+
+### ベースラインの形式
+
+ベースラインファイルは、アノテーションのないwaitのファイル単位の**カウント**を記録します — 行番号ではないので、無関係な編集でチャーンしません：
+
+```
+2 e2e/editor.spec.ts
+1 e2e/startup.spec.ts
+```
+
+ルール：
+
+- `actual > baseline` — 新しい裸のwaitが追加された。CIが失敗する。
+- `actual < baseline` — ベースラインが陳腐化している。CIは「baseline を N に縮小してください」として失敗する。ベースラインは**減少のみ許可**で、アノテーションなしに増加はできない。
+- ファイルがベースラインに存在しない — 暗黙のカウント0。アノテーションのないwaitがあれば即座に失敗する。
+
+### プッシュ前チェックとCIへの組み込み
+
+```yaml
+# .github/workflows/e2e.yml (excerpt)
+- name: Check wait debt
+  run: bash scripts/check-wait-debt.sh
+```
+
+```bash
+# scripts/run-b4push.sh (excerpt)
+bash scripts/check-wait-debt.sh
+```
+
+存在ガード（`[ -f "$BASELINE_FILE" ] || exit 0`）により、ベースラインファイルが存在する前にスクリプトを導入しても問題ありません — ロールアウト中に壊れません。
+
+### 既知のトレードオフ
+
+1つ追加・1つ削除のケースは見えません。単一ファイル内でアノテーションのないwaitが1つ増えて1つ減った場合、カウントは変わらず、ラチェットは検知できません。これは負債ラチェットとして許容範囲です — 目標は単調に減少する総数であり、行単位の強制ではありません。このエッジケースはコードレビューと組み合わせて対処してください。
+
+### 他の負債クラスへの汎用化
+
+同じパターンは、あらゆるgrepできる負債クラスに適用できます：`// any-ok: <why>` コメントのない `any` キャスト、issue参照のない `TODO` コメント、期限なしで無効化されたlintルールなど。負債クラスごとに1つのベースラインファイルを導入し、同じプッシュ前パスにすべてを組み込みます。
 
 ## コンソールエラーモニタリング
 

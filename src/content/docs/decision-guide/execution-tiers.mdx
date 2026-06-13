@@ -102,6 +102,8 @@ The ordering matters: if you slim the local gate first and the CI destination th
 
 ## Which Tiers Does a Project Need?
 
+The table below maps by archetype. But archetype is only half the picture -- **project maturity** is the other dimension.
+
 | Project archetype | Tiers |
 |-------------------|-------|
 | Small CLI / library | T0–T1 only |
@@ -112,6 +114,18 @@ The ordering matters: if you slim the local gate first and the CI destination th
 <Note>
 Most projects stop at T0+T1. The opt-in tiers exist for specific trigger conditions, not as aspirational infrastructure -- **do not scaffold unused tiers.**
 </Note>
+
+### Pre-release / WIP: T3 is deferrable
+
+For a project that has not yet shipped to users, **T3 (scheduled rich CI) can be deferred**. Standing up T3 early is not cost-justified: hosted-macOS Actions minutes and self-hosted GPU runners cost real money for a project nobody uses yet, and the `cron exam.yml` + `file-exam-issue.sh` infrastructure is non-trivial to maintain while the product surface is churning daily.
+
+The interim heavy-lane safety net is **T4 (local exam lane)**. Run the heavy specs locally on a capable machine; the nightly `exam` run surfaces regressions before they accumulate.
+
+**Adopt T3 at or after cutover (release)**, when the project has users whose regressions justify the standing infrastructure cost.
+
+<Warning>
+The T3 deferral is time-boxed to release -- it is not a permanent arrangement. A human-remembered local lane will eventually fail. See [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) for why a local-only heavy lane cannot serve as a permanent safety net.
+</Warning>
 
 ## Three Cases
 
