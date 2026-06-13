@@ -187,8 +187,11 @@ The table below maps by archetype. But archetype is only half the picture -- **p
 |-------------------|-------|
 | Small CLI / library | T0–T1 only |
 | Static docs site | T0–T1 |
+| SSG / build tool that emits a client runtime | T0–T1, plus L2 DOM tests for the emitted runtime; T3/T4 for L4–L5 only once a browser-driven suite exists |
 | Canvas/GPU-heavy web app | T0–T3 + T4 |
 | Tauri desktop app | T0–T1 + T3 + T4 |
+
+A tool can be **CLI-shaped on the generator side and web-shaped on the runtime it emits** -- a Rust code generator (T0–T1, like any CLI) that also ships a browser runtime (client router, islands, view transitions). The test surface follows the **emitted artifact**, not just the CLI: the runtime's behavior is covered by L2 DOM tests today, and L4–L5 concerns stay latent until a browser-driven suite is actually added -- only then do the heavy tiers apply.
 
 <Note>
 Most projects stop at T0+T1. The opt-in tiers exist for specific trigger conditions, not as aspirational infrastructure -- **do not scaffold unused tiers.**
