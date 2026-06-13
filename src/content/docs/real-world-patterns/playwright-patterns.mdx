@@ -94,6 +94,22 @@ The Chromium step adds `@flaky` to its `--grep-invert` (alongside `@interactive`
 Keep escape hatches for the local gate so a flaky machine never blocks a push: e.g. `SKIP_E2E_WEBKIT=1` to skip just the WebKit pass, `SKIP_E2E=1` to skip the whole E2E stage, and a `RUN_FLAKY=1` opt-in to run the quarantined tests when verifying a fix.
 </Tip>
 
+## `test.skip` as a Precondition — the pass-by-skip Trap
+
+`test.skip` is for genuine environment dependencies: a test that only makes sense on a specific OS, or when a particular service is reachable. Even then, audit that your gold-standard CI hosts **actually run** the spec — a skip that fires on every environment you own is a permanent **pass-by-skip**: the suite reports green because the test never executed, not because the behaviour is correct. The test is **broken, not flaky**.
+
+Preconditions that must always hold belong in hard assertions:
+
+```typescript
+// Anti-pattern: silently skips when user is null, hiding a broken setup
+test.skip(!user, "no user");
+
+// Correct: fails loudly if setup is broken
+expect(user).toBeTruthy();
+```
+
+See [Decision Guide — When to Write a Heavy Test](../decision-guide/heavy-test-decision.mdx) for the Step 0 gate that determines whether the precondition belongs in the test at all.
+
 ## Editor Input in E2E
 
 Driving a code editor (CodeMirror, Monaco, ProseMirror, or any `contenteditable`) from Playwright is harder than `page.fill()`. If the editor has a vim mode, `page.keyboard.type("hello")` is a disaster: the leading `h` moves the cursor left, `i` enters insert mode, and the rest is interpreted as commands rather than text.
@@ -135,9 +151,8 @@ export async function setEditorContent(page: Page, content: string) {
     timeout: 5000,
   });
 
-  // Arbitrary timeout — acceptable ONLY because 500ms is the known auto-save
-  // debounce constant. Features like split-pane read content back from the
-  // backend, so the test must wait >= the debounce or it races the persist.
+  // wait-ok: 500ms is the known auto-save debounce constant; split-pane reads
+  // content back from the backend, so the test must wait >= the debounce or it races the persist.
   await page.waitForTimeout(500);
 }
 ```
@@ -145,8 +160,109 @@ export async function setEditorContent(page: Page, content: string) {
 The platform-aware `mod` helper lets the same spec drive editor shortcuts on macOS (`Meta`) and Linux/Windows (`Control`) without branching in every test.
 
 <Warning>
-That `waitForTimeout(500)` is the **legitimate exception** to the usual "never use an arbitrary `waitForTimeout`" rule. An arbitrary wait is acceptable only when it is **keyed to a known application constant** — here, the 500ms auto-save debounce — and you **document why** in a comment. A bare `waitForTimeout(500)` with no rationale is still a flake waiting to happen; tie it to a real constant or replace it with a proper `expect` wait.
+That `waitForTimeout(500)` is the **legitimate exception** to the usual "never use an arbitrary `waitForTimeout`" rule. An arbitrary wait is acceptable only when it is **keyed to a known application constant** — here, the 500ms auto-save debounce — and you **document why** using the `// wait-ok: <why>` marker. A bare `waitForTimeout(500)` with no rationale is still a flake waiting to happen; tie it to a real constant or replace it with a proper `expect` wait.
+
+A second legitimate class: specs that assert the **absence** of a failure within a time window. For example, guarding against a React "Maximum update depth exceeded" startup loop — you mount the app and assert that no error fires for N ms. Converting that sleep to a condition wait **guts the assertion**: there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep, name the constant, annotate why, and never convert:
+
+```typescript
+const POST_MOUNT_LOOP_SETTLE_MS = 2000;
+
+test("no update-depth errors on startup", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.goto("/");
+
+  // wait-ok: asserting ABSENCE of errors over a time window — no positive
+  // event to poll for; converting to a condition wait would gut the assertion.
+  await page.waitForTimeout(POST_MOUNT_LOOP_SETTLE_MS);
+
+  expect(errors.filter((e) => e.includes("Maximum update depth"))).toEqual([]);
+});
+```
 </Warning>
+
+## Ratcheting Down Wait Debt
+
+Every `waitForTimeout` without a `// wait-ok: <why>` annotation is a debt item: it might be correct, but nobody can tell at a glance. The ratchet baseline turns that into a tracked, decreasing count rather than an invisible accumulation.
+
+### The check script
+
+The script greps for unannotated `waitForTimeout` calls — those not preceded by a `// wait-ok:` comment within the two lines above — and compares the per-file count against a committed baseline:
+
+```bash
+#!/usr/bin/env bash
+# scripts/check-wait-debt.sh
+set -euo pipefail
+
+BASELINE_FILE="e2e/wait-debt-baseline.txt"
+
+# Nothing to check if the baseline hasn't been introduced yet.
+[ -f "$BASELINE_FILE" ] || exit 0
+
+failed=0
+
+while IFS=" " read -r expected_count path; do
+  # Count waitForTimeout calls that lack a // wait-ok: comment in the 2 lines above.
+  actual=$(grep -n "waitForTimeout" "$path" 2>/dev/null | while IFS=":" read -r lineno _rest; do
+    # Check the two preceding lines for the wait-ok marker.
+    start=$(( lineno - 2 ))
+    [ "$start" -lt 1 ] && start=1
+    if ! sed -n "${start},$((lineno - 1))p" "$path" | grep -q "wait-ok:"; then
+      echo "found"
+    fi
+  done | wc -l | tr -d ' ')
+
+  if [ "$actual" -gt "$expected_count" ]; then
+    echo "FAIL $path: $actual unannotated waits (baseline $expected_count) — annotate new waits with // wait-ok: <why>"
+    failed=1
+  elif [ "$actual" -lt "$expected_count" ]; then
+    echo "FAIL $path: baseline is stale ($expected_count → $actual) — shrink the baseline to $actual"
+    failed=1
+  fi
+done < "$BASELINE_FILE"
+
+exit "$failed"
+```
+
+### Baseline format
+
+The baseline file records the per-file **count** of unannotated waits — not line numbers, so unrelated edits don't churn it:
+
+```
+2 e2e/editor.spec.ts
+1 e2e/startup.spec.ts
+```
+
+Rules:
+- `actual > baseline` — new bare wait added; CI fails.
+- `actual < baseline` — baseline is stale; CI fails with "shrink the baseline to N". The baseline may only **decrease**, never increase without a matching annotation.
+- File absent from baseline — implicit count of 0; any unannotated wait fails immediately.
+
+### Wiring into pre-push and CI
+
+```yaml
+# .github/workflows/e2e.yml (excerpt)
+- name: Check wait debt
+  run: bash scripts/check-wait-debt.sh
+```
+
+```bash
+# scripts/run-b4push.sh (excerpt)
+bash scripts/check-wait-debt.sh
+```
+
+The existence guard (`[ -f "$BASELINE_FILE" ] || exit 0`) means you can introduce the script before the baseline file exists — no breakage during rollout.
+
+### Known tradeoff
+
+The add-one-remove-one case is invisible: if a single file gains one unannotated wait and loses another, the count stays the same and the ratchet does not catch it. This is acceptable for a debt ratchet — the goal is a monotonically shrinking total, not per-line enforcement. Pair with code review for the edge case.
+
+### Generalising to other debt classes
+
+The same pattern applies to any greppable debt: `any` casts without a `// any-ok: <why>` comment, `TODO` comments without an issue reference, disabled lint rules without an expiry. Introduce one baseline file per debt class and wire them all into the same pre-push pass.
 
 ## Console Error Monitoring
 
