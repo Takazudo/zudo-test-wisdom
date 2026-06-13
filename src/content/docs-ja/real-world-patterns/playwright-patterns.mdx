@@ -349,10 +349,14 @@ import { test, expect } from "./fixtures";
 
 test("home page has no console errors", async ({ page, consoleErrors }) => {
   await page.goto("/");
-  await page.waitForLoadState("networkidle");
+  await expect(page.locator("h1")).toBeVisible();
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
+
+<Tip>
+`waitForLoadState("networkidle")` は、リクエストを発火しないSPAナビゲーションで使われる典型的なアンチパターンです — ビューが準備できる前に解決することがあります。実際の完了シグナルとして、ウェブファーストのアサーション（`expect(...).toBeVisible()` など）やイベントキーの待機を使用してください。詳しいカタログとレシピは [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) を参照してください。
+</Tip>
 
 ### 許容リスト（allowlist）で無害なエラーをフィルタする
 
@@ -467,6 +471,10 @@ test("production build has no broken links", async ({ page }) => {
   }
 });
 ```
+
+<Note>
+`webServer` がN個のエントリのリスト（フィクスチャやアプリごとに1つ）の場合、インナーループの実行ごとにすべてのNサーバーをビルドして起動する必要があり、数秒が数分になってしまいます。マルチフィクスチャのケースについては、[実行ティア](../decision-guide/execution-tiers.mdx) の「マルチフィクスチャE2EでT0を現実的なものにする」ガイダンスを参照してください。
+</Note>
 
 ## シャードCIラン
 

@@ -349,10 +349,14 @@ import { test, expect } from "./fixtures";
 
 test("home page has no console errors", async ({ page, consoleErrors }) => {
   await page.goto("/");
-  await page.waitForLoadState("networkidle");
+  await expect(page.locator("h1")).toBeVisible();
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
+
+<Tip>
+`waitForLoadState("networkidle")` is the canonical anti-pattern for SPA navigations that fire no network requests — it can resolve before the view is ready. Use a web-first assertion (like `expect(...).toBeVisible()`) or an event-keyed wait as the real completion signal. See [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) for the full catalog and recipe.
+</Tip>
 
 ### Filtering benign errors with a curated allowlist
 
@@ -467,6 +471,10 @@ test("production build has no broken links", async ({ page }) => {
   }
 });
 ```
+
+<Note>
+When `webServer` is a list of N entries (one per fixture or app), every inner-loop run must build and boot all N servers — turning seconds into minutes. For the multi-fixture case, see the "Making T0 Real for Multi-Fixture E2E" guidance in [Execution Tiers](../decision-guide/execution-tiers.mdx).
+</Note>
 
 ## Sharded CI Runs
 

@@ -1,0 +1,195 @@
+---
+title: Flake Root-Cause Catalog & Deflaking Recipe
+description: The five causes of E2E flakiness and a four-step mechanical recipe for eliminating them.
+sidebar_position: 9
+---
+
+## Part 1 — Root-Cause Catalog
+
+Every E2E flake has a cause. The five below cover the overwhelming majority of cases in practice, and each has a deterministic fix.
+
+### 1. Timing waits (bare `waitForTimeout`)
+
+A bare `waitForTimeout(N)` is a guess: "I think N milliseconds will be enough." It is wrong on a slow CI runner, wrong after a deploy that made the app faster, and wrong after one that made it slower. The fix is a **web-first assertion or an event-keyed wait** that resolves the moment the app reaches the state you actually need — not after an arbitrary delay.
+
+```typescript
+// Anti-pattern
+await page.waitForTimeout(2000);
+await expect(page.locator(".result")).toBeVisible();
+
+// Fix: resolve on the real condition
+await expect(page.locator(".result")).toBeVisible({ timeout: 10_000 });
+```
+
+See also: the deflaking recipe in [Part 2](#part-2--the-deflaking-recipe) for the case where an app event rather than a DOM state is the right signal.
+
+### 2. `networkidle` on client-side navigations that fire no requests
+
+`waitForLoadState("networkidle")` resolves when there are no pending network requests for 500ms. On a client-side SPA navigation — routing handled in JavaScript, no new network request — that condition can resolve immediately after the navigation **begins**, not after the new view has rendered. The navigation fires no requests, so `networkidle` never blocks.
+
+The fix is to key the wait to the real completion signal: a URL change, a stable DOM element, or an app-level event.
+
+```typescript
+// Anti-pattern: resolves before the view is ready on SPA navigations
+await page.waitForLoadState("networkidle");
+
+// Fix: wait for the real completion signal
+await page.waitForURL("/dashboard");
+await expect(page.locator("h1")).toBeVisible();
+```
+
+### 3. Animation or transition in flight
+
+Asserting the computed style or position of an element while a CSS transition or animation is in progress produces nondeterministic values — the element is mid-flight. Two fixes:
+
+- **Disable animations in the test environment** via `page.emulateMedia({ reducedMotion: "reduce" })` or a CSS override.
+- **Assert the settled state** by waiting for the transition to end (e.g. using `toHaveCSS` on a stable post-transition value) rather than testing mid-transition.
+
+```typescript
+// At fixture setup — forces prefers-reduced-motion on all tests
+await page.emulateMedia({ reducedMotion: "reduce" });
+```
+
+### 4. Shared state / test-order coupling
+
+A test that relies on state left by a previous test — a database row, a cookie, a localStorage key, a global variable — passes when the suite runs in order and fails when it does not. Test order is not guaranteed.
+
+The fix is to isolate per-test state: set up what the test needs in its own `beforeEach` / `test.beforeEach`, tear it down after, and never rely on another test having run first.
+
+```typescript
+test.beforeEach(async ({ page }) => {
+  // Reset to a known clean state before every test
+  await page.evaluate(() => localStorage.clear());
+  await page.goto("/");
+});
+```
+
+### 5. Hydration races
+
+Asserting that an interactive element is functional before the JavaScript island that controls it has hydrated produces a race: the assertion passes visually (the DOM element is present) but the behavior is not yet wired up. A click fires before the handler is attached.
+
+The fix is to wait on an **interactivity signal**, not a sleep:
+
+```typescript
+// Anti-pattern: element is visible but not yet interactive
+await expect(page.locator(".submit-btn")).toBeVisible();
+await page.locator(".submit-btn").click();
+
+// Fix: wait for the app to signal readiness
+await page.waitForFunction(() => document.querySelector(".submit-btn")?.dataset.hydrated === "true");
+await page.locator(".submit-btn").click();
+```
+
+---
+
+## Part 2 — The Deflaking Recipe
+
+Apply these four steps in order. Each step is mechanical — no judgment required.
+
+### Step 1 — Replace timing waits with event-keyed waits, listener installed before trigger
+
+For navigations or transitions signaled by an app-level event (a framework lifecycle hook, a custom DOM event, a flag on `window`), the only reliable pattern is:
+
+1. Install the listener.
+2. Trigger the action.
+3. Await the signal.
+
+**The ordering is load-bearing.** A listener installed _after_ the action fires can miss the event entirely — the event already fired before the listener was attached. Always install the listener first.
+
+```typescript
+// Install the listener BEFORE the action
+await page.evaluate(() => {
+  window.__navDone = false;
+  addEventListener("framework:after-swap", () => {
+    window.__navDone = true;
+  });
+});
+
+// Then trigger the navigation
+await page.click("a[href='/about']");
+
+// Then await the signal — using Playwright's own timeout, never an in-page setTimeout
+await page.waitForFunction(() => window.__navDone);
+```
+
+<Warning>
+Never use an in-page `setTimeout` as a fallback. It runs inside the browser's own event loop and is subject to timer throttling, page freeze, and tab backgrounding. Playwright's `waitForFunction` polls from outside the page using its own timeout mechanism — it is the correct tool here.
+</Warning>
+
+### Step 2 — Don't wait on `networkidle` for navigations that fire no network requests
+
+Client-side navigations in SPAs do not fire network requests. `networkidle` resolves the moment no requests are in flight — which for a client-side nav is immediately after the route change starts, not after the new view renders.
+
+Replace `waitForLoadState("networkidle")` with a wait on the actual completion signal: `waitForURL`, a web-first assertion on a stable element, or an event-keyed wait from Step 1.
+
+### Step 3 — Never swallow a fallible wait
+
+A `.catch(() => null)` on a wait expression turns a real timeout into a silent green:
+
+```typescript
+// Anti-pattern: a timeout becomes a silent success
+await page.waitForSelector(".result", { timeout: 5000 }).catch(() => null);
+// Test continues as if the element appeared
+
+// Fix: let it fail, or assert the post-condition explicitly
+await expect(page.locator(".result")).toBeVisible({ timeout: 5000 });
+```
+
+If the wait genuinely might not resolve (optional element, conditional UI), assert the actual post-condition instead of swallowing the timeout. The test should fail loudly when the thing it depends on does not happen.
+
+### Step 4 — Positive completion waits: the only legitimate `waitForTimeout`
+
+For **positive completion waits** (waiting for something to appear or become true), the only acceptable `waitForTimeout` is one that is:
+
+1. Keyed to a **documented application constant** (a known debounce value, a polling interval defined in the source).
+2. Annotated with a `// wait-ok: <why>` comment explaining the constant.
+
+See the `// wait-ok:` exception documented in the [Editor Input section of Playwright Patterns](./playwright-patterns.mdx) for the canonical example.
+
+<Note>
+There is a second, distinct legitimate class of `waitForTimeout`: asserting the **absence** of a failure over a time window (e.g., "no console errors fire in the first 2000ms after mount"). Converting that sleep to a condition wait guts the assertion — there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep for absence-window assertions; scope this step to positive completion waits only. See the `POST_MOUNT_LOOP_SETTLE_MS` example in [Playwright Patterns](./playwright-patterns.mdx) for the full pattern.
+</Note>
+
+---
+
+## Before / After — Putting It Together
+
+A common flaky test combines both anti-patterns at once:
+
+```typescript
+// BEFORE — flaky: timing guess + networkidle on a SPA nav
+test("navigates to dashboard", async ({ page }) => {
+  await page.goto("/");
+  await page.click("a[href='/dashboard']");
+  await page.waitForLoadState("networkidle"); // resolves before the view renders
+  await page.waitForTimeout(500); // timing guess
+  await expect(page.locator("h1")).toHaveText("Dashboard");
+});
+```
+
+```typescript
+// AFTER — deterministic: event-keyed + web-first assertion
+test("navigates to dashboard", async ({ page }) => {
+  await page.goto("/");
+
+  // Install listener BEFORE the action
+  await page.evaluate(() => {
+    window.__navDone = false;
+    addEventListener("framework:after-swap", () => {
+      window.__navDone = true;
+    });
+  });
+
+  await page.click("a[href='/dashboard']");
+
+  // Await the app's own signal using Playwright's timeout
+  await page.waitForFunction(() => window.__navDone);
+
+  // Web-first assertion as the final guard
+  await expect(page.locator("h1")).toHaveText("Dashboard");
+});
+```
+
+---
+
+See also: [Playwright Patterns](./playwright-patterns.mdx) for the full Playwright setup patterns, and [Execution Tiers](../decision-guide/execution-tiers.mdx) for when a flaky test is a topology problem rather than a timing problem.
