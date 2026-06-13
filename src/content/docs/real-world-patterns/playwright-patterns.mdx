@@ -52,6 +52,39 @@ export default defineConfig({
 Run `npx playwright test --project=ci` in CI and `npx playwright test --project=interactive` locally when you need full keyboard/clipboard testing.
 </Tip>
 
+## Guard against specs that match no project
+
+The CI-safe / interactive split above uses a **catch-all** `testMatch: /.*\.spec\.ts/` on the `ci` project, so every spec is collected by at least one project — the catch-all is exactly what prevents the trap described here. The trap only appears once you move to a **partitioned** setup where each project maps to a disjoint filename prefix (e.g. one project per fixture or app):
+
+```typescript
+// playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    { name: "fixtureA", testMatch: /fixtureA[^/]*\.spec\.ts/ },
+    { name: "fixtureB", testMatch: /fixtureB[^/]*\.spec\.ts/ },
+    { name: "fixtureC", testMatch: /fixtureC[^/]*\.spec\.ts/ },
+  ],
+});
+```
+
+In this config, a spec whose filename starts with anything other than `fixtureA`, `fixtureB`, or `fixtureC` matches no project and is collected by zero projects. Playwright runs without error — it simply has nothing to run — and no test failure reveals it. The missing spec produces no result to fail.
+
+The fix mirrors the single-source-of-truth meta-test pattern: a tiny script that asserts every e2e spec filename starts with a known project prefix, wired into both the local pre-push gate and CI. Enumerate specs **recursively** with `find` (not `ls e2e/*.spec.ts`, which only globs the top level and would silently miss a spec nested in a subdirectory — the very hole this guard exists to close):
+
+```bash
+# Every e2e spec must start with a known project prefix, or it runs nowhere.
+# find recurses into subdirectories; `ls e2e/*.spec.ts` would miss e2e/<dir>/*.spec.ts.
+known='fixtureA|fixtureB|fixtureC'
+bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+[ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
+```
+
+<Warning>
+The guard script, not the config, is what makes a filename-prefix project split safe. A green Playwright run only proves that the specs which were collected passed — it cannot prove that every spec ran. If a spec falls outside every project's `testMatch` pattern, Playwright drops it silently. The guard is the only thing that catches a spec the config silently skipped.
+</Warning>
+
 ## Quarantining Flakes: The Retries-Asymmetry Trap
 
 Beyond the CI-safe vs `@interactive` split, there is a third tag worth knowing: `@flaky`. It exists because of a subtle trap — **CI and your local pre-push gate often run with different retry budgets**, so a test can be green in one and red in the other.
@@ -315,12 +348,25 @@ export { expect };
 // e2e/app.spec.ts
 import { test, expect } from "./fixtures";
 
+const CONSOLE_SETTLE_MS = 1000;
+
 test("home page has no console errors", async ({ page, consoleErrors }) => {
   await page.goto("/");
-  await page.waitForLoadState("networkidle");
+  await expect(page.locator("h1")).toBeVisible();
+
+  // wait-ok: this test asserts the ABSENCE of console errors, so it must keep
+  // observing past first paint — late console/pageerror events (a failed lazy
+  // chunk, a post-hydration warning) fire after the heading is visible. There is
+  // no positive event to poll for, so hold a bounded settle window before the
+  // fixture teardown asserts. This is the documented absence-window exception.
+  await page.waitForTimeout(CONSOLE_SETTLE_MS);
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
+
+<Tip>
+Replacing `waitForLoadState("networkidle")` with `expect(...).toBeVisible()` is the right move for asserting that a view *is ready* — `networkidle` is the canonical anti-pattern for SPA navigations that fire no network requests. But a console-error monitor asserts the *absence* of errors over a window, so it also needs the bounded `wait-ok:` settle above to catch errors that fire after first paint — a positive readiness assertion alone would end the test too early and green-light late errors. See [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) for the full catalog, including the absence-window exception.
+</Tip>
 
 ### Filtering benign errors with a curated allowlist
 
@@ -435,6 +481,10 @@ test("production build has no broken links", async ({ page }) => {
   }
 });
 ```
+
+<Note>
+When `webServer` is a list of N entries (one per fixture or app), every inner-loop run must build and boot all N servers — turning seconds into minutes. For the multi-fixture case, see the "Making T0 Real for Multi-Fixture E2E" guidance in [Execution Tiers](../decision-guide/execution-tiers.mdx).
+</Note>
 
 ## Sharded CI Runs
 

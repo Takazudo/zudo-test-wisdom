@@ -52,6 +52,39 @@ export default defineConfig({
 CIでは `npx playwright test --project=ci` を実行し、フルキーボード/クリップボードテストが必要な場合はローカルで `npx playwright test --project=interactive` を実行します。
 </Tip>
 
+## いずれのプロジェクトにも一致しないスペックを防ぐ
+
+上記のCI安全 / interactive分割では `ci` プロジェクトに**キャッチオール**の `testMatch: /.*\.spec\.ts/` を使っているため、すべてのスペックが少なくとも1つのプロジェクトに収集されます。このキャッチオールこそが、ここで説明する罠を防いでいるものです。この罠が現れるのは、各プロジェクトがファイル名のプレフィックスで互いに重ならない形に**分割**されたセットアップ（例：フィクスチャやアプリごとに1プロジェクト）に移行したときです：
+
+```typescript
+// playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    { name: "fixtureA", testMatch: /fixtureA[^/]*\.spec\.ts/ },
+    { name: "fixtureB", testMatch: /fixtureB[^/]*\.spec\.ts/ },
+    { name: "fixtureC", testMatch: /fixtureC[^/]*\.spec\.ts/ },
+  ],
+});
+```
+
+この設定では、`fixtureA`・`fixtureB`・`fixtureC` 以外で始まるファイル名のスペックはどのプロジェクトにもマッチせず、ゼロのプロジェクトに収集されます。Playwrightはエラーなく実行されます――単に実行するものがないだけです――そしてテストの失敗もこれを明かしません。存在しない実行は失敗する結果を生み出さないからです。
+
+修正策は、シングルソース・オブ・トゥルースのメタテストパターンと同様です。ローカルのプッシュ前ゲートとCIの両方に組み込む小さなスクリプトで、すべてのe2eスペックのファイル名が既知のプロジェクトプレフィックスで始まることをアサートします。スペックの列挙は `find` で**再帰的に**行ってください（`ls e2e/*.spec.ts` はトップレベルしか展開せず、サブディレクトリにネストしたスペックを見逃します -- まさにこのガードが塞ぐべき穴です）：
+
+```bash
+# Every e2e spec must start with a known project prefix, or it runs nowhere.
+# find recurses into subdirectories; `ls e2e/*.spec.ts` would miss e2e/<dir>/*.spec.ts.
+known='fixtureA|fixtureB|fixtureC'
+bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+[ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
+```
+
+<Warning>
+ガードスクリプトこそが、ファイル名プレフィックスによるプロジェクト分割を安全にするものです。設定ではありません。Playwrightのグリーンなランは、収集されたスペックがパスしたことを証明するだけで、すべてのスペックが実行されたことを証明できません。あるスペックがどのプロジェクトの `testMatch` パターンにも該当しない場合、Playwrightは無言でそれを除外します。設定が静かにスキップしたスペックを捕まえるのは、このガードだけです。
+</Warning>
+
 ## フレイキーテストの隔離：リトライ回数の非対称性という罠
 
 CI安全テスト vs `@interactive` の分割に加えて、知っておく価値のある3つ目のタグがあります：`@flaky` です。このタグが存在する理由は、ある微妙な罠にあります。**CIとローカルのプッシュ前ゲートは、しばしば異なるリトライ回数（リトライバジェット）で実行される**ため、同じテストが一方ではグリーン、もう一方ではレッドになりうるのです。
@@ -315,12 +348,25 @@ export { expect };
 // e2e/app.spec.ts
 import { test, expect } from "./fixtures";
 
+const CONSOLE_SETTLE_MS = 1000;
+
 test("home page has no console errors", async ({ page, consoleErrors }) => {
   await page.goto("/");
-  await page.waitForLoadState("networkidle");
+  await expect(page.locator("h1")).toBeVisible();
+
+  // wait-ok: this test asserts the ABSENCE of console errors, so it must keep
+  // observing past first paint — late console/pageerror events (a failed lazy
+  // chunk, a post-hydration warning) fire after the heading is visible. There is
+  // no positive event to poll for, so hold a bounded settle window before the
+  // fixture teardown asserts. This is the documented absence-window exception.
+  await page.waitForTimeout(CONSOLE_SETTLE_MS);
   // consoleErrors assertion happens automatically in fixture teardown
 });
 ```
+
+<Tip>
+`waitForLoadState("networkidle")` を `expect(...).toBeVisible()` に置き換えるのは、ビューが*準備できた*ことをアサートするには正しい手です — `networkidle` は、リクエストを発火しないSPAナビゲーションで使われる典型的なアンチパターンだからです。ただしコンソールエラー監視はある時間枠にわたってエラーの*不在*をアサートするため、初回描画の後に発火するエラーを捉えられるよう、上記の上限つき `wait-ok:` の沈静化待機も必要です — 準備完了のアサーションだけではテストが早く終わりすぎ、遅れて発生するエラーをグリーンで通してしまいます。不在ウィンドウの例外を含む全カタログとレシピは [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) を参照してください。
+</Tip>
 
 ### 許容リスト（allowlist）で無害なエラーをフィルタする
 
@@ -435,6 +481,10 @@ test("production build has no broken links", async ({ page }) => {
   }
 });
 ```
+
+<Note>
+`webServer` がN個のエントリのリスト（フィクスチャやアプリごとに1つ）の場合、インナーループの実行ごとにすべてのNサーバーをビルドして起動する必要があり、数秒が数分になってしまいます。マルチフィクスチャのケースについては、[実行ティア](../decision-guide/execution-tiers.mdx) の「マルチフィクスチャE2EでT0を現実的なものにする」ガイダンスを参照してください。
+</Note>
 
 ## シャードCIラン
 

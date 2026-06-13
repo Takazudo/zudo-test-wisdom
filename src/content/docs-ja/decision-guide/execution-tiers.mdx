@@ -80,6 +80,85 @@ flowchart TD
 
 この図は、テストが実行されうる4つのサーフェスを示しています。PRの列だけが**強制される**ゲートです。実装中とプッシュ前のサーフェスはフィードバックループであり、スケジュールされたサーフェスは、CIランナーがPRごとには判定できないものに対するセーフティネットです。点線のエッジに注目してください：ヘビーレーンのテストでしかカバーされていないコードに変更が触れた場合、プッシュ前に能力のあるホスト上でのスコープを絞ったヘビー実行が必須です -- エージェントはT0/T1だけを根拠に作業完了を宣言してはいけません。
 
+## マルチフィクスチャE2EでT0を「数秒」にする
+
+図のT0の列には「seconds（数秒）」と書かれています。すでにビルド済みのサイトが1つだけの場合、それは達成可能です。しかし、フィクスチャが**N個の自己完結したサイト**で構成されている場合 -- それぞれにビルドステップと専用のプレビューサーバーが必要 -- デフォルトの構成ではそれは不可能です。
+
+### ギャップ
+
+`playwright.config.ts` の `webServer` にN個のエントリが列挙されている場合、1つのスペックが実行される前に毎回次のことが行われます：
+
+1. N個のフィクスチャサイトをすべてビルドする。
+2. N個のプレビューサーバーをすべて起動し、それぞれが準備完了になるまで待つ。
+
+インナーループは数秒ではなく数分になります。さらに悪いことに、N個のサーバーを並行して起動するとポートレースのリスクが乗算されます：`EADDRINUSE` の衝突とサーバー間のスタートタイムのずれが断続的なテスト失敗として現れ、フレーキーなテストのように見えますが、実際にはトポロジーの問題です。正しい修正はこのポートレースの表面をリトライで隔離するのではなく、設計で除去することです -- フレーキーネスがトポロジー見直しのシグナルである場合については、[重いテストの判断ルール](./heavy-test-decision.mdx)も参照してください。
+
+### メカニズム1：env varでビルド・`webServer`・specを1つのフィクスチャに絞る
+
+`FIXTURE=<name>` という単一のenv varを導入し、ビルドステップ、`webServer`配列、**そしてspecの集合**を対象フィクスチャだけに絞ります。サーバーだけを絞るのでは不十分です：`FIXTURE=site-a` がsite-aのサーバーだけを起動しても、Playwrightが依然としてsite-bとsite-cのspecを収集すれば、それらのspecは起動されていないサーバーに対して走って失敗します。同じenv varで`projects`配列も絞り、対象フィクスチャのspecだけが収集されるようにします。こうするとインナーループは1つのサイトをビルドし、1つのサーバーを起動し、1つのフィクスチャのspecを走らせるだけ -- N方向のスタッガーもポートレースもありません。CI（env varが未設定）では引き続きN個すべてをビルド・サーブ・テストします。
+
+```ts
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+const target = process.env.FIXTURE; // e.g. "site-a"
+
+const fixtures = [
+  { name: "site-a", port: 4001 },
+  { name: "site-b", port: 4002 },
+  { name: "site-c", port: 4003 },
+];
+
+// One fixture when FIXTURE is set, all N otherwise (CI).
+const selected = target ? fixtures.filter((f) => f.name === target) : fixtures;
+
+export default defineConfig({
+  // Boot only the selected fixtures' preview servers...
+  webServer: selected.map((f) => ({
+    command: `pnpm build:${f.name} && pnpm preview:${f.name}`,
+    url: `http://localhost:${f.port}`,
+    name: f.name,
+  })),
+  // ...and collect only their specs. Without this, FIXTURE=site-a still runs
+  // site-b / site-c specs against servers that were never booted.
+  projects: selected.map((f) => ({
+    name: f.name,
+    testMatch: `**/${f.name}/**/*.spec.ts`,
+    use: { baseURL: `http://localhost:${f.port}` },
+  })),
+});
+```
+
+開発時は `FIXTURE=site-a pnpm test` — 1回のビルド、1つのサーバー、site-aのspecだけ、数秒でフィードバック。
+
+### メカニズム2：変更がなければリビルドをスキップする
+
+フィクスチャが1つに絞られていても、インナーループの呼び出しのたびにビルドステップが実行されます。フレッシュネスハッシュにより、不要なリビルドを排除できます。
+
+**ハッシュの算出方法：** フィクスチャ自身のコンテンツファイル**と共有ビルド入力（設定ファイル、ツール類、共有ソースコード）**をすべて含めて算出します。共有入力のセットはgitで追跡されているファイルのワーキングツリーの内容から導出します -- これにより、共有の設定ファイルや依存関係が変わった場合でも、ハッシュが正しくバストされます。
+
+**処理の流れ：**
+
+```sh
+# scripts/build-if-changed.sh
+FIXTURE_DIR="fixtures/$FIXTURE"
+HASH_FILE=".build-cache/$FIXTURE.hash"
+
+# hash fixture content + all shared inputs (git-tracked, working-tree content)
+NEW_HASH=$(git ls-files --error-unmatch -- "$FIXTURE_DIR" shared/ | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+
+if [ "$FORCE_REBUILD" = "1" ] || [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$NEW_HASH" ]; then
+  pnpm build:fixture "$FIXTURE"
+  echo "$NEW_HASH" > "$HASH_FILE"
+fi
+```
+
+`FORCE_REBUILD=1` は、ハッシュが検知できない変更のためのエスケープハッチです：コミットされていないツール状態、環境の変化、外部依存のアップデートなど。
+
+### 何が得られるか
+
+`EADDRINUSE` やスタートタイムのずれが生み出すポートレースの表面は、感じられるフレーキーネスの**原因**であって、隔離すべき症状ではありません。スコープ＋ハッシュによりトポロジーレベルで除去できます。ビルドとサーブの構成における複数サーバーの `webServer` パターンの具体的な内容は、[Playwright Patterns](../real-world-patterns/playwright-patterns.mdx) のProduction Build Verificationセクションを参照してください。
+
 ## リトライ予算
 
 | 場所 | リトライ予算 |

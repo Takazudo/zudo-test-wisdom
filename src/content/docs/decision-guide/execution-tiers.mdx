@@ -80,6 +80,85 @@ flowchart TD
 
 The diagram shows the four surfaces a test can run on. The PR column is the only **enforced** gate; the implementing and pre-push surfaces are feedback loops, and the scheduled surfaces are a safety net for what CI runners cannot judge per-PR. Note the dotted edge: when a change touches code that is covered only by heavy-lane tests, a scoped heavy run on a capable host is mandatory before push -- the agent must not declare the work done on the strength of T0/T1 alone.
 
+## Making T0 Real for Multi-Fixture E2E
+
+The T0 column in the diagram says "seconds." For a Playwright suite with a single site that is already built, that is achievable. For a suite whose fixtures are **N self-contained sites** -- each requiring its own build step and its own preview server -- the default setup makes it impossible.
+
+### The gap
+
+When `playwright.config.ts` lists `webServer` as an array of N entries, every run before a single spec executes must:
+
+1. Build all N fixture sites.
+2. Boot all N preview servers and wait for each to become ready.
+
+The inner loop becomes minutes, not seconds. Worse, booting N servers in parallel multiplies the port-race surface: `EADDRINUSE` collisions and inter-server start-stagger appear as intermittent test failures, which look like flaky tests but are actually a topology problem. The right fix is to design away the port-race surface, not to quarantine it with retries -- see also [Heavy Test Decision Rule](./heavy-test-decision.mdx) for when flakiness is a signal that topology needs attention.
+
+### Mechanism 1: scope build, `webServer`, and specs to one fixture via env var
+
+Introduce a single `FIXTURE=<name>` env var that narrows the build step, the `webServer` array, **and the spec set** to just the target fixture. Scoping the servers alone is not enough: if `FIXTURE=site-a` boots only site-a's server while Playwright still collects site-b and site-c's specs, those specs run against servers that were never started and fail. Narrow the `projects` array by the same env var so only the target fixture's specs are collected. The inner loop then builds one site, boots one server, and runs one fixture's specs -- no N-way stagger, no port-race. CI (no env var set) still builds, serves, and tests all N.
+
+```ts
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+const target = process.env.FIXTURE; // e.g. "site-a"
+
+const fixtures = [
+  { name: "site-a", port: 4001 },
+  { name: "site-b", port: 4002 },
+  { name: "site-c", port: 4003 },
+];
+
+// One fixture when FIXTURE is set, all N otherwise (CI).
+const selected = target ? fixtures.filter((f) => f.name === target) : fixtures;
+
+export default defineConfig({
+  // Boot only the selected fixtures' preview servers...
+  webServer: selected.map((f) => ({
+    command: `pnpm build:${f.name} && pnpm preview:${f.name}`,
+    url: `http://localhost:${f.port}`,
+    name: f.name,
+  })),
+  // ...and collect only their specs. Without this, FIXTURE=site-a still runs
+  // site-b / site-c specs against servers that were never booted.
+  projects: selected.map((f) => ({
+    name: f.name,
+    testMatch: `**/${f.name}/**/*.spec.ts`,
+    use: { baseURL: `http://localhost:${f.port}` },
+  })),
+});
+```
+
+When developing: `FIXTURE=site-a pnpm test` — one build, one server, only site-a's specs, feedback in seconds.
+
+### Mechanism 2: skip the rebuild when nothing changed
+
+Even with a single fixture scoped, the build step still runs on every inner-loop invocation. A freshness hash eliminates redundant rebuilds.
+
+**How to derive the hash:** compute it over the fixture's own content files **plus all shared build inputs** (config, tooling, shared source). Derive the shared-input set from git-tracked files' working-tree content -- this ensures that a change to shared config or a dependency correctly busts the hash even when only a shared file changed.
+
+**The loop:**
+
+```sh
+# scripts/build-if-changed.sh
+FIXTURE_DIR="fixtures/$FIXTURE"
+HASH_FILE=".build-cache/$FIXTURE.hash"
+
+# hash fixture content + all shared inputs (git-tracked, working-tree content)
+NEW_HASH=$(git ls-files --error-unmatch -- "$FIXTURE_DIR" shared/ | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+
+if [ "$FORCE_REBUILD" = "1" ] || [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$NEW_HASH" ]; then
+  pnpm build:fixture "$FIXTURE"
+  echo "$NEW_HASH" > "$HASH_FILE"
+fi
+```
+
+`FORCE_REBUILD=1` is the escape hatch for changes the hash cannot see: uncommitted tooling state, environment shifts, or external dependency updates.
+
+### What this buys
+
+The port-race surface that `EADDRINUSE` and start-stagger create is a **cause** of perceived flakiness, not a symptom to quarantine. Scope-and-hash removes it at the topology level. The concrete multi-server `webServer` patterns for build-and-serve setups are covered in the Production Build Verification section of [Playwright Patterns](../real-world-patterns/playwright-patterns.mdx).
+
 ## Retry Budgets
 
 | Where | Retry budget |

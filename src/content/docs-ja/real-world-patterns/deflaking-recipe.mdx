@@ -1,0 +1,195 @@
+---
+title: フレイク根本原因カタログ & デフレイキングレシピ
+description: E2Eフレイクの5つの原因と、それらを排除するための4ステップの機械的レシピ。
+sidebar_position: 9
+---
+
+## Part 1 — 根本原因カタログ
+
+すべてのE2Eフレイクには原因があります。以下の5つは実際のプロジェクトで圧倒的多数のケースをカバーし、それぞれに決定論的な修正があります。
+
+### 1. タイミング待機（裸の `waitForTimeout`）
+
+裸の `waitForTimeout(N)` は推測です。「Nミリ秒あれば十分だろう」というだけです。遅いCIランナーでは間違いとなり、アプリを高速化したデプロイ後には間違いになり、低速化したデプロイ後にも間違いになります。修正方法は、アプリが本当に必要な状態に達した瞬間に解決する**ウェブファーストのアサーションまたはイベントキーの待機**です — 任意の遅延の後ではありません。
+
+```typescript
+// Anti-pattern
+await page.waitForTimeout(2000);
+await expect(page.locator(".result")).toBeVisible();
+
+// Fix: resolve on the real condition
+await expect(page.locator(".result")).toBeVisible({ timeout: 10_000 });
+```
+
+アプリイベントが適切なシグナルとなるケースについては、[Part 2](#part-2--デフレイキングレシピ) のデフレイキングレシピを参照してください。
+
+### 2. リクエストを発火しないクライアントサイドナビゲーションでの `networkidle`
+
+`waitForLoadState("networkidle")` は、500ms間ペンディング中のネットワークリクエストがないときに解決します。クライアントサイドSPAナビゲーション（JavaScriptで処理されるルーティング、新しいネットワークリクエストなし）では、この条件はナビゲーションが**始まった**直後に解決することがあります — 新しいビューがレンダリングされた後ではなく。ナビゲーションはリクエストを発火しないため、`networkidle` は決してブロックしません。
+
+修正方法は、待機を実際の完了シグナル（URLの変更、安定したDOM要素、またはアプリレベルのイベント）にキーすることです。
+
+```typescript
+// Anti-pattern: resolves before the view is ready on SPA navigations
+await page.waitForLoadState("networkidle");
+
+// Fix: wait for the real completion signal
+await page.waitForURL("/dashboard");
+await expect(page.locator("h1")).toBeVisible();
+```
+
+### 3. 進行中のアニメーション・トランジション
+
+CSSトランジションやアニメーションの進行中に要素の計算スタイルや位置をアサートすると、非決定論的な値が生じます — 要素はフライト中です。2つの修正方法があります：
+
+- **テスト環境でアニメーションを無効化する** — `page.emulateMedia({ reducedMotion: "reduce" })` またはCSSオーバーライドを使用。
+- **落ち着いた状態をアサートする** — トランジション中にテストするのではなく、トランジション終了後の安定した値を待機（例：安定したトランジション後の値で `toHaveCSS` を使用）。
+
+```typescript
+// At fixture setup — forces prefers-reduced-motion on all tests
+await page.emulateMedia({ reducedMotion: "reduce" });
+```
+
+### 4. 共有状態・テスト順序の結合
+
+前のテストが残した状態（データベースの行、クッキー、localStorageのキー、グローバル変数）に依存するテストは、スイートが順番通りに実行されるときはパスし、そうでないときは失敗します。テストの実行順序は保証されません。
+
+修正方法は、テストごとの状態を分離することです：各テストに必要なものを独自の `beforeEach` / `test.beforeEach` でセットアップし、終了後にティアダウンし、別のテストが先に実行されることに依存しないようにします。
+
+```typescript
+test.beforeEach(async ({ page }) => {
+  // Reset to a known clean state before every test
+  await page.evaluate(() => localStorage.clear());
+  await page.goto("/");
+});
+```
+
+### 5. ハイドレーションレース
+
+JavaScriptアイランドがハイドレートされる前に、そのアイランドが制御するインタラクティブな要素の機能をアサートすると、レース条件が発生します。アサーションはビジュアル的にはパス（DOM要素は存在する）しても、動作はまだ配線されていません。ハンドラーがアタッチされる前にクリックが発火されるのです。
+
+修正方法は、スリープではなく**インタラクティブ性のシグナル**を待機することです：
+
+```typescript
+// Anti-pattern: element is visible but not yet interactive
+await expect(page.locator(".submit-btn")).toBeVisible();
+await page.locator(".submit-btn").click();
+
+// Fix: wait for the app to signal readiness
+await page.waitForFunction(() => document.querySelector(".submit-btn")?.dataset.hydrated === "true");
+await page.locator(".submit-btn").click();
+```
+
+---
+
+## Part 2 — デフレイキングレシピ
+
+これら4つのステップを順番に適用します。各ステップは機械的です — 判断力は不要です。
+
+### ステップ1 — タイミング待機をイベントキーの待機に置き換える（リスナーはトリガーの前にインストール）
+
+アプリレベルのイベント（フレームワークのライフサイクルフック、カスタムDOMイベント、`window` 上のフラグ）でシグナルされるナビゲーションやトランジションの場合、信頼できる唯一のパターンは次の通りです：
+
+1. リスナーをインストールする。
+2. アクションをトリガーする。
+3. シグナルを待機する。
+
+**この順序は重要です。** アクションが発火した_後に_インストールされたリスナーは、イベントを完全に見逃す可能性があります — リスナーがアタッチされる前にイベントがすでに発火しているためです。常にリスナーを先にインストールしてください。
+
+```typescript
+// Install the listener BEFORE the action
+await page.evaluate(() => {
+  window.__navDone = false;
+  addEventListener("framework:after-swap", () => {
+    window.__navDone = true;
+  });
+});
+
+// Then trigger the navigation
+await page.click("a[href='/about']");
+
+// Then await the signal — using Playwright's own timeout, never an in-page setTimeout
+await page.waitForFunction(() => window.__navDone);
+```
+
+<Warning>
+ページ内の `setTimeout` をフォールバックとして使用しないでください。これはブラウザ自身のイベントループの中で実行され、タイマースロットリング、ページフリーズ、タブのバックグラウンド化の影響を受けます。Playwrightの `waitForFunction` はページの外からポーリングし、独自のタイムアウトメカニズムを使用します — これが適切なツールです。
+</Warning>
+
+### ステップ2 — ネットワークリクエストを発火しないナビゲーションで `networkidle` を待機しない
+
+SPAのクライアントサイドナビゲーションはネットワークリクエストを発火しません。`networkidle` はリクエストが進行中でない瞬間に解決します — クライアントサイドナビゲーションの場合、これはルート変更が始まった直後であり、新しいビューがレンダリングされた後ではありません。
+
+`waitForLoadState("networkidle")` を、実際の完了シグナルへの待機に置き換えてください：`waitForURL`、安定した要素へのウェブファーストのアサーション、またはステップ1のイベントキーの待機。
+
+### ステップ3 — フォールブルな待機を握りつぶさない
+
+待機式への `.catch(() => null)` は、本物のタイムアウトをサイレントなグリーンに変えてしまいます：
+
+```typescript
+// Anti-pattern: a timeout becomes a silent success
+await page.waitForSelector(".result", { timeout: 5000 }).catch(() => null);
+// Test continues as if the element appeared
+
+// Fix: let it fail, or assert the post-condition explicitly
+await expect(page.locator(".result")).toBeVisible({ timeout: 5000 });
+```
+
+待機が本当に解決しない可能性がある場合（オプショナルな要素、条件付きUI）は、タイムアウトを握りつぶす代わりに実際の事後条件をアサートしてください。依存するものが起こらなかった場合、テストは声高に失敗すべきです。
+
+### ステップ4 — 正の完了待機：唯一合法的な `waitForTimeout`
+
+**正の完了待機**（何かが表示されるか真になるのを待つ）では、受け入れられる `waitForTimeout` は次の条件を両方満たすものだけです：
+
+1. **文書化されたアプリケーション定数**（既知のデバウンス値、ソース内で定義されたポーリングインターバル）にキーされている。
+2. その定数を説明する `// wait-ok: <why>` コメントで注釈されている。
+
+標準的な例については、[Playwrightパターン](./playwright-patterns.mdx) のエディター入力セクションに記載されている `// wait-ok:` 例外を参照してください。
+
+<Note>
+`waitForTimeout` の2つ目の正当なクラスがあります：ある時間ウィンドウの中で**障害が発生しないこと**をアサートすること（例：「マウント後の最初の2000ms間コンソールエラーが発火しない」）。このsleepを条件待機に変換するとアサーションが骨抜きになります — ポーリングする対象となる正のイベントがないため、ポーリングは即座に解決してウィンドウの監視をやめてしまうのです。このステップのスコープは正の完了待機のみです。欠如ウィンドウアサーションにはsleepを残してください。完全なパターンについては [Playwrightパターン](./playwright-patterns.mdx) の `POST_MOUNT_LOOP_SETTLE_MS` の例を参照してください。
+</Note>
+
+---
+
+## Before / After — まとめ
+
+よくある不安定なテストは、両方のアンチパターンを同時に組み合わせています：
+
+```typescript
+// BEFORE — flaky: timing guess + networkidle on a SPA nav
+test("navigates to dashboard", async ({ page }) => {
+  await page.goto("/");
+  await page.click("a[href='/dashboard']");
+  await page.waitForLoadState("networkidle"); // resolves before the view renders
+  await page.waitForTimeout(500); // timing guess
+  await expect(page.locator("h1")).toHaveText("Dashboard");
+});
+```
+
+```typescript
+// AFTER — deterministic: event-keyed + web-first assertion
+test("navigates to dashboard", async ({ page }) => {
+  await page.goto("/");
+
+  // Install listener BEFORE the action
+  await page.evaluate(() => {
+    window.__navDone = false;
+    addEventListener("framework:after-swap", () => {
+      window.__navDone = true;
+    });
+  });
+
+  await page.click("a[href='/dashboard']");
+
+  // Await the app's own signal using Playwright's timeout
+  await page.waitForFunction(() => window.__navDone);
+
+  // Web-first assertion as the final guard
+  await expect(page.locator("h1")).toHaveText("Dashboard");
+});
+```
+
+---
+
+関連情報：[Playwrightパターン](./playwright-patterns.mdx) でPlaywrightセットアップの全パターンを、[実行ティア](../decision-guide/execution-tiers.mdx) でフレイクがタイミング問題ではなくトポロジ問題である場合のガイダンスを参照してください。
