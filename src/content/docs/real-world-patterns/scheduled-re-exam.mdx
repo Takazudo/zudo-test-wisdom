@@ -31,7 +31,21 @@ The split prevents a specific failure mode: one command slowly accreting both jo
 
 The name is deliberate. The project periodically re-takes its whole exam, instead of pretending every push can afford to.
 
+### When b4push exceeds its budget
+
+If `b4push` creeps past its budget, trim it in this order -- and require per-step timing output so the gate stays observable, not aspirational:
+
+1. **Full e2e → `@smoke` subset.** Keep only the critical journeys plus the suites that cover areas the current diff touches. Criteria: if a full e2e pass takes more than a minute or two, scope it down; the scheduled exam is the backstop for everything else.
+2. **Full unit run → affected-only.** Use turborepo/nx affected or per-package filters to run only the packages the diff reaches. A broad unit pass that reruns every package on every push is the most common accretion pattern.
+3. **Docs/site builds → CI-only.** Drop the local docs build from `b4push`; let PR CI own it. A docs build that nobody waits on locally still contributes to budget creep.
+
+Require `--reporter=verbose` (or equivalent) at each step so timing is visible in the log. If the trimmed `b4push` still exceeds its budget, resist the temptation to just rename the time limit upward. An enforced 25-minute gate beats an aspirational 10-minute one that gets skipped -- but if the gate is genuinely 25 minutes, name it honestly and measure it. The real failure mode is a budget that exists only in the README.
+
 ## The Scheduled CI Re-exam Workflow
+
+<Note>
+Scheduled rich CI is a **T3 / post-cutover** concern: build it at the cutover point when the project's test suite is mature enough to justify a dedicated nightly runner. Until then, the local exam lane described here is the interim. See [Execution Tiers](../decision-guide/execution-tiers.mdx) for where this fits in the full maturity arc.
+</Note>
 
 A complete skeleton. It runs on a schedule *and* accepts manual dispatch, executes only the tagged heavy lanes (`@gpu`, `@interactive`, `@macos-only` -- see the tag taxonomy on [Execution Tiers](../decision-guide/execution-tiers.mdx)), and files a deduped issue on failure:
 
@@ -77,6 +91,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/file-exam-issue.sh
+
+      - name: Close the tracking issue on green
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh --green
 ```
 
 ### Runner Notes
@@ -103,7 +123,29 @@ set -euo pipefail
 LABEL="exam-failure"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-# Collect failing spec names from your reporter's output
+# DRY_RUN=1: echo the gh command instead of running it -- safe to test against a fixture report.json
+run_gh() {
+  if [ "${DRY_RUN:-}" = "1" ]; then
+    echo "+ gh $*"
+  else
+    gh "$@"
+  fi
+}
+
+# --green path: close the tracking issue if one is open, then exit.
+# Must come BEFORE reading report.json -- green runs produce no failure report.
+if [ "${1:-}" = "--green" ]; then
+  EXISTING="$(gh issue list --label "$LABEL" --state open \
+    --json number --jq '.[0].number // empty')"
+  if [ -n "$EXISTING" ]; then
+    run_gh issue comment "$EXISTING" --body "Exam green: ${RUN_URL}"
+    run_gh issue close "$EXISTING"
+  fi
+  # No open issue -- nothing to do
+  exit 0
+fi
+
+# Failure path: collect failing spec names from the reporter's output
 # (example: Playwright's JSON reporter written to playwright-report/report.json)
 FAILED_SPECS="$(jq -r '.. | objects | select(.ok == false) | .file? // empty' \
   playwright-report/report.json | sort -u)"
@@ -124,10 +166,10 @@ EXISTING="$(gh issue list --label "$LABEL" --state open \
 
 if [ -n "$EXISTING" ]; then
   # Yes: append this run to it -- do NOT open a duplicate
-  gh issue comment "$EXISTING" --body "$BODY"
+  run_gh issue comment "$EXISTING" --body "$BODY"
 else
   # No: create the single tracking issue with the fixed label
-  gh issue create \
+  run_gh issue create \
     --title "exam: scheduled heavy run is failing" \
     --label "$LABEL" \
     --body "$BODY"
@@ -135,6 +177,10 @@ fi
 ```
 
 Every report carries the three things a fix session needs: the fixed label (so the dedup query finds it), the failing spec names, and the run URL.
+
+<Note>
+Commit the script's executable bit before the first run: `git update-index --chmod=+x scripts/file-exam-issue.sh`. To test the script locally without touching real issues, run it with `DRY_RUN=1` -- the `run_gh()` wrapper echoes the intended `gh` command instead of executing it, so you can verify both paths against a fixture `report.json`.
+</Note>
 
 ## On-Demand Dispatch: The Pre-Merge Escalation
 
