@@ -48,7 +48,11 @@ fi
 # Read the exact Chromium build number that this version of @playwright/cli expects.
 # The CLI only accepts "chromium-<BUILD>" dir names from its own browsers.json — an
 # arbitrary name like "chromium-synthetic" is silently skipped, causing a CDN download.
-PW_CLI_PACKAGE=$(npm_config_yes=true npx --no-install -p @playwright/cli@latest node -e \
+# Do NOT use `npx --no-install` here: in the fresh web/WSL case this wrapper targets, the CLI
+# package is often not yet cached, which would leave PW_CLI_PACKAGE empty and force the
+# unreliable build-number guess from the /opt dir name below. We `exec npx @playwright/cli@latest`
+# anyway, so letting npx fetch it now is free and yields the CLI's REAL browsers.json revision.
+PW_CLI_PACKAGE=$(npm_config_yes=true npx -p @playwright/cli@latest node -e \
   "process.stdout.write(require.resolve('@playwright/cli/package.json'))" 2>/dev/null || true)
 
 CHROMIUM_BUILD=""

@@ -53,13 +53,17 @@ fi
 # ---------------------------------------------------------------------------
 
 # Collect all short SHAs of commits in this PR.
-# Note: the workflow posts `context.sha` which is GitHub's auto-generated merge commit SHA
-# for pull_request events — distinct from the PR branch head SHA. We therefore check whether
-# the comment SHA appears anywhere in the PR's commit list rather than comparing only to head.
 PR_COMMIT_SHAS="$(gh pr view "$PR_NUMBER" --json commits --jq '[.commits[].oid[:7]] | join(" ")')" \
   || fail "Could not fetch PR commits for PR #$PR_NUMBER"
 
-log "PR #$PR_NUMBER commits (short): $PR_COMMIT_SHAS"
+# The pr-checks workflow runs on `pull_request`, so its "Built from commit" embeds context.sha —
+# GitHub's synthetic test-merge commit (refs/pull/N/merge), which is NOT a PR branch commit. Add
+# the PR's current merge commit so a preview built from it is recognized as fresh. Empty when the
+# PR is not currently mergeable; we then degrade gracefully to branch-commit membership only.
+MERGE_SHA="$(gh api "repos/{owner}/{repo}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // "" | .[:7]' 2>/dev/null || true)"
+VALID_SHAS="${PR_COMMIT_SHAS}${MERGE_SHA:+ ${MERGE_SHA}}"
+
+log "PR #$PR_NUMBER valid SHAs (branch + merge): $VALID_SHAS"
 
 # ---------------------------------------------------------------------------
 # Step 3 — find the latest cf-preview-pr comment
@@ -76,7 +80,7 @@ COMMENT_BODY="$(
   gh api "repos/{owner}/{repo}/issues/${PR_NUMBER}/comments" \
     --paginate \
     --slurp \
-  | jq -r "[.[][][].body | select(. != null and (contains(\"${MARKER}\")))] | last"
+  | jq -r "[.[][].body | select(. != null and (contains(\"${MARKER}\")))] | last"
 )" || fail "Failed to list PR comments for PR #$PR_NUMBER"
 
 if [[ -z "$COMMENT_BODY" || "$COMMENT_BODY" == "null" ]]; then
@@ -95,7 +99,7 @@ log "Found preview comment."
 PREVIEW_URL="$(
   printf '%s' "$COMMENT_BODY" \
     | grep -oE 'https://[a-zA-Z0-9._-]+\.pages\.dev[^[:space:]|]*' \
-    | head -1
+    | head -1 || true
 )"
 
 if [[ -z "$PREVIEW_URL" ]]; then
@@ -114,7 +118,7 @@ COMMENT_SHA="$(
   printf '%s' "$COMMENT_BODY" \
     | grep -oE 'Built from commit: `[0-9a-f]{7}`' \
     | grep -oE '[0-9a-f]{7}' \
-    | head -1
+    | head -1 || true
 )"
 
 if [[ -z "$COMMENT_SHA" ]]; then
@@ -124,13 +128,13 @@ if [[ -z "$COMMENT_SHA" ]]; then
   warn "Build freshness could NOT be verified. Proceed with caution."
 else
   log "Comment built-from SHA: $COMMENT_SHA"
-  # Check if this SHA belongs to a commit in the PR.
-  # (The workflow uses context.sha which is GitHub's merge commit — different from the PR
-  # branch head — so we check membership in the PR commit list, not just the tip.)
-  if printf '%s' "$PR_COMMIT_SHAS" | grep -qF "$COMMENT_SHA"; then
-    log "Comment SHA '$COMMENT_SHA' is a commit in this PR. Build is fresh."
+  # Fresh if the comment SHA is a PR branch commit OR the PR's current merge commit (the workflow
+  # embeds the latter via context.sha). -w matches whole space-separated tokens so a 7-char SHA
+  # can't match as a substring of a longer one.
+  if printf '%s' "$VALID_SHAS" | grep -qwF "$COMMENT_SHA"; then
+    log "Comment SHA '$COMMENT_SHA' matches a PR commit or the current merge commit. Build is fresh."
   else
-    fail "Stale-deploy mismatch: comment says built from '$COMMENT_SHA' but that SHA is not in PR #$PR_NUMBER commits ($PR_COMMIT_SHAS). Wait for the CI preview job to finish and re-run."
+    fail "Stale-deploy mismatch: comment says built from '$COMMENT_SHA' but that SHA is neither a PR #$PR_NUMBER branch commit nor the current merge commit ($VALID_SHAS). Wait for the CI preview job to finish and re-run."
   fi
 fi
 
