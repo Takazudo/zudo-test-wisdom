@@ -1,0 +1,121 @@
+---
+title: 制限された環境でのブラウザ検証
+description: Playwright の CDN がブロックされている環境でブラウザベースの検証を実行する — プリインストール済み Chromium への seeing-eye フォールバック、127.0.0.1 への開発サーバーバインド、PR プレビュー URL を使う経路。
+sidebar_position: 10
+---
+
+## 問題
+
+ブラウザベースの検証（`/verify-ui`、`/headless-browser`）は、Playwright を通じて Chromium を起動します。通常の Mac やローカルの Linux マシンではこれは問題なく動きます。ブラウザは Playwright のキャッシュ（Mac は `~/Library/Caches/ms-playwright/`、Linux/WSL は `~/.cache/ms-playwright/`）に存在し、Microsoft の CDN から一度だけダウンロードされます。
+
+サンドボックス化されたコンテナ — Claude Code の Web 版や、ロックダウンされた WSL マシン — では、次の 2 つが壊れます。
+
+1. **Playwright のキャッシュが空で、CDN がブロックされている**ため、`npx playwright install chromium` でブラウザをダウンロードできません。
+2. **`*.localhost` ホスト名が解決されない**ため、デフォルトのホストにバインドされた開発サーバーにコンテナ内部から到達できません。
+
+プリインストール済みの Chromium は通常これらの環境にも存在します（`/opt/pw-browsers/` 配下）が、Playwright は自力ではそれを見つけられません。このリポジトリのスキルにあるスクリプトがそのギャップを埋めます。このページでは、3 つの仕組みと、それぞれがどんなときに当てはまるのかを説明します。
+
+## どの経路を使うか
+
+<Info>
+どこで実行しているか、そしてローカルでサイトを配信できるかどうかで判断します。
+</Info>
+
+| 環境 | アプローチ |
+|---|---|
+| Mac / ローカル Linux | 通常のローカルサーバー（`pnpm dev` / `pnpm preview`）+ `http://localhost:4321` に対する `/verify-ui` または `/headless-browser`。フォールバックは不要。 |
+| 制限された環境（Web / WSL）、ローカルで配信できる | 開発サーバーを `127.0.0.1` にバインドする。**seeing-eye フォールバック**がプリインストール済みの Chromium を自動的に Playwright に組み込みます。 |
+| 制限された環境、ローカルで配信できない | **PR プレビュー URL の経路**を使う — ローカルサーバーの代わりに、稼働中の Cloudflare Pages プレビューデプロイに対して検証します。 |
+
+## Seeing-Eye フォールバック: プリインストール済み Chromium
+
+デフォルトの Playwright キャッシュに Chromium がないとき、`verify-styles.mjs`（`/verify-ui` のスクリプト）と `headless-check.js`（`/headless-browser` の Tier-1 スクリプト）内のインラインリゾルバがプリインストール済みのバイナリを見つけ、それを `executablePath` として直接 `launch()` に渡します。
+
+解決の順序 — 最初にマッチしたものが使われます。
+
+1. **デフォルトキャッシュ** — `~/Library/Caches/ms-playwright/`（Mac）または `~/.cache/ms-playwright/`（Linux/WSL）に `chromium*` エントリがすでにある場合は `{}` を返し、Playwright に自身のパスを使わせます。これが Mac/ローカルのブランチで、**まったく変更されません**。
+2. **`PLAYWRIGHT_EXECUTABLE_PATH`** — 独自の環境変数です。設定されていれば、その値が `executablePath` として渡されます。
+3. **`/opt/pw-browsers/*/chrome-linux/chrome`** — インフラがプロビジョニングした場所を glob し、最も新しいビルド番号を選びます（各 `chromium-<BUILD>` ディレクトリの末尾の数字を数値ソート）。
+
+フォールバックが発動したとき（ブランチ 2 または 3）、ブラウザはサンドボックスに優しいフラグ付きで起動されます。
+
+```js
+{
+  executablePath: "/opt/pw-browsers/chromium-1234/chrome-linux/chrome",
+  args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+}
+```
+
+`executablePath` は `chromium.launch()` に直接注入されます。これが要点です — リゾルバは Playwright 自身のブラウザ探索に**頼らず**、バイナリを明示的に指定することでそれをバイパスします。
+
+<Note>
+`verify-styles.mjs` と `headless-check.js` はどちらも `BROWSER_RESOLVER_DEBUG` 環境変数をサポートしており、解決された起動オプションを JSON として出力して終了します — 実際にブラウザを起動せずにパスのロジックをテストするのに便利です。
+</Note>
+
+## Tier-2 `@playwright/cli`: 合成キャッシュ
+
+`/headless-browser` の Tier-2 経路は `@playwright/cli`（Microsoft のコーディングエージェント向け CLI、`npx` 経由で実行）を使います。これには **`executablePath` フラグがない**ため、上記の手は使えません。さらに悪いことに、CLI は `chromium-<BUILD>` という名前のディレクトリしか受け付けず、その `<BUILD>` は CLI 自身がバンドルする `browsers.json` のリビジョンと一致している必要があります。`chromium-synthetic` のような任意の名前は黙って無視され、CLI は（ブロックされている）CDN ダウンロードにフォールバックします。
+
+`headless-browser/scripts/pw-cli.sh` はこれを回避します。
+
+1. 通常のキャッシュが存在し `chromium-*` エントリがあれば、そのまま `exec npx @playwright/cli@latest "$@"`（Mac/ローカルの経路）。
+2. そうでなければ、プリインストール済みの Chromium を探します（`PLAYWRIGHT_EXECUTABLE_PATH`、次に最も新しい `/opt/pw-browsers/*/chrome-linux/chrome`）。
+3. インストール済みの `@playwright/cli` が期待する**正確な**ビルド番号を、そのバンドルされた `browsers.json` から読み取ります。
+4. その番号を `<BUILD>` として、`chromium-<BUILD>/chrome-linux/chrome` という実バイナリへの**シンボリックリンク**を含む合成キャッシュディレクトリを作ります。
+5. `PLAYWRIGHT_BROWSERS_PATH` をその合成ディレクトリに向けてエクスポートし、CLI を `exec` します。
+
+合成ディレクトリの名前が CLI がスキャンするビルド番号と一致するため、CLI は CDN にアクセスすることなく `/opt` のバイナリを起動します。
+
+```bash
+# Mac/local: normal cache present — use npx directly
+npx @playwright/cli@latest open http://localhost:4321/some/page
+
+# web/WSL: cache absent — use the wrapper that wires the pre-installed Chromium
+.claude/skills/headless-browser/scripts/pw-cli.sh open http://127.0.0.1:4321/some/page
+```
+
+## 開発サーバーを `127.0.0.1` にバインドする
+
+コンテナ内部では `*.localhost` ホスト名は解決されませんが、`http://127.0.0.1:<port>/` は常に機能します。検証のためにサイトをローカルで配信するときは、開発サーバーを明示的にバインドします。
+
+```bash
+pnpm dev --host 127.0.0.1
+```
+
+そして `/verify-ui` または `/headless-browser` を、`localhost`（や `*.localhost`）の URL ではなく `http://127.0.0.1:4321/...` に向けます。
+
+## PR プレビュー URL を使う検証経路
+
+ローカルでのビルドと配信がまったくできないとき — たとえば Web IDE や、ポートフォワードのない WSL マシン — は、代わりにその PR の稼働中の Cloudflare Pages プレビューデプロイに対して検証します。
+
+`verify-ui-ai/scripts/resolve-preview-url.sh` は、稼働中のプレビュー URL を解決・検証して出力します。
+
+```bash
+# Resolve for the current branch's PR
+.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh
+
+# Or for an explicit PR number
+.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh 42
+```
+
+このスクリプトが行うこと。
+
+1. PR のコメントを読み、`<!-- cf-preview-pr -->` マーカーを持つ最新のコメント（プレビューデプロイのワークフローが投稿）を選びます。
+2. そのコメントから `*.pages.dev` の URL を抽出します。
+3. **古いデプロイのガード:** ブランチのプレビュー URL はコミットをまたいで存続するため、単なる `200` が古いビルドであることがあります。スクリプトはコメント内の `Built from commit:` の SHA を解析し、PR のコミットリストと突き合わせます。コメントに SHA がない場合は**警告**（処理は続行）し、SHA が一致しない場合は**失敗**します。
+4. 配信されるベースパス（`/pj/zudo-test/`）を指数バックオフでポーリングし、`200` を返したら検証済みの URL を出力します。
+
+その URL を検証スキルに渡します。
+
+```bash
+PREVIEW_URL="$(.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh)"
+# then run /verify-ui or /headless-browser against "$PREVIEW_URL/pj/zudo-test/..."
+```
+
+<Warning>
+プレビュー URL の経路はネットワークの遅延を伴い、CI のプレビュージョブが完了していることに依存します。ローカルサーバーを配信できるときは常にそれを優先し、本当に配信できないときだけプレビュー URL に頼ってください。
+</Warning>
+
+## 関連項目
+
+- [Playwrightパターン](./playwright-patterns.mdx) — CI と本番環境検証のための E2E パターン。

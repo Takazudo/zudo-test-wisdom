@@ -1,0 +1,121 @@
+---
+title: Browser Verification in Limited Environments
+description: Running browser-based verification when the Playwright CDN is blocked — seeing-eye fallback to a pre-installed Chromium, 127.0.0.1 dev-server binding, and the PR-preview-URL path.
+sidebar_position: 10
+---
+
+## The Problem
+
+Browser-based verification (`/verify-ui`, `/headless-browser`) launches Chromium through Playwright. On a normal Mac or local Linux box this just works: the browser lives in the Playwright cache (`~/Library/Caches/ms-playwright/` on Mac, `~/.cache/ms-playwright/` on Linux/WSL), downloaded once from Microsoft's CDN.
+
+In a sandboxed container — Claude Code on the web, or a locked-down WSL box — two things break:
+
+1. **The Playwright cache is empty and the CDN is blocked**, so `npx playwright install chromium` cannot download a browser.
+2. **`*.localhost` hostnames do not resolve**, so a dev server bound to the default host is unreachable from inside the container.
+
+A pre-installed Chromium usually *does* exist in these environments (under `/opt/pw-browsers/`), but Playwright won't find it on its own. The scripts in this repo's skills bridge that gap. This page documents the three mechanisms and when each applies.
+
+## Which Path to Use
+
+<Info>
+Decide based on where you are running and whether you can serve the site locally.
+</Info>
+
+| Environment | Approach |
+|---|---|
+| Mac / local Linux | Normal local server (`pnpm dev` / `pnpm preview`) + `/verify-ui` or `/headless-browser` against `http://localhost:4321`. No fallback needed. |
+| Limited env (web / WSL), can serve locally | Bind the dev server to `127.0.0.1`; the **seeing-eye fallback** wires the pre-installed Chromium into Playwright automatically. |
+| Limited env, cannot serve locally | Use the **PR-preview-URL path** — verify against the live Cloudflare Pages preview deploy instead of a local server. |
+
+## Seeing-Eye Fallback: Pre-installed Chromium
+
+When the default Playwright cache has no Chromium, an inline resolver in `verify-styles.mjs` (the `/verify-ui` script) and `headless-check.js` (the `/headless-browser` Tier-1 script) finds a pre-installed binary and hands it to `launch()` directly as `executablePath`.
+
+Resolution order — the first match wins:
+
+1. **Default cache** — if `~/Library/Caches/ms-playwright/` (Mac) or `~/.cache/ms-playwright/` (Linux/WSL) already contains a `chromium*` entry, return `{}` and let Playwright use its own path. This is the Mac/local branch — **completely unchanged**.
+2. **`PLAYWRIGHT_EXECUTABLE_PATH`** — our own env var. If set, its value is passed as `executablePath`.
+3. **`/opt/pw-browsers/*/chrome-linux/chrome`** — glob the infra-provisioned location and pick the newest build number (numeric sort on the trailing digits of each `chromium-<BUILD>` dir).
+
+When the fallback fires (branch 2 or 3), the browser is launched with sandbox-friendly flags:
+
+```js
+{
+  executablePath: "/opt/pw-browsers/chromium-1234/chrome-linux/chrome",
+  args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+}
+```
+
+`executablePath` is injected directly into `chromium.launch()`. This is the key detail — the resolver does **not** rely on Playwright's own browser discovery; it bypasses it by naming the binary explicitly.
+
+<Note>
+Both `verify-styles.mjs` and `headless-check.js` support a `BROWSER_RESOLVER_DEBUG` env var that prints the resolved launch options as JSON and exits — useful for testing the path logic without an actual browser launch.
+</Note>
+
+## Tier-2 `@playwright/cli`: A Synthetic Cache
+
+The `/headless-browser` Tier-2 path uses `@playwright/cli` (Microsoft's coding-agent CLI, run via `npx`). It has **no `executablePath` flag**, so the trick above does not apply. Worse, the CLI only accepts a Chromium directory named exactly `chromium-<BUILD>` where `<BUILD>` matches the revision in its own bundled `browsers.json` — an arbitrary name like `chromium-synthetic` is silently ignored, and the CLI falls back to a (blocked) CDN download.
+
+`headless-browser/scripts/pw-cli.sh` works around this:
+
+1. If the normal cache exists with a `chromium-*` entry, `exec npx @playwright/cli@latest "$@"` unchanged (the Mac/local path).
+2. Otherwise, locate a pre-installed Chromium (`PLAYWRIGHT_EXECUTABLE_PATH`, then newest `/opt/pw-browsers/*/chrome-linux/chrome`).
+3. Read the **exact** build number the installed `@playwright/cli` expects from its bundled `browsers.json`.
+4. Build a synthetic cache dir containing a `chromium-<BUILD>/chrome-linux/chrome` **symlink** to the real binary, where `<BUILD>` is that expected number.
+5. Export `PLAYWRIGHT_BROWSERS_PATH` to point at the synthetic dir, then `exec` the CLI.
+
+Because the synthetic directory's name matches the build number the CLI scans for, the CLI launches the `/opt` binary without ever hitting the CDN.
+
+```bash
+# Mac/local: normal cache present — use npx directly
+npx @playwright/cli@latest open http://localhost:4321/some/page
+
+# web/WSL: cache absent — use the wrapper that wires the pre-installed Chromium
+.claude/skills/headless-browser/scripts/pw-cli.sh open http://127.0.0.1:4321/some/page
+```
+
+## Binding the Dev Server to `127.0.0.1`
+
+Inside a container, `*.localhost` hostnames do not resolve, but `http://127.0.0.1:<port>/` always works. When you serve the site locally for verification, bind the dev server explicitly:
+
+```bash
+pnpm dev --host 127.0.0.1
+```
+
+Then point `/verify-ui` or `/headless-browser` at `http://127.0.0.1:4321/...` rather than a `localhost` (or `*.localhost`) URL.
+
+## PR-Preview-URL Verification Path
+
+When a local build-and-serve is not possible at all — e.g. a web IDE or a WSL box with no forwarded port — verify against the live Cloudflare Pages preview deploy for the PR instead.
+
+`verify-ui-ai/scripts/resolve-preview-url.sh` resolves, verifies, and prints the live preview URL:
+
+```bash
+# Resolve for the current branch's PR
+.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh
+
+# Or for an explicit PR number
+.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh 42
+```
+
+What it does:
+
+1. Reads the PR's comments and picks the latest one carrying the `<!-- cf-preview-pr -->` marker (posted by the preview-deploy workflow).
+2. Extracts the `*.pages.dev` URL from that comment.
+3. **Stale-deploy guard:** the branch preview URL persists across commits, so a bare `200` can be an old build. The script parses the `Built from commit:` SHA in the comment and checks it against the PR's commit list. It **warns** (but proceeds) when the comment carries no SHA, and **fails** on a SHA mismatch.
+4. Polls the served base path (`/pj/zudo-test/`) with exponential backoff until it returns `200`, then prints the verified URL.
+
+Feed that URL to your verification skill:
+
+```bash
+PREVIEW_URL="$(.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh)"
+# then run /verify-ui or /headless-browser against "$PREVIEW_URL/pj/zudo-test/..."
+```
+
+<Warning>
+The preview-URL path adds network latency and depends on the CI preview job having finished. Prefer a local server whenever you can serve one; reach for the preview URL only when you genuinely cannot.
+</Warning>
+
+## See Also
+
+- [Playwright Patterns](./playwright-patterns.mdx) — E2E patterns for CI and production verification.

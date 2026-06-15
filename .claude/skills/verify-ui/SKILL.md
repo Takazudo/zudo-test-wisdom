@@ -68,6 +68,10 @@ If computed styles look correct but the user's concern might be visual (layout, 
 
 **NEVER say "looks correct" without stating what specific thing you checked and what you observed.**
 
+## Limited-env browser fallback (web/WSL)
+
+`verify-styles.mjs` includes a browser-resolver that falls back to a pre-installed Chromium when the default Playwright cache (`~/Library/Caches/ms-playwright/` on Mac, `~/.cache/ms-playwright/` on Linux/WSL) is absent — e.g. on Claude Code web, where the browser-download CDN is blocked. Resolution order: default cache (Mac/local, unchanged) → `PLAYWRIGHT_EXECUTABLE_PATH` → newest `/opt/pw-browsers/*/chrome-linux/chrome`. The resolved binary is passed straight to `launch()` as `executablePath` with `--no-sandbox --disable-gpu --disable-dev-shm-usage`. Mac/local behavior is unchanged. In-container, bind the dev server to `127.0.0.1` (`*.localhost` does not resolve there). When you cannot serve locally at all, verify against the PR preview deploy — see `/verify-ui-ai`'s "Verify against the PR preview deploy".
+
 ## When to Use Multiple Widths/Themes
 
 - **Always** if the change involves responsive behavior (breakpoint-dependent styling)
