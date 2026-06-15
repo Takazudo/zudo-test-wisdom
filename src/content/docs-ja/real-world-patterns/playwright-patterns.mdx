@@ -561,3 +561,7 @@ test("displays user name from mock API", async ({ page }) => {
 <Warning>
 モックバックエンドはフロントエント中心のテストには最適ですが、実際のAPIに対するインテグレーションテストの代わりにはなりません。両方を使用してください：UIの動作にはモック、データフローには実際のAPI。
 </Warning>
+
+## 関連項目
+
+Playwright の CDN がブロックされたサンドボックス化されたコンテナ（Web 版 Claude Code、ロックダウンされた WSL）でこれらのパターンを実行する場合は、[制限された環境でのブラウザ検証](./web-container-browser.mdx)を参照してください。プリインストール済み Chromium への seeing-eye フォールバック、`127.0.0.1` への開発サーバーバインド、PR プレビュー URL を使う検証経路を扱っています。

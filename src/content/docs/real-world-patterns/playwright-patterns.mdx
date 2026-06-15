@@ -561,3 +561,7 @@ test("displays user name from mock API", async ({ page }) => {
 <Warning>
 Mock backends are great for frontend-focused testing, but they do not replace integration tests against the real API. Use both: mocked for UI behavior, real for data flow.
 </Warning>
+
+## See Also
+
+Running these patterns inside a sandboxed container (Claude Code on the web, locked-down WSL) where the Playwright CDN is blocked? See [Browser Verification in Limited Environments](./web-container-browser.mdx) for the seeing-eye fallback to a pre-installed Chromium, `127.0.0.1` dev-server binding, and the PR-preview-URL verification path.
