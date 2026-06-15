@@ -76,7 +76,7 @@ COMMENT_BODY="$(
   gh api "repos/{owner}/{repo}/issues/${PR_NUMBER}/comments" \
     --paginate \
     --slurp \
-    --jq "[.[][][].body | select(. != null and (contains(\"${MARKER}\")))] | last"
+  | jq -r "[.[][][].body | select(. != null and (contains(\"${MARKER}\")))] | last"
 )" || fail "Failed to list PR comments for PR #$PR_NUMBER"
 
 if [[ -z "$COMMENT_BODY" || "$COMMENT_BODY" == "null" ]]; then
