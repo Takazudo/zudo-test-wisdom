@@ -148,29 +148,43 @@ function collapseConsoleMessages(logs, maxEntries) {
 }
 
 /**
- * Resolve a pre-installed Chromium when the default Playwright cache is absent.
- * On Mac/local the cache is present and this returns {} (Playwright's default path, unchanged).
- * On web/WSL where the CDN download is blocked, falls back to:
+ * Resolve Chromium launch options: an executablePath when the default Playwright
+ * cache is absent, plus the platform-driven sandbox args.
+ * On Linux (WSL + native Linux + web container) EVERY branch — default cache included —
+ * launches with --no-sandbox --disable-gpu --disable-dev-shm-usage. Mac/darwin's sandbox
+ * works, so it stays flag-free and the default-cache branch returns {} (unchanged).
+ * executablePath fallback order when the default cache is absent (web/WSL, CDN download blocked):
  *   1. PLAYWRIGHT_EXECUTABLE_PATH env var (our own var — we read it and pass executablePath)
  *   2. /opt/pw-browsers/<newest>/chrome-linux/chrome (pre-installed by infra)
  */
 async function resolveBrowserOpts() {
   const { existsSync, readdirSync } = await import("node:fs");
-  // Mac uses ~/Library/Caches/ms-playwright; Linux/WSL uses ~/.cache/ms-playwright
+  // Linux (WSL + native Linux + web container) must launch Chromium with these
+  // flags; Mac/darwin's sandbox works, so it stays flag-free. Applied on EVERY
+  // executablePath branch (default cache included) — issue #60: the default-cache
+  // branch previously returned no args, which broke WSL (browser is in the default
+  // cache there, so it launched without --no-sandbox).
+  const sandboxArgs =
+    process.platform === "linux"
+      ? ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
+      : [];
+  const withArgs = (opts = {}) =>
+    sandboxArgs.length ? { ...opts, args: sandboxArgs } : opts;
+
   const defaultCaches = [
     `${process.env.HOME}/Library/Caches/ms-playwright`,
     `${process.env.HOME}/.cache/ms-playwright`,
   ];
-  // Branch 1: default cache present → Mac/local path, no override needed
+  // Branch 1: default cache present (Mac/local, and WSL once installed)
   for (const defaultCache of defaultCaches) {
     if (existsSync(defaultCache) && readdirSync(defaultCache).some((d) => d.startsWith("chromium"))) {
-      return {};
+      return withArgs();
     }
   }
   // Branch 2: explicit env var (our own; we pass it as executablePath, not relying on PW)
   const envPath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
   if (envPath) {
-    return { executablePath: envPath, args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] };
+    return withArgs({ executablePath: envPath });
   }
   // Branch 3: glob /opt/pw-browsers/*/chrome-linux/chrome (newest build number wins)
   const optBase = "/opt/pw-browsers";
@@ -184,10 +198,10 @@ async function resolveBrowserOpts() {
         return numB - numA;
       });
     if (dirs.length > 0) {
-      return { executablePath: `${optBase}/${dirs[0]}/chrome-linux/chrome`, args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] };
+      return withArgs({ executablePath: `${optBase}/${dirs[0]}/chrome-linux/chrome` });
     }
   }
-  return {};
+  return withArgs();
 }
 
 // Print resolved opts when BROWSER_RESOLVER_DEBUG is set (for path-logic testing without a real launch)
