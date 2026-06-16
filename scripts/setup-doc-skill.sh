@@ -160,9 +160,10 @@ fi
 
 echo "  Generated SKILL.md"
 
-# Symlink into global skills directory
+# Symlink into global skills directory.
+# Point at the main-worktree path so the global link survives worktree removal.
 mkdir -p "$GLOBAL_SKILLS_DIR"
-ensure_symlink "$GLOBAL_SKILLS_DIR/$SKILL_NAME" "$SKILL_DIR"
+ensure_symlink "$GLOBAL_SKILLS_DIR/$SKILL_NAME" "$REPO_ROOT/.claude/skills/$SKILL_NAME"
 
 echo ""
 echo "Done! Skill '$SKILL_NAME' is ready."
