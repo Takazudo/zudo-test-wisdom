@@ -82,7 +82,54 @@ const path = await import("node:path");
 mkdirSync(ssDir, { recursive: true });
 
 const { chromium } = await findPlaywright();
-const browser = await chromium.launch();
+
+/**
+ * Resolve a pre-installed Chromium when the default Playwright cache is absent.
+ * On Mac/local the cache is present and this returns {} (Playwright's default path, unchanged).
+ * On web/WSL where the CDN download is blocked, falls back to:
+ *   1. PLAYWRIGHT_EXECUTABLE_PATH env var (our own var — we read it and pass executablePath)
+ *   2. /opt/pw-browsers/<newest>/chrome-linux/chrome (pre-installed by infra)
+ */
+async function resolveBrowserOpts() {
+  const { existsSync, readdirSync } = await import("node:fs");
+  // Mac uses ~/Library/Caches/ms-playwright; Linux/WSL uses ~/.cache/ms-playwright
+  const defaultCaches = [
+    `${process.env.HOME}/Library/Caches/ms-playwright`,
+    `${process.env.HOME}/.cache/ms-playwright`,
+  ];
+  // Branch 1: default cache present → Mac/local path, no override needed
+  for (const defaultCache of defaultCaches) {
+    if (existsSync(defaultCache) && readdirSync(defaultCache).some((d) => d.startsWith("chromium"))) {
+      return {};
+    }
+  }
+  // Branch 2: explicit env var (our own; we pass it as executablePath, not relying on PW)
+  const envPath = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+  if (envPath) {
+    return { executablePath: envPath, args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] };
+  }
+  // Branch 3: glob /opt/pw-browsers/*/chrome-linux/chrome (newest build number wins)
+  const optBase = "/opt/pw-browsers";
+  if (existsSync(optBase)) {
+    const dirs = readdirSync(optBase)
+      .filter((d) => existsSync(`${optBase}/${d}/chrome-linux/chrome`))
+      .sort((a, b) => {
+        // Numeric sort on trailing build number (e.g. "chromium-1234" → 1234)
+        const numA = parseInt(a.replace(/\D+/g, ""), 10) || 0;
+        const numB = parseInt(b.replace(/\D+/g, ""), 10) || 0;
+        return numB - numA;
+      });
+    if (dirs.length > 0) {
+      return { executablePath: `${optBase}/${dirs[0]}/chrome-linux/chrome`, args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] };
+    }
+  }
+  return {};
+}
+
+const browserOpts = await resolveBrowserOpts();
+// Print resolved opts when BROWSER_RESOLVER_DEBUG is set (for path-logic testing without a real launch)
+if (process.env.BROWSER_RESOLVER_DEBUG) { console.log(JSON.stringify({ resolvedBrowserOpts: browserOpts })); process.exit(0); }
+const browser = await chromium.launch({ ...browserOpts });
 const report = { url, selector, timestamp: new Date().toISOString(), styles: {}, screenshots: [] };
 
 // --- Layer 1: Computed style extraction (use first width/scheme) ---

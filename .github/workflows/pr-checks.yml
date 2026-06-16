@@ -126,7 +126,9 @@ jobs:
             --commit-hash="${GITHUB_SHA}" \
             --commit-message="Preview: PR #${PR_NUMBER}"
 
-          DEPLOY_URL="https://pr-${PR_NUMBER}.takazudo-zudo-test-wisdom.pages.dev"
+          # Cloudflare Pages branch-alias host is <branch>.<project>.pages.dev — must match
+          # --project-name (zudo-test-wisdom). The previous "takazudo-" prefix did not resolve.
+          DEPLOY_URL="https://pr-${PR_NUMBER}.zudo-test-wisdom.pages.dev"
           echo "deploy_url=$DEPLOY_URL" >> "$GITHUB_OUTPUT"
           echo "Preview URL: $DEPLOY_URL"
         env:

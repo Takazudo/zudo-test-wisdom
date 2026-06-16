@@ -99,14 +99,23 @@ Playwright CLI (`@playwright/cli`) is Microsoft's CLI built specifically for cod
 **Run via npx** (no local install needed -- reuses existing Chromium browsers):
 
 ```bash
+# Mac/local: normal cache present — use npx directly
 npx @playwright/cli@latest <command>
+
+# web/WSL: cache absent — use the wrapper that wires the pre-installed Chromium
+$HOME/.claude/skills/headless-browser/scripts/pw-cli.sh <command>
 ```
+
+**web/WSL note:** bind your dev server to `127.0.0.1` (e.g. `pnpm dev --host 127.0.0.1`). `*.localhost` hostnames do not resolve in-container, but `http://127.0.0.1:<port>/` always works.
 
 ### Core Workflow
 
 ```bash
 # 1. Open a page
+# Mac/local:
 npx @playwright/cli@latest open http://localhost:4321/some/page
+# web/WSL:
+$HOME/.claude/skills/headless-browser/scripts/pw-cli.sh open http://127.0.0.1:4321/some/page
 
 # 2. Take snapshot to see page structure and element refs
 npx @playwright/cli@latest snapshot
@@ -328,9 +337,9 @@ Screenshots that are captured but not visually inspected are worthless. If you s
 
 ## Technical Notes
 
-- **Tier 1** uses Playwright API via Node.js (installed in `$HOME/.claude/skills/headless-browser/node_modules/`)
-- **Tier 2** uses `@playwright/cli` via npx (isolated from the local playwright install, no conflicts)
-- Both tiers share the same Chromium browsers from `$HOME/.cache/ms-playwright/`
+- **Tier 1** uses Playwright API via Node.js (installed in `$HOME/.claude/skills/headless-browser/node_modules/`). Includes a browser-resolver that falls back to a pre-installed Chromium (`/opt/pw-browsers/*/chrome-linux/chrome` or `PLAYWRIGHT_EXECUTABLE_PATH`) when `~/.cache/ms-playwright/` is absent (web/WSL). Mac/local behavior is unchanged.
+- **Tier 2** uses `@playwright/cli` via npx (isolated from the local playwright install, no conflicts). On web/WSL use `pw-cli.sh` instead of npx directly — it wires the pre-installed Chromium via `PLAYWRIGHT_BROWSERS_PATH` so the CLI finds it without a download.
+- Both tiers share the same Chromium browsers from `$HOME/.cache/ms-playwright/` on Mac/local. On web/WSL they use the pre-installed binary.
 - **Resource blocking:** By default, Tier 1 blocks images/fonts for speed. Use `--no-block-resources` for accurate error detection
 - Screenshots saved to `$HOME/cclogs/{repo-name}/headless-screenshots/`
 - Playwright CLI creates a `.playwright-cli/` directory at CWD for snapshot artifacts (gitignored)

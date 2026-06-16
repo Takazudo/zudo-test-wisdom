@@ -130,6 +130,51 @@ Plus a `summary` field with a one-line human-readable verdict.
 
 The parent receives the structured result and decides what to do with it: attach to the PR as evidence, write to a tracked evidence directory, gate a workflow step, etc. The test-flow skill stays on disk for reuse — next time the same test class is needed, the existing skill is invoked without re-authoring.
 
+## Verify against the PR preview deploy
+
+When a full local build+serve is not possible — **web IDE (e.g. github.dev) or WSL without a forwarded port** — pass the Cloudflare Pages preview URL as the `Preview URL` input instead of a `localhost` address.
+
+### When to prefer the preview URL vs a local server
+
+| Environment | Preferred approach |
+|---|---|
+| Mac (local dev) | Run `pnpm dev` / `pnpm preview` and point `/verify-ui` or `/headless-browser` at `http://localhost:4321`. Faster feedback, no network round-trip, no stale-deploy risk. |
+| Web IDE / WSL (no forwarded port) | Resolve the PR preview URL with the script below and point verification at that URL. Adds network latency and a freshness check; tolerable for one-off L6 runs. |
+
+### resolve-preview-url.sh
+
+`.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh` resolves, verifies, and prints the live Cloudflare Pages preview URL for a PR.
+
+```bash
+# From repo root — auto-detects the PR for the current branch:
+.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh
+
+# Or supply a PR number explicitly:
+.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh 42
+```
+
+**What it does:**
+
+1. Reads PR comments and picks the latest one containing the `<!-- cf-preview-pr -->` marker (posted by `.github/workflows/pr-checks.yml`).
+2. Extracts any `*.pages.dev` URL from the comment.
+3. **Stale-deploy guard:** The branch preview URL persists across commits, so a bare `200` can be an old build.
+   - If the comment includes a commit SHA (format: `Built from commit: \`abc1234\``), the script checks whether that SHA belongs to a commit in the PR and **fails** if it does not. (Note: the workflow embeds `context.sha`, which is GitHub's auto-generated merge commit and differs from the PR branch tip — the script therefore checks membership in the full PR commit list rather than comparing only to head.)
+   - If the comment includes **no** commit SHA, the script emits a **WARNING** that build freshness could not be verified — it does NOT treat a bare `200` as fresh.
+4. Polls the URL with exponential backoff (up to ~3 minutes) until `<url>/pj/zudo-test/` returns `200`.
+5. Prints the verified live URL to stdout on success.
+
+Exits non-zero with a descriptive message if: no preview comment exists, the commit SHA mismatches, or the poll times out.
+
+### Using the preview URL in a verification subagent
+
+After the script prints the URL, pass it as the `Preview URL` input when dispatching the L6 subagent:
+
+```bash
+PREVIEW_URL="$(.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh)"
+```
+
+Then include `Preview URL: $PREVIEW_URL` in the subagent prompt's `## Inputs` section. The subagent passes it to `/verify-ui` or `/headless-browser` as the target URL.
+
 ## Archive results for auditability
 
 Because L6 verdicts are non-repeatable, **archive the evidence after every run**:
