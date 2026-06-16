@@ -160,7 +160,7 @@ When a full local build+serve is not possible — **web IDE (e.g. github.dev) or
 3. **Stale-deploy guard:** The branch preview URL persists across commits, so a bare `200` can be an old build.
    - If the comment includes a commit SHA (format: `Built from commit: \`abc1234\``), the script checks whether that SHA belongs to a commit in the PR and **fails** if it does not. (Note: the workflow embeds `context.sha`, which is GitHub's auto-generated merge commit and differs from the PR branch tip — the script therefore checks membership in the full PR commit list rather than comparing only to head.)
    - If the comment includes **no** commit SHA, the script emits a **WARNING** that build freshness could not be verified — it does NOT treat a bare `200` as fresh.
-4. Polls the URL with exponential backoff (up to ~3 minutes) until `<url>/pj/zudo-test/` returns `200`.
+4. Polls the URL with exponential backoff (up to ~3 minutes) until `<url>/` returns `200`.
 5. Prints the verified live URL to stdout on success.
 
 Exits non-zero with a descriptive message if: no preview comment exists, the commit SHA mismatches, or the poll times out.

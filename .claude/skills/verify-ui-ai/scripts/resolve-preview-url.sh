@@ -20,7 +20,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 # Base path where the site is served (project-specific — imposed by astro.config base option)
-SITE_BASE_PATH="/pj/zudo-test"
+# Site is served at root ("/"), so base path is empty
+SITE_BASE_PATH=""
 
 # Poll settings: up to ~3 minutes total (exponential backoff: 5 10 20 40 60 60 ...)
 MAX_POLL_SECONDS=180
