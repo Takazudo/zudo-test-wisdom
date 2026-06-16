@@ -18,7 +18,9 @@ A pre-installed Chromium usually *does* exist in these environments (under `/opt
 ## Which Path to Use
 
 <Info>
+
 Decide based on where you are running and whether you can serve the site locally.
+
 </Info>
 
 | Environment | Approach |
@@ -49,7 +51,9 @@ When the fallback fires (branch 2 or 3), the browser is launched with sandbox-fr
 `executablePath` is injected directly into `chromium.launch()`. This is the key detail — the resolver does **not** rely on Playwright's own browser discovery; it bypasses it by naming the binary explicitly.
 
 <Note>
+
 Both `verify-styles.mjs` and `headless-check.js` support a `BROWSER_RESOLVER_DEBUG` env var that prints the resolved launch options as JSON and exits — useful for testing the path logic without an actual browser launch.
+
 </Note>
 
 ## Tier-2 `@playwright/cli`: A Synthetic Cache
@@ -113,7 +117,9 @@ PREVIEW_URL="$(.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh)"
 ```
 
 <Warning>
+
 The preview-URL path adds network latency and depends on the CI preview job having finished. Prefer a local server whenever you can serve one; reach for the preview URL only when you genuinely cannot.
+
 </Warning>
 
 ## See Also

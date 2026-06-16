@@ -71,7 +71,9 @@ it("resolves a relative .mdx link to a URL", () => {
 Because `link` is the same object reference the tree holds, asserting `link.url` after `plugin(tree, file)` reads the mutation directly -- no need to walk the tree again.
 
 <Tip>
+
 Hand-built trees shine on edge cases. A `definition` node (a reference-style link target), a URL with a hash and a query string, a link nested three paragraphs deep -- each is a one-liner with a factory, but a fiddly markdown sample to write and keep stable.
+
 </Tip>
 
 ### Deterministic on-disk context
@@ -125,7 +127,9 @@ describe("remarkResolveMarkdownLinks", () => {
 ```
 
 <Note>
+
 The unique suffix (`Date.now()` plus a random base-36 string) means parallel test workers never collide on the same directory, and `afterEach` cleanup keeps the temp folder from leaking between runs. This is the same isolation discipline as an in-memory DB per test -- just on the real filesystem, because that is what the resolver reads.
+
 </Note>
 
 ## Half 2: golden-fixture corpus (integration)
@@ -197,7 +201,9 @@ UPDATE_FIXTURES=1 pnpm vitest run fixtures
 Then you review the resulting diff in the `expected-html/*.html` files like any other change. A surprising diff means an unintended regression; an expected diff is your new baseline. The flag also auto-writes the file the first time it does not exist, so adding a fixture is just dropping in a new `.mdx`.
 
 <Warning>
+
 Never regenerate fixtures blindly to make a red test go green. The whole value of a golden corpus is that an unexpected diff is a signal. Read the diff, confirm it matches the change you intended, and only then commit the regenerated HTML.
+
 </Warning>
 
 ### The corpus as a parity oracle
@@ -207,7 +213,9 @@ Here is where the golden corpus earns its keep beyond regression catching. Once 
 This is the safe way to port a transform pipeline across languages: the reference implementation defines truth, the corpus pins that truth to disk, and parity is a literal string comparison rather than a judgment call. When a plugin reaches byte-for-byte parity with its Rust port, you can retire the JS version with confidence -- the corpus proves the two produce identical output across the whole fixture set.
 
 <Info>
+
 The fixtures do double duty: a regression guard for the JS pipeline today, and the acceptance test for the Rust port tomorrow. The same `.html` files serve both roles without modification.
+
 </Info>
 
 ### Document every divergence from prod
@@ -232,7 +240,9 @@ A golden corpus is only trustworthy if it actually mirrors production. In practi
 ```
 
 <Danger>
+
 An undocumented divergence is how a golden corpus silently drifts from prod. If the test pipeline skips Shiki or a link resolver and nobody wrote it down, the next maintainer assumes the fixtures reflect what ships -- and ships a regression the green corpus failed to catch. The comment is the spec; treat it as load-bearing.
+
 </Danger>
 
 ## Putting the halves together

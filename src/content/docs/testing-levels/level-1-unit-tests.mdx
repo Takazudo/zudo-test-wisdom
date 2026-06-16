@@ -65,6 +65,7 @@ For logic changes, follow the standard TDD cycle:
 ## Blind Spots
 
 <Warning>
+
 Level 1 tests are **blind to everything visual**. They cannot detect:
 
 - Whether an element renders on screen
@@ -72,6 +73,7 @@ Level 1 tests are **blind to everything visual**. They cannot detect:
 - Layout problems (element present in DOM but not visible)
 - Browser-specific rendering behavior
 - User interaction flows
+
 </Warning>
 
 Level 1 is the right choice when you are confident the bug is in logic, not in rendering. If there is any doubt about visibility or visual correctness, escalate to Level 4 or 5.

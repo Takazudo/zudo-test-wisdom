@@ -15,7 +15,9 @@ Every heavy test leaves this page through one of three exits:
 - **Delete** — remove the test and watch what happens
 
 <Warning>
+
 **A strategy that only finds homes for heavy tests will faithfully preserve tests that should die.** If the decision rule has no demote and delete branches, every slow, redundant, or worthless test gets carried into a scheduled tier and runs forever at real cost. Branch 0 exists to filter those tests out first.
+
 </Warning>
 
 ## Branch 0: Before Assigning Any Tier
@@ -67,7 +69,9 @@ The test needs hardware the CI runner does not have: a real GPU, a hardware vide
 The treatment is the **scheduled tier (T3) on capable hardware**, plus the local heavy lane.
 
 <Note>
+
 **Demotion does not help here.** A component test runs in the same GPU-less environment as the E2E test — moving the assertion down a level changes nothing about the hardware it executes on. This is the one category where the lower-level rewrite, normally the cheapest exit, is structurally unavailable.
+
 </Note>
 
 ### 3. Platform-incapable
@@ -136,10 +140,13 @@ Before entering the pipeline, confirm there is at least one verifiable green run
 4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../real-world-patterns/deflaking-recipe.mdx) — it covers the five causes of E2E flakiness and the mechanical steps to eliminate each one.
 
 <Tip>
+
 A test that only passes on retry belongs in this pipeline too — pass-on-retry is a triage signal, not a success.
+
 </Tip>
 
 <Note>
+
 **Quarantining a Rust/cargo flake — the same pipeline, no test-title grep.** The pipeline above is described with Playwright's `@flaky`-title-substring convention, but the three mechanics are language-agnostic. On a Rust/cargo project, `#[ignore]` provides all three directly:
 
 ```rust
@@ -154,12 +161,15 @@ fn drag_preview_follows_cursor() {
 - **Paper trail.** The `#[ignore = "..."]` reason string keeps the mandatory inline issue URL right next to the test — the cargo analogue of the `@flaky`-title-substring convention.
 - **Excluded from the strict gate.** `cargo test` skips `#[ignore]` tests by default, so a quarantined flake no longer blocks the gate — the analogue of `--grep-invert "@flaky"`.
 - **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs the ignored set and `cargo test -- --include-ignored` runs everything; schedule one as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue. Caveat: `--ignored` matches *every* `#[ignore]` test, so if your suite also uses `#[ignore]` for slow or manual tests, narrow the run with a name filter (e.g. `cargo test flaky_ -- --ignored` over a naming convention) so unrelated ignored tests do not pollute the flake signal — `#[ignore]` is a broader marker than the flake-specific `@flaky` title substring.
+
 </Note>
 
 <Warning>
+
 **Quarantine suspends product coverage, not just test coverage.** While a test is quarantined, the behavior it guards is unguarded — regressions in that behavior will not be caught until the test is fixed. Treat every quarantine fix as two verifications: first confirm the test mechanics are sound, then confirm the product behavior itself still holds. A fixed flake that immediately fails for a *different* reason is the pipeline working correctly, not a fix gone wrong.
 
 Worked case: a drag-and-drop spec was quarantined because Playwright-WebKit never reliably commits native HTML5 drops — a mechanical flake. While it sat in quarantine, the asserted behavior had silently broken: the feature's backend was deleted in a refactor, and the regression shipped unnoticed for days.
+
 </Warning>
 
 ## Where to Go Next

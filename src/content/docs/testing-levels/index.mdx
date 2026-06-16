@@ -31,7 +31,9 @@ graph LR
 ## The Escalation Rule
 
 <Warning>
+
 When a test at the current level passes but the user reports the problem persists, do **not** re-run the same test. Escalate to the next level.
+
 </Warning>
 
 The levels are ordered by coverage breadth. Each higher level catches categories of bugs that lower levels structurally cannot detect. For example, a unit test cannot catch `overflow: hidden` hiding an element, because unit tests do not process CSS at all.

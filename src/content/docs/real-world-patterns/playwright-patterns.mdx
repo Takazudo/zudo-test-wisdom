@@ -49,7 +49,9 @@ export default defineConfig({
 ```
 
 <Tip>
+
 Run `npx playwright test --project=ci` in CI and `npx playwright test --project=interactive` locally when you need full keyboard/clipboard testing.
+
 </Tip>
 
 ## Guard against specs that match no project
@@ -82,7 +84,9 @@ bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" 
 ```
 
 <Warning>
+
 The guard script, not the config, is what makes a filename-prefix project split safe. A green Playwright run only proves that the specs which were collected passed — it cannot prove that every spec ran. If a spec falls outside every project's `testMatch` pattern, Playwright drops it silently. The guard is the only thing that catches a spec the config silently skipped.
+
 </Warning>
 
 ## Quarantining Flakes: The Retries-Asymmetry Trap
@@ -120,11 +124,15 @@ pnpm test:e2e --project=webkit --grep="@interactive" --grep-invert="$WEBKIT_INVE
 The Chromium step adds `@flaky` to its `--grep-invert` (alongside `@interactive`), and the WebKit `@interactive` step also excludes `@flaky`. The tests stay in the suite — CI still runs them and tolerates the occasional retry — but they no longer trip the zero-retry local gate.
 
 <Warning>
+
 `@flaky` is a quarantine, not a permanent skip. Tag only tests that are **already** known-flaky on `main`; never tag a brand-new test to make a gate pass. When you fix the underlying race, remove the tag in the same PR — otherwise the list silently grows and you lose real coverage.
+
 </Warning>
 
 <Tip>
+
 Keep escape hatches for the local gate so a flaky machine never blocks a push: e.g. `SKIP_E2E_WEBKIT=1` to skip just the WebKit pass, `SKIP_E2E=1` to skip the whole E2E stage, and a `RUN_FLAKY=1` opt-in to run the quarantined tests when verifying a fix.
+
 </Tip>
 
 ## `test.skip` as a Precondition — the pass-by-skip Trap
@@ -193,6 +201,7 @@ export async function setEditorContent(page: Page, content: string) {
 The platform-aware `mod` helper lets the same spec drive editor shortcuts on macOS (`Meta`) and Linux/Windows (`Control`) without branching in every test.
 
 <Warning>
+
 That `waitForTimeout(500)` is the **legitimate exception** to the usual "never use an arbitrary `waitForTimeout`" rule. An arbitrary wait is acceptable only when it is **keyed to a known application constant** — here, the 500ms auto-save debounce — and you **document why** using the `// wait-ok: <why>` marker. A bare `waitForTimeout(500)` with no rationale is still a flake waiting to happen; tie it to a real constant or replace it with a proper `expect` wait.
 
 A second legitimate class: specs that assert the **absence** of a failure within a time window. For example, guarding against a React "Maximum update depth exceeded" startup loop — you mount the app and assert that no error fires for N ms. Converting that sleep to a condition wait **guts the assertion**: there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep, name the constant, annotate why, and never convert:
@@ -215,6 +224,7 @@ test("no update-depth errors on startup", async ({ page }) => {
   expect(errors.filter((e) => e.includes("Maximum update depth"))).toEqual([]);
 });
 ```
+
 </Warning>
 
 ## Ratcheting Down Wait Debt
@@ -365,7 +375,9 @@ test("home page has no console errors", async ({ page, consoleErrors }) => {
 ```
 
 <Tip>
+
 Replacing `waitForLoadState("networkidle")` with `expect(...).toBeVisible()` is the right move for asserting that a view *is ready* — `networkidle` is the canonical anti-pattern for SPA navigations that fire no network requests. But a console-error monitor asserts the *absence* of errors over a window, so it also needs the bounded `wait-ok:` settle above to catch errors that fire after first paint — a positive readiness assertion alone would end the test too early and green-light late errors. See [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) for the full catalog, including the absence-window exception.
+
 </Tip>
 
 ### Filtering benign errors with a curated allowlist
@@ -403,7 +415,9 @@ export function assertNoConsoleErrors(errors: string[]) {
 ```
 
 <Warning>
+
 The why-comment on each entry is the load-bearing part, not bureaucratic ceremony. Without a rationale, an allowlist silently rots into "ignore everything": months later nobody remembers whether an entry guards a real known-issue or was added to mute a genuine regression, so the safe move becomes never removing anything. A one-line *why* lets the next reader delete the entry the day its underlying cause is fixed — which is exactly when the allowlist should shrink, not grow.
+
 </Warning>
 
 ## CI Image Interception for Speed
@@ -434,7 +448,9 @@ export const test = base.extend({
 ```
 
 <Note>
+
 This pattern from zmod cut CI E2E test time by 40% by eliminating network latency for image assets.
+
 </Note>
 
 ## Production Build Verification
@@ -483,7 +499,9 @@ test("production build has no broken links", async ({ page }) => {
 ```
 
 <Note>
+
 When `webServer` is a list of N entries (one per fixture or app), every inner-loop run must build and boot all N servers — turning seconds into minutes. For the multi-fixture case, see the "Making T0 Real for Multi-Fixture E2E" guidance in [Execution Tiers](../decision-guide/execution-tiers.mdx).
+
 </Note>
 
 ## Sharded CI Runs
@@ -559,7 +577,9 @@ test("displays user name from mock API", async ({ page }) => {
 ```
 
 <Warning>
+
 Mock backends are great for frontend-focused testing, but they do not replace integration tests against the real API. Use both: mocked for UI behavior, real for data flow.
+
 </Warning>
 
 ## See Also

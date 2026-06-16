@@ -18,7 +18,9 @@ sidebar_position: 10
 ## どの経路を使うか
 
 <Info>
+
 どこで実行しているか、そしてローカルでサイトを配信できるかどうかで判断します。
+
 </Info>
 
 | 環境 | アプローチ |
@@ -49,7 +51,9 @@ sidebar_position: 10
 `executablePath` は `chromium.launch()` に直接注入されます。これが要点です — リゾルバは Playwright 自身のブラウザ探索に**頼らず**、バイナリを明示的に指定することでそれをバイパスします。
 
 <Note>
+
 `verify-styles.mjs` と `headless-check.js` はどちらも `BROWSER_RESOLVER_DEBUG` 環境変数をサポートしており、解決された起動オプションを JSON として出力して終了します — 実際にブラウザを起動せずにパスのロジックをテストするのに便利です。
+
 </Note>
 
 ## Tier-2 `@playwright/cli`: 合成キャッシュ
@@ -113,7 +117,9 @@ PREVIEW_URL="$(.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh)"
 ```
 
 <Warning>
+
 プレビュー URL の経路はネットワークの遅延を伴い、CI のプレビュージョブが完了していることに依存します。ローカルサーバーを配信できるときは常にそれを優先し、本当に配信できないときだけプレビュー URL に頼ってください。
+
 </Warning>
 
 ## 関連項目

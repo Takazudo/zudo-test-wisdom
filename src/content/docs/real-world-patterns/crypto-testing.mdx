@@ -27,7 +27,9 @@ This test passes. It also proves almost nothing.
 A hash function that encodes the string as UTF-16 instead of UTF-8, hashes the wrong byte range, or applies the wrong algorithm entirely will still return the *same* output for the *same* input every time. Determinism is a property of nearly any pure function -- it does not tell you the bytes flowing into the digest are the ones you intended.
 
 <Warning>
+
 A consistency test (`hash(x) === hash(x)`) and a uniqueness test (`hash(x) !== hash(y)`) both pass even when the encoding is wrong. They check that your function is deterministic, not that it is *correct*. Encoding bugs sail straight through.
+
 </Warning>
 
 ## Known-Answer Testing: Pin to an External Digest
@@ -53,7 +55,9 @@ echo -n "hello world" | sha256sum
 ```
 
 <Tip>
+
 The `-n` flag on `echo` matters: without it, `echo` appends a trailing newline and you hash `"hello world\n"`, producing a completely different digest. This is the same class of byte-level mistake the test is meant to catch -- so get the reference value right.
+
 </Tip>
 
 Because the expected value comes from outside your codebase, a UTF-16 bug or an off-by-one byte slice now *fails* the test instead of silently agreeing with itself. This is the difference between testing that the function is consistent and testing that it is correct.
@@ -79,7 +83,9 @@ it("hashes a string and its ArrayBuffer identically", async () => {
 If these two paths diverge, the same logical content produces two different hashes -- a bug that breaks deduplication, cache keys, and content-addressed storage. A pure known-answer test on one input type would not catch it; you need the equivalence assertion across types.
 
 <Info>
+
 This is the second leg of the discipline. A single known-answer vector proves the encoding is correct for *one* input shape. Cross-input-type equivalence proves every accepted input shape funnels into that same correct encoding.
+
 </Info>
 
 ## The Transferable Rule
@@ -124,17 +130,15 @@ describe("JWT signing", () => {
 The positive case confirms a valid signature round-trips; the negative case confirms a wrong secret is rejected rather than quietly accepted. Both are signature-vector assertions: they pin verification behavior to the cryptographic relationship between secret and payload.
 
 <Note>
+
 This page covers JWTs only from the known-answer / signature-vector angle -- the part that shares its discipline with hash testing. Time-based behavior such as token expiry (tested with `vi.setSystemTime`) is a clock-control concern and lives on the [Backend & Node.js Testing](./backend-testing.mdx) page.
+
 </Note>
 
 ## Key Principles
 
 1. **Never rely on consistency alone.** `hash(x) === hash(x)` passes with a broken encoding. It is necessary, never sufficient.
-
 2. **Pin to an external constant.** The expected digest must come from a tool that does not share your code's encoding logic, so a bug cannot agree with itself.
-
 3. **Mind the reference bytes.** `echo -n` vs `echo`, UTF-8 vs UTF-16, trailing newlines -- the reference value is only useful if you generated it from the exact bytes you mean to hash.
-
 4. **Assert cross-input-type equivalence.** Every accepted input shape (`string`, `ArrayBuffer`, `Buffer`) must produce the same digest.
-
 5. **Treat signatures as vectors too.** Deterministic HMAC signatures (JWT `HS256`) get the same known-answer treatment: pin the valid case, reject the wrong-secret case.
