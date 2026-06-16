@@ -2,6 +2,8 @@
 
 Takazudo's frontend testing strategy guide, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4).
 
+**Live site**: <https://zudo-test-wisdom.takazudomodular.com/>
+
 ## Commands
 
 ```bash
@@ -14,13 +16,26 @@ pnpm b4push           # Pre-push validation (format + typecheck + build)
 pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 ```
 
+## Project Layout
+
+```
+pages/          # Host-app routing layer (zfb entry points)
+src/
+  components/   # Shared UI components
+  config/       # settings.ts — site-wide config
+  content/      # MDX doc pages (docs/ + docs-ja/)
+  utils/        # Shared utilities
+plugins/        # zfb integration plugins (.mjs)
+zfb.config.ts   # Build config (framework, collections, plugins, adapter)
+```
+
 ## Content Structure
 
-- English (default): `src/content/docs/` -> `/docs/...`
-- Japanese: `src/content/docs-ja/` -> `/ja/docs/...`
+- English (default): `src/content/docs/` → `/docs/...`
+- Japanese: `src/content/docs-ja/` → `/ja/docs/...`
 - Japanese docs mirror the English directory structure
 
-**Bilingual rule**: When creating or updating any doc page, ALWAYS update both the English (`docs/`) and Japanese (`docs-ja/`) versions in the same PR. Keep code blocks identical between languages -- only translate surrounding prose.
+**Bilingual rule**: When creating or updating any doc page, ALWAYS update both the English (`docs/`) and Japanese (`docs-ja/`) versions in the same PR. Keep code blocks identical between languages — only translate surrounding prose.
 
 **Exception**: Pages with `generated: true` in frontmatter (e.g., claude-resources auto-generated pages) do not require Japanese translations.
 
@@ -28,16 +43,16 @@ pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 
 Top-level directories under `src/content/docs/`. Directories with header nav entries are mapped via `categoryMatch` in `src/config/settings.ts`:
 
-- `overview/` - Introduction and purpose of the testing guide
-- `testing-levels/` - The 5 testing levels from unit to visual verification
-- `decision-guide/` - Which level to use, common failure patterns, required behaviors
-- `real-world-patterns/` - Vitest patterns, Playwright E2E, Tauri app testing
-- `tools-reference/` - Quick reference of tools per testing level
+- `overview/` — Introduction and purpose of the testing guide
+- `testing-levels/` — The 5 testing levels from unit to visual verification
+- `decision-guide/` — Which level to use, common failure patterns, required behaviors
+- `real-world-patterns/` — Vitest patterns, Playwright E2E, Tauri app testing
+- `tools-reference/` — Quick reference of tools per testing level
 
 Auto-generated directories (no header nav entry, managed by claude-resources integration):
 
-- `claude-md/` - CLAUDE.md file documentation (`noPage: true`)
-- `claude-skills/` - Claude Skills documentation (`noPage: true`)
+- `claude-md/` — CLAUDE.md file documentation (`noPage: true`)
+- `claude-skills/` — Claude Skills documentation (`noPage: true`)
 
 ## Writing Docs
 
@@ -83,16 +98,16 @@ Navigation is filesystem-driven. Directory structure directly becomes sidebar na
 1. Create English `.mdx` file under `src/content/docs/` with `title` and `sidebar_position`
 2. Write content starting with `## h2` headings (not `# h1`)
 3. Create matching Japanese file under `src/content/docs-ja/`
-4. Keep code blocks identical -- only translate prose
+4. Keep code blocks identical — only translate prose
 5. Run `pnpm format:md` then `pnpm build` to verify
 
 ## Skills
 
 This repo contains test-related Claude Code skills under `.claude/skills/`:
 
-- `test-wisdom/` - Doc-lookup skill (**generated** by `pnpm setup:doc-skill`, gitignored -- do NOT track or edit directly)
-- `verify-ui/` - Deterministic CSS/computed-style verification (tracked in git)
-- `headless-browser/` - Headless browser screenshots and interaction (tracked in git, run `npm install` in its directory for playwright)
+- `test-wisdom/` — Doc-lookup skill (**generated** by `pnpm setup:doc-skill`, gitignored — do NOT track or edit directly)
+- `verify-ui/` — Deterministic CSS/computed-style verification (tracked in git)
+- `headless-browser/` — Headless browser screenshots and interaction (tracked in git, run `npm install` in its directory for Playwright)
 
 Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all skills to `~/.claude/skills/`. The script handles both the generated doc-lookup skill and the tracked skills in one step.
 
@@ -102,29 +117,11 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all ski
 - Noto Sans JP for body text
 - Headings use font-weight 400 (normal), not bold
 
-## Project Layout
+## Hosting & CI/CD
 
-```
-pages/          # Host-app routing layer (zfb entry points)
-src/
-  components/   # Shared UI components
-  config/       # settings.ts — site-wide config
-  content/      # MDX doc pages (docs/ + docs-ja/)
-  utils/        # Shared utilities
-plugins/        # zfb integration plugins (.mjs)
-zfb.config.ts   # Build config (framework, collections, plugins, adapter)
-```
+- **Hosting**: Cloudflare Workers static assets (not Pages)
+- **PR checks**: typecheck + build + Workers preview (`*.workers.dev` URL posted as PR comment)
+- **Main deploy**: build → `wrangler deploy` → Workers production + IFTTT notification
+- **Secrets**: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `IFTTT_PROD_NOTIFY`
 
-## Site Config
-
-- Base path: `/` (root — no subpath prefix)
-- Live URL: `https://zudo-test-wisdom.takazudomodular.com/`
-- Settings: `src/config/settings.ts`
-- Build config: `zfb.config.ts`
-
-## CI/CD
-
-- PR checks: typecheck + build + Cloudflare Workers static assets preview
-- Main deploy: build → `wrangler deploy` → Cloudflare Workers + IFTTT notification
-- Hosting: **Cloudflare Workers static assets** (not Pages)
-- Secrets: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `IFTTT_PROD_NOTIFY`
+See `CUTOVER.md` for the one-time migration steps (DNS, subdomain binding, old-URL redirect).
