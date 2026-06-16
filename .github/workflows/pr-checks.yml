@@ -259,6 +259,7 @@ jobs:
         with:
           path: doc-history-out/
           key: doc-history-${{ github.run_id }}
+          fail-on-cache-miss: true
 
       - name: Prepare dist for deployment
         run: |
