@@ -4,57 +4,8 @@ description: Battle-tested testing patterns from production projects.
 sidebar_position: 1
 ---
 
-## Production-Tested Approaches
+Battle-tested testing patterns from production projects, refined through actual bugs and failures.
 
-The patterns in this section come from real production projects, not theoretical best practices. Each pattern has been used in shipped software and refined through actual bugs and failures.
+## In this section
 
-## Source Projects
-
-| Project | Type | Key Testing Patterns |
-|---------|------|---------------------|
-| **zudo-text** | Tauri text editor | Mock backend adapter, console error monitoring, @interactive keyboard tests |
-| **zmod** | Web application | Production-build Playwright, CI image interception, sharded E2E |
-| **zudo-pattern-gen** | Pattern generator | Deterministic PNG rendering, Miniflare + D1/R2 integration |
-| **mdx-formatter** | CLI tool | Contract testing Rust via Vitest, idempotency invariant |
-| **zudo-file-sync** | File sync service | In-memory Cloudflare binding mocks, known-answer hashing, rate-limit time-bucketing |
-| **zfb** | Code generator | Binding-shape stubs, emitted-code dynamic import, single-source-of-truth guard, happy-dom router quirks |
-| **zudo-doc2** | Doc framework | remark/rehype golden fixtures + tree factories |
-| **zudo-text2** | Tauri text editor | Editor-input E2E, @flaky tier, console-error allowlist |
-
-## Pattern Categories
-
-### [Vitest Patterns](./vitest-patterns.mdx)
-
-Workspace configurations, jsdom/happy-dom environments, contract testing, idempotency testing, and Miniflare integration testing.
-
-### [Playwright Patterns](./playwright-patterns.mdx)
-
-CI-safe test splitting, console error monitoring, image interception, production build verification, and sharded CI runs.
-
-### [Tauri Testing](./tauri-testing.mdx)
-
-WebKit-only rule, core crate pattern, backend bridge mocking, and the full 8-step escalation ladder for desktop apps.
-
-### [Backend & Node.js Testing](./backend-testing.mdx)
-
-Cloudflare Functions with Miniflare, HTTP API testing, fetch mocking with `vi.stubGlobal`, file system testing with temp directories, and key principles for separating frontend and backend test configs.
-
-### [Crypto & Hash Testing](./crypto-testing.mdx)
-
-Known-answer (hardcoded-digest) crypto tests, cross-input-type equivalence (string vs `ArrayBuffer`), and catching encoding bugs that "deterministic" tests miss.
-
-### [Testing remark/rehype Plugins](./remark-rehype-plugin-testing.mdx)
-
-mdast tree factories for unit tests plus a golden-fixture corpus with `UPDATE_FIXTURES` regeneration and a cross-language parity oracle.
-
-### [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx)
-
-The five causes of E2E flakiness (timing waits, `networkidle` misuse, animations, shared state, hydration races) and a four-step mechanical recipe for eliminating each one.
-
-### [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx)
-
-Operating heavy, platform-bound test lanes on a schedule — the CI re-exam workflow, deduped failure issue filing, on-demand pre-merge dispatch, and the local night exam with agent triage.
-
-## Common Theme
-
-Across all these projects, one theme emerges: **the testing approach must match the deployment target**. A web app needs browser-level testing. A CLI tool needs output verification. A Tauri app needs WebKit-specific testing. There is no universal test setup -- only appropriate test setups for specific contexts.
+<CategoryNav category="real-world-patterns" />
