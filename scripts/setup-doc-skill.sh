@@ -11,7 +11,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Read project name from package.json
 PROJECT_NAME=$(node -e "console.log(require('$ROOT_DIR/package.json').name || 'my-project')")
-DEFAULT_SKILL_NAME="test-wisdom"
+DEFAULT_SKILL_NAME="${PROJECT_NAME}-wisdom"
 
 # Prompt for skill name
 echo ""
@@ -160,32 +160,16 @@ fi
 
 echo "  Generated SKILL.md"
 
-# Symlink ALL skills in .claude/skills/ into global skills directory
+# Symlink into global skills directory.
+# Point at the main-worktree path so the global link survives worktree removal.
 mkdir -p "$GLOBAL_SKILLS_DIR"
-SKILLS_ROOT="$ROOT_DIR/.claude/skills"
+ensure_symlink "$GLOBAL_SKILLS_DIR/$SKILL_NAME" "$REPO_ROOT/.claude/skills/$SKILL_NAME"
 
 echo ""
-echo "Symlinking all skills to global directory..."
-for skill_dir in "$SKILLS_ROOT"/*/; do
-  [ -d "$skill_dir" ] || continue
-  skill_basename="$(basename "$skill_dir")"
-  ensure_symlink "$GLOBAL_SKILLS_DIR/$skill_basename" "$REPO_ROOT/.claude/skills/$skill_basename"
-  echo "  $skill_basename -> $GLOBAL_SKILLS_DIR/$skill_basename"
-done
-
-# Install dependencies for skills that have package.json
-for skill_dir in "$SKILLS_ROOT"/*/; do
-  [ -d "$skill_dir" ] || continue
-  if [ -f "$skill_dir/package.json" ] && [ ! -d "$skill_dir/node_modules" ]; then
-    skill_basename="$(basename "$skill_dir")"
-    echo "  Installing dependencies for $skill_basename..."
-    (cd "$skill_dir" && npm install --silent)
-  fi
-done
-
+echo "Done! Skill '$SKILL_NAME' is ready."
 echo ""
-echo "Done! All skills are ready."
+echo "  Project skill: $SKILL_DIR"
+echo "  Global symlink: $GLOBAL_SKILLS_DIR/$SKILL_NAME"
 echo ""
-echo "  Skills directory: $SKILLS_ROOT"
-echo "  Global symlinks: $GLOBAL_SKILLS_DIR"
+echo "You can now use it in Claude Code with: /$SKILL_NAME <topic>"
 echo ""

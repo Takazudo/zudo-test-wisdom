@@ -1,16 +1,17 @@
 # zudo-test-wisdom
 
-Takazudo's frontend testing strategy guide, built with zudo-doc (Astro, MDX, Tailwind CSS v4).
+Takazudo's frontend testing strategy guide, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4).
 
 ## Commands
 
 ```bash
-pnpm dev          # Start Astro dev server
-pnpm build        # Build static site to dist/
-pnpm preview      # Preview built site
-pnpm check        # Astro type checking
-pnpm format:md    # Format MDX files
-pnpm b4push       # Pre-push validation (format + typecheck + build)
+pnpm dev              # Start zfb dev server (port 4321)
+pnpm build            # Build static site via zfb build
+pnpm preview          # Preview built site
+pnpm check            # zfb type checking
+pnpm format:md        # Format MDX files
+pnpm b4push           # Pre-push validation (format + typecheck + build)
+pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 ```
 
 ## Content Structure
@@ -101,13 +102,29 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all ski
 - Noto Sans JP for body text
 - Headings use font-weight 400 (normal), not bold
 
+## Project Layout
+
+```
+pages/          # Host-app routing layer (zfb entry points)
+src/
+  components/   # Shared UI components
+  config/       # settings.ts — site-wide config
+  content/      # MDX doc pages (docs/ + docs-ja/)
+  utils/        # Shared utilities
+plugins/        # zfb integration plugins (.mjs)
+zfb.config.ts   # Build config (framework, collections, plugins, adapter)
+```
+
 ## Site Config
 
-- Base path: `/pj/zudo-test`
+- Base path: `/` (root — no subpath prefix)
+- Live URL: `https://zudo-test-wisdom.takazudomodular.com/`
 - Settings: `src/config/settings.ts`
+- Build config: `zfb.config.ts`
 
 ## CI/CD
 
-- PR checks: typecheck + build + Cloudflare Pages preview
-- Main deploy: build + Cloudflare Pages production + IFTTT notification
-- Secrets: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, IFTTT_PROD_NOTIFY
+- PR checks: typecheck + build + Cloudflare Workers static assets preview
+- Main deploy: build → `wrangler deploy` → Cloudflare Workers + IFTTT notification
+- Hosting: **Cloudflare Workers static assets** (not Pages)
+- Secrets: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `IFTTT_PROD_NOTIFY`

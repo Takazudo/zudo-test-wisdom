@@ -33,7 +33,7 @@ await expect(page.locator(".result")).toBeVisible();
 await expect(page.locator(".result")).toBeVisible({ timeout: 10_000 });
 ```
 
-See also: the deflaking recipe in [Part 2](#part-2--the-deflaking-recipe) for the case where an app event rather than a DOM state is the right signal.
+See also: the deflaking recipe in [Part 2](#part-2-—-the-deflaking-recipe) for the case where an app event rather than a DOM state is the right signal.
 
 ### 2. `networkidle` on client-side navigations that fire no requests
 

@@ -103,13 +103,13 @@ pnpm dev --host 127.0.0.1
 1. PR のコメントを読み、`<!-- cf-preview-pr -->` マーカーを持つ最新のコメント（プレビューデプロイのワークフローが投稿）を選びます。
 2. そのコメントから `*.pages.dev` の URL を抽出します。
 3. **古いデプロイのガード:** ブランチのプレビュー URL はコミットをまたいで存続するため、単なる `200` が古いビルドであることがあります。スクリプトはコメント内の `Built from commit:` の SHA を解析し、PR のコミットリストと突き合わせます。コメントに SHA がない場合は**警告**（処理は続行）し、SHA が一致しない場合は**失敗**します。
-4. 配信されるベースパス（`/pj/zudo-test/`）を指数バックオフでポーリングし、`200` を返したら検証済みの URL を出力します。
+4. 配信されるベースパス（`/`）を指数バックオフでポーリングし、`200` を返したら検証済みの URL を出力します。
 
 その URL を検証スキルに渡します。
 
 ```bash
 PREVIEW_URL="$(.claude/skills/verify-ui-ai/scripts/resolve-preview-url.sh)"
-# then run /verify-ui or /headless-browser against "$PREVIEW_URL/pj/zudo-test/..."
+# then run /verify-ui or /headless-browser against "$PREVIEW_URL/..."
 ```
 
 <Warning>

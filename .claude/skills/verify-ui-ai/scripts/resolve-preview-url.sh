@@ -20,7 +20,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 # Base path where the site is served (project-specific — imposed by astro.config base option)
-SITE_BASE_PATH="/pj/zudo-test"
+# Site is served at root ("/"), so base path is empty
+SITE_BASE_PATH=""
 
 # Poll settings: up to ~3 minutes total (exponential backoff: 5 10 20 40 60 60 ...)
 MAX_POLL_SECONDS=180
@@ -90,20 +91,22 @@ fi
 log "Found preview comment."
 
 # ---------------------------------------------------------------------------
-# Step 4 — extract the *.pages.dev URL
+# Step 4 — extract the preview URL (Cloudflare Workers *.workers.dev)
 # ---------------------------------------------------------------------------
 
 # The workflow posts the URL in a Markdown table row:
-#   | Preview | https://<something>.pages.dev |
-# We match any https://*.pages.dev URL anywhere in the comment body.
+#   | Preview | https://<something>.workers.dev |
+# Workers static-assets hosting publishes *.workers.dev preview-alias URLs
+# (the project migrated off Cloudflare Pages). We accept the legacy
+# *.pages.dev shape too so older comments still resolve.
 PREVIEW_URL="$(
   printf '%s' "$COMMENT_BODY" \
-    | grep -oE 'https://[a-zA-Z0-9._-]+\.pages\.dev[^[:space:]|]*' \
+    | grep -oE 'https://[a-zA-Z0-9._-]+\.(workers|pages)\.dev[^[:space:]|]*' \
     | head -1 || true
 )"
 
 if [[ -z "$PREVIEW_URL" ]]; then
-  fail "Could not extract a *.pages.dev URL from the preview comment."
+  fail "Could not extract a *.workers.dev (or *.pages.dev) URL from the preview comment."
 fi
 
 log "Extracted preview URL: $PREVIEW_URL"
