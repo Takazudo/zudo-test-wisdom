@@ -38,11 +38,11 @@ The bug — the image renders at the wrong size relative to the second canvas:
 
 **Stage A (first canvas, expected):** dark gray app chrome around a white canvas. Green rectangle = the user's clip selection. Red square = the placed image, centered inside the clip.
 
-![Stage A: first canvas showing the placed image fitting inside the clip rectangle](/pj/zudo-test/img/docs/level-6/stage-a-canvas-with-clip-and-image.png)
+![Stage A: first canvas showing the placed image fitting inside the clip rectangle](/img/docs/level-6/stage-a-canvas-with-clip-and-image.png)
 
 **Stage B (second canvas, buggy):** the second canvas is rendered at the clip-rect's dimensions, but the placed image is painted at the same physical pixel size as in Stage A — making it appear visually too large relative to the smaller canvas. The image-to-canvas ratio diverges between the two stages.
 
-![Stage B: second canvas where the image's ratio to the canvas does not match Stage A](/pj/zudo-test/img/docs/level-6/stage-b-canvas-image-mismatched.png)
+![Stage B: second canvas where the image's ratio to the canvas does not match Stage A](/img/docs/level-6/stage-b-canvas-image-mismatched.png)
 
 Why neither L4 nor L5 worked cleanly:
 
