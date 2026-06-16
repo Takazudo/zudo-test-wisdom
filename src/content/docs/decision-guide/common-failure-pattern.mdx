@@ -67,7 +67,9 @@ The notification banner is rendered inside `.main-content`, which has `max-heigh
 ## The Fix
 
 <Note>
+
 When the user says something "is not showing," default to Level 5 verification. Check **computed styles** on the element and its ancestors, then take a **screenshot** to confirm visual state.
+
 </Note>
 
 Level 5 verification would reveal:
@@ -101,7 +103,9 @@ The `overflow: hidden` + `height: 0` pattern is just one variant. Other common c
 ## Key Takeaway
 
 <Warning>
+
 **Never declare a visual bug fixed based on a logic test.** If the user says something is not visible, the test must verify visibility -- and that requires Level 5.
+
 </Warning>
 
 ## What If Level 5 Cannot Reach the Surface?

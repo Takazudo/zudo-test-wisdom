@@ -3,11 +3,12 @@
 # Triggered on PRs targeting `main`. The pipeline:
 #   1. Template drift check (needs pnpm install — create-zudo-doc devDep)
 #   2. Pin parity check (pure-Node, reads package.json only)
-#   3. Type check (pnpm check) + wrangler pin check
-#   4. Build the zfb docs site (full clone) + link check
-#   5. HTML validate
-#   6. Build doc history JSONs
-#   7. Deploy preview (wrangler versions upload --preview-alias) + post PR comment
+#   3. Format check (pnpm format:md:check — pnpm dlx, no install needed)
+#   4. Type check (pnpm check) + wrangler pin check
+#   5. Build the zfb docs site (full clone) + link check
+#   6. HTML validate
+#   7. Build doc history JSONs
+#   8. Deploy preview (wrangler versions upload --preview-alias) + post PR comment
 #
 # No e2e job.
 #
@@ -79,6 +80,34 @@ jobs:
 
       - name: Check pin parity
         run: node scripts/check-pin-parity.mjs
+
+  # ---------------------------------------------------------------------------
+  # Job 0.6: Format check
+  # ---------------------------------------------------------------------------
+  # Runs `pnpm dlx @takazudo/mdx-formatter --check ...` — fetches the
+  # formatter on the fly, so no pnpm install is needed.  Only pnpm + node
+  # are required so that `pnpm dlx` resolves correctly.
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4
+        with:
+          dest: ~/setup-pnpm-${{ github.job }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+
+      - name: Check MDX formatting
+        run: pnpm format:md:check
 
   # ---------------------------------------------------------------------------
   # Job 1: Type checking

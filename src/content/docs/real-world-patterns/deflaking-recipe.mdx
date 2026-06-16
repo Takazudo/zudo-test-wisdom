@@ -9,6 +9,7 @@ sidebar_position: 9
 Every E2E flake has a cause. The five below cover the overwhelming majority of cases in practice, and each has a deterministic fix.
 
 <Note>
+
 **These five are browser-specific; native suites flake for different reasons.** The catalog below (`waitForTimeout`, `networkidle`, animations, hydration races) is the E2E/browser shape of flakiness. A native suite — a Rust/cargo project, a Go service, any non-browser test runner — flakes for a parallel set of causes:
 
 - **Non-deterministic scheduling** — tests that depend on thread/task interleaving (the native analogue of a hydration race).
@@ -18,6 +19,7 @@ Every E2E flake has a cause. The five below cover the overwhelming majority of c
 - **Filesystem ordering** — relying on directory-listing order or a shared temp path; use a unique temp dir per test and never assume `read_dir` order.
 
 For how to quarantine a native flake mechanically (`#[ignore]` + `cargo test -- --ignored`), see [the Rust/cargo note in the quarantine pipeline](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky).
+
 </Note>
 
 ### 1. Timing waits (bare `waitForTimeout`)
@@ -125,7 +127,9 @@ await page.waitForFunction(() => window.__navDone);
 ```
 
 <Warning>
+
 Never use an in-page `setTimeout` as a fallback. It runs inside the browser's own event loop and is subject to timer throttling, page freeze, and tab backgrounding. Playwright's `waitForFunction` polls from outside the page using its own timeout mechanism — it is the correct tool here.
+
 </Warning>
 
 ### Step 2 — Don't wait on `networkidle` for navigations that fire no network requests
@@ -159,7 +163,9 @@ For **positive completion waits** (waiting for something to appear or become tru
 See the `// wait-ok:` exception documented in the [Editor Input section of Playwright Patterns](./playwright-patterns.mdx) for the canonical example.
 
 <Note>
+
 There is a second, distinct legitimate class of `waitForTimeout`: asserting the **absence** of a failure over a time window (e.g., "no console errors fire in the first 2000ms after mount"). Converting that sleep to a condition wait guts the assertion — there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep for absence-window assertions; scope this step to positive completion waits only. See the `POST_MOUNT_LOOP_SETTLE_MS` example in [Playwright Patterns](./playwright-patterns.mdx) for the full pattern.
+
 </Note>
 
 ---

@@ -41,7 +41,9 @@ export default defineConfig({
 ```
 
 <Tip>
+
 **happy-dom** is faster than jsdom for most use cases. Use jsdom when you need broader browser API compatibility.
+
 </Tip>
 
 ## Example
@@ -84,6 +86,7 @@ describe("Toggle", () => {
 ## Blind Spots
 
 <Warning>
+
 Level 2 tests use a **simulated** DOM, not a real browser. They cannot detect:
 
 - CSS effects (the DOM has no CSS engine)
@@ -92,6 +95,7 @@ Level 2 tests use a **simulated** DOM, not a real browser. They cannot detect:
 - Scroll behavior
 - Animation and transition states
 - Computed styles
+
 </Warning>
 
 The critical gap: an element can be present in the jsdom tree (Level 2 passes) while being completely invisible on screen due to CSS (Level 5 would catch this).

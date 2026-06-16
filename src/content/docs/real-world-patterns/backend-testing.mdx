@@ -225,7 +225,9 @@ describe("session handler (Map-stub)", () => {
 ```
 
 <Tip>
+
 **The decision rule -- this is the gap.** Use **Miniflare** when you are testing SQL or storage semantics (does this query return the right rows, does this R2 multipart upload reassemble correctly). Use a **`Map`-stub** when you are testing your handler's branching and threading (does this route read the binding it should, does it return 401 when the session is missing). The load-bearing principle: **test YOUR logic, not the platform's storage engine.** Map-stubs are faster, need no `wrangler.toml`, run in plain Node, and let you pre-seed exact state.
+
 </Tip>
 
 ## Testing Time-Bucketed Logic
@@ -275,7 +277,9 @@ describe("checkRateLimit", () => {
 Two pieces make this work. First, the test computes `minBucket` with the exact same `Math.floor(now / 60_000)` formula the production code uses -- because the clock is frozen, both sides land in the identical bucket, so the pre-seeded key is the one the code will read. Second, the mock KV deliberately exposes its internal `Map` as `_store` so the test can write state directly, without going through `put`.
 
 <Info>
+
 **The inspectable-mock-store design.** A production-faithful mock would hide its internal `Map`. A *test* mock should do the opposite: expose `_store` (or `_kv._store`) as an escape hatch so tests can arbitrage state directly -- seed exactly 59 entries, inspect what the handler wrote, or corrupt a value to test recovery. This is the reusable pattern behind every windowed-counter, TTL, and sliding-window test: you do not wait for the window to fill, you place the store at the threshold and assert across the boundary.
+
 </Info>
 
 The same frozen-clock technique covers JWT expiry. Because `vi.setSystemTime` controls what `Date.now()` returns, you can mint a token with a known `exp` and assert it is accepted just before that instant and rejected just after:
@@ -298,7 +302,9 @@ it("accepts a token before exp and rejects it after", async () => {
 ```
 
 <Note>
+
 This covers only the **time-based expiry** edge of JWT testing. Asserting a fixed signature against a hardcoded secret and payload (known-answer vectors) is a different concern that belongs with crypto testing, not here.
+
 </Note>
 
 ## HTTP API Testing
@@ -510,7 +516,9 @@ assert_eq() {
 ```
 
 <Warning>
+
 **Bash gotcha with `set -e` and arithmetic**: `((PASS++))` when `PASS=0` evaluates `0++` which returns 0 (falsy), causing `set -e` to exit the script. Use `PASS=$((PASS + 1))` instead.
+
 </Warning>
 
 ### Dual E2E Strategy: Local First, Remote After Deploy
@@ -569,7 +577,9 @@ scripts/smoke-test.sh "http://localhost:$PORT"
 ```
 
 <Tip>
+
 **Wrangler secrets in local dev**: Wrangler does NOT read shell environment variables as Worker bindings. Use a `.dev.vars` file or the `--env-file` flag. This is a common gotcha when transitioning from remote secrets (`wrangler secret put`) to local development.
+
 </Tip>
 
 ### CI Integration: Post-Deploy Verification
@@ -602,13 +612,8 @@ Unit tests catch logic bugs. Local E2E catches integration bugs. Remote E2E catc
 ## Key Principles for Backend Testing
 
 1. **Use `environment: 'node'`** in vitest config, not `jsdom`. Backend code does not need a DOM.
-
 2. **Separate vitest configs** for frontend and backend tests. They need different environments, different timeouts, and often different setup files.
-
 3. **Helper factories** for test data. Never hardcode test data inline -- use factory functions with sensible defaults and overrides.
-
 4. **Environment variables** for configuration switching. Use `process.env` to switch between local, preview, and production URLs rather than hardcoding.
-
 5. **Guard destructive tests** with `it.skipIf()`. Tests that delete data or reset state should never run against production.
-
 6. **Longer timeouts for network tests**. Default 5-second timeouts are too short for HTTP integration tests. Use 30 seconds or more.

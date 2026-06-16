@@ -13,7 +13,9 @@ Some test lanes can never run on PR CI: pixel assertions that need a hardware GP
 - **It leaves no paper trail.** Nobody can answer "when did this lane last pass, and on what hardware?" A green that only ever existed in one terminal's scrollback is not a regression gate.
 
 <Note>
+
 **AI agents are "the other contributors".** Every argument above used to be about teammates; now it is also about coding agents. An agent working in a sandbox, in CI, or on a Linux host is exactly the contributor who cannot run your macOS-only lane -- and it will bypass the local gate without malice, every time. A safety net that requires the right person on the right machine to remember a step is not a net.
+
 </Note>
 
 The fix is not to abandon the local lane -- it is to stop asking it to be the enforcement layer. Keep it for speed and convenience, and add a **scheduled CI re-exam**: the heavy lanes re-run on capable hardware on a schedule, with a paper trail and automatic issue filing.
@@ -53,13 +55,17 @@ The native analogue of the cut-order moves the cut along the compilation axis in
 4. **Gate the full local compile/test behind an opt-in env flag**, e.g. `B4PUSH_FULL=1`, so the contributor who wants the full local pass can ask for it while the default stays bounded and CI remains the enforcement layer.
 
 <Tip>
+
 Same principle as the JS cut-order, different axis: there the cut is by test count, here it is by compilation. The default `b4push` stays fast and trusted; the cold-compile cost lives in CI, which is the gate that actually blocks the merge.
+
 </Tip>
 
 ## The Scheduled CI Re-exam Workflow
 
 <Note>
+
 Scheduled rich CI is a **T3 / post-cutover** concern: build it at the cutover point when the project's test suite is mature enough to justify a dedicated nightly runner. Until then, the local exam lane described here is the interim. See [Execution Tiers](../decision-guide/execution-tiers.mdx) for where this fits in the full maturity arc.
+
 </Note>
 
 A complete skeleton. It runs on a schedule *and* accepts manual dispatch, executes only the tagged heavy lanes (`@gpu`, `@interactive`, `@macos-only` -- see the tag taxonomy on [Execution Tiers](../decision-guide/execution-tiers.mdx)), and files a deduped issue on failure:
@@ -121,7 +127,9 @@ jobs:
 - **A self-hosted runner on your own hardware is an escalation, not a default.** If you do escalate: schedule-only on `main`, never PR-triggered on a public repo, and pair it with offline detection -- e.g. a companion job on a hosted runner that alerts when the self-hosted job has not reported within N hours -- so a sleeping machine is visible rather than silently green-by-absence.
 
 <Warning>
+
 **Never let PRs trigger a self-hosted runner on a public repository.** A PR-triggered self-hosted runner executes code from anyone who opens a pull request, on your machine. Keep self-hosted exam jobs schedule-only on `main`.
+
 </Warning>
 
 ## One Tracking Issue, Never One Per Run
@@ -194,7 +202,9 @@ fi
 Every report carries the three things a fix session needs: the fixed label (so the dedup query finds it), the failing spec names, and the run URL.
 
 <Note>
+
 Commit the script's executable bit before the first run: `git update-index --chmod=+x scripts/file-exam-issue.sh`. To test the script locally without touching real issues, run it with `DRY_RUN=1` -- the `run_gh()` wrapper echoes the intended `gh` command instead of executing it, so you can verify both paths against a fixture `report.json`.
+
 </Note>
 
 ### Pin Reporter-Parsing Fixtures to a Real Captured Report
@@ -212,7 +222,9 @@ When the tool changes its schema in a future version, the test fails loudly -- i
 **The tell that this trap is in play:** the parser's unit tests are green, but the script produces empty or garbage output when run against real data from a fresh tool invocation. This is the classic signature of a fixture that matches the assumption rather than reality.
 
 <Warning>
+
 Synthetic fixtures are safe only when **you own the contract**. For a third-party tool's output you cannot author truth -- you can only capture it. Hand-authored fixtures are the right choice when the reader owns the schema being tested: for example, mdast tree factories in [remark/rehype plugin tests](./remark-rehype-plugin-testing.mdx) (you own the mdast contract) or synthetic inner-bundle objects in [level-3 build-output tests](../testing-levels/level-3-build-output.mdx) (you own the bundle shape). For a tool like Playwright, Jest, or Vite whose output schema is theirs to change, capturing a real artifact is the only way to stay honest.
+
 </Warning>
 
 ## On-Demand Dispatch: The Pre-Merge Escalation
@@ -268,7 +280,9 @@ caffeinate -i pnpm test:e2e --grep "@gpu|@interactive|@macos-only"
 The triage step is the reason this is an agent skill and not a cron script. On the gold-standard machine a red is *probably* real, but every long-lived heavy suite accumulates known noise signatures: a first-run font-cache warning, a timing-sensitive first frame after cold boot. The agent clusters the failures, matches them against the noise signatures recorded in the project's agent instructions, and files issues only for the remainder. That judgment call -- "these three reds are one regression, that fourth red is Tuesday's known noise" -- is exactly what a plain CI job cannot do.
 
 <Note>
+
 **Keep the scheduled CI job anyway.** The night exam depends on a human remembering to run it and a machine staying awake -- exactly the failure modes that disqualify local-only lanes. The pairing is the point: the night exam is the rich lane with triage and fixes; the scheduled CI re-exam is the thin backstop that runs even when nobody remembered.
+
 </Note>
 
 ## Scoped Heavy Runs at Implementation Time
@@ -297,7 +311,9 @@ The hard part is not running the specs -- it is knowing *which* specs a change i
 ```
 
 <Tip>
+
 Make the scoped run a stated requirement in the agent instructions, not folklore: "when a change touches code covered only by heavy-lane tests, run the mapped specs on a capable host (or dispatch the exam workflow on the branch) before declaring the work done."
+
 </Tip>
 
 ## The Layered Result

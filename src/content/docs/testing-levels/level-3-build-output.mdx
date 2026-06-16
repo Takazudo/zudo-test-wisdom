@@ -75,7 +75,9 @@ describe("mdx formatting", () => {
 ```
 
 <Tip>
+
 **Idempotency testing** is a powerful invariant for any formatter or transformer: applying the operation twice should produce the same result as applying it once.
+
 </Tip>
 
 ## Executing Emitted Code
@@ -83,7 +85,9 @@ describe("mdx formatting", () => {
 The examples above compare emitted output as **static text** -- read the file, assert on its contents. But some build tools *generate JavaScript that runs*: adapters that wrap a user handler, bundler wrappers, scaffolders. For these, a string-equality check proves the template was written -- it does **not** prove the generated code behaves correctly when executed. To verify that, you have to write the artifact, import it, and run it.
 
 <Info>
+
 This is a different question from the static-text comparison Level 3 usually covers. There, the assertion is "did the build produce the right file?". Here, it is "does the generated wrapper actually thread its inputs through to the inner handler at runtime?" -- a *codegen-threading* check you can only answer by executing the emitted module.
+
 </Info>
 
 The reusable recipe is **temp dir + dynamic import + env stub**:
@@ -186,16 +190,21 @@ export default {
 ```
 
 <Tip>
+
 Keep the inner bundle **synthetic and self-contained** -- inline the read-side of whatever mechanism the wrapper uses (here, the `globalThis`-keyed `AsyncLocalStorage`). You are testing your emitted wrapper's threading, not the real user package, so you do not need to bundle it. The same pattern stubs *any* binding the wrapper treats opaquely (a database handle, a secret, a queue), because the wrapper just stores `env` verbatim and never inspects its members.
+
 </Tip>
 
 <Warning>
+
 This still is not a full runtime test. Importing the emitted module exercises it in **Node**, not in the real target runtime (Cloudflare Workers, Deno, an edge sandbox). Runtime-specific globals, the actual asset server, and platform request semantics are out of scope -- for those, you need Level 4 (or a real `wrangler dev` / miniflare run). What this *does* prove is the contract your codegen is responsible for: inputs in, inputs threaded through.
+
 </Warning>
 
 ## Blind Spots
 
 <Warning>
+
 Level 3 tests verify file contents, not runtime behavior. They cannot detect:
 
 - JavaScript runtime errors
@@ -203,6 +212,7 @@ Level 3 tests verify file contents, not runtime behavior. They cannot detect:
 - Visual rendering problems
 - Browser API interactions
 - Dynamic content loaded after page load
+
 </Warning>
 
 ## When to Use Level 3

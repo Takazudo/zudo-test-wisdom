@@ -174,7 +174,9 @@ Two rules keep retries honest:
 ## The Migration Rule
 
 <Warning>
+
 A test may leave the local heavy lane **only after** its T2/T3 destination has run it green at least once on the target hardware. **Never slim the local gate first.**
+
 </Warning>
 
 The ordering matters: if you slim the local gate first and the CI destination then turns out to be incapable of running the test, the test now runs nowhere -- and its coverage silently disappears.
@@ -194,7 +196,9 @@ The table below maps by archetype. But archetype is only half the picture -- **p
 A tool can be **CLI-shaped on the generator side and web-shaped on the runtime it emits** -- a Rust code generator (T0–T1, like any CLI) that also ships a browser runtime (client router, islands, view transitions). The test surface follows the **emitted artifact**, not just the CLI: the runtime's behavior is covered by L2 DOM tests today, and L4–L5 concerns stay latent until a browser-driven suite is actually added -- only then do the heavy tiers apply.
 
 <Note>
+
 Most projects stop at T0+T1. The opt-in tiers exist for specific trigger conditions, not as aspirational infrastructure -- **do not scaffold unused tiers.**
+
 </Note>
 
 ### Pre-release / WIP: T3 is deferrable
@@ -206,7 +210,9 @@ The interim heavy-lane safety net is **T4 (local exam lane)**. Run the heavy spe
 **Adopt T3 at or after cutover (release)**, when the project has users whose regressions justify the standing infrastructure cost.
 
 <Warning>
+
 The T3 deferral is time-boxed to release -- it is not a permanent arrangement. A human-remembered local lane will eventually fail. See [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) for why a local-only heavy lane cannot serve as a permanent safety net.
+
 </Warning>
 
 ## Three Cases

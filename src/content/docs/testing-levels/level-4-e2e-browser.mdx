@@ -88,6 +88,7 @@ export const test = base.extend({
 ## Blind Spots
 
 <Warning>
+
 Level 4 tests interact with real browser rendering but typically assert on **DOM state**, not visual appearance. They may miss:
 
 - Subtle CSS issues (off-by-one pixel, wrong color shade)
@@ -95,6 +96,7 @@ Level 4 tests interact with real browser rendering but typically assert on **DOM
 - Font rendering differences
 - Responsive layout breakpoints
 - Computed style values
+
 </Warning>
 
 Level 4 confirms "the element exists and is interactable." For "the element looks correct," escalate to Level 5.

@@ -23,6 +23,7 @@ export default defineConfig({
 ```
 
 <Warning>
+
 Testing **only** in Chromium gives false confidence — the production app uses WebKit on macOS and Linux, so Chromium-only coverage can miss real bugs.
 
 **Recommended dual strategy:**
@@ -31,6 +32,7 @@ Testing **only** in Chromium gives false confidence — the production app uses 
 - **Chromium for CI** — more reliable in headless CI environments. CI-safe tests (DOM-only assertions, clicks, no keyboard shortcuts) behave identically across engines and run faster in headless Chromium.
 
 The key rule: always verify locally with WebKit, and ensure WebKit is in your Playwright project matrix. Using Chromium in CI for DOM-only tests is a pragmatic tradeoff, not a shortcut.
+
 </Warning>
 
 ## The Core Crate Pattern
@@ -100,7 +102,9 @@ mod tests {
 ```
 
 <Tip>
+
 The core crate pattern lets you run `cargo test` in CI without building the full Tauri app. This is fast, reliable, and catches logic bugs early.
+
 </Tip>
 
 ## Backend Bridge Mock Adapter Pattern
@@ -177,7 +181,9 @@ For Tauri apps, the escalation ladder extends beyond the standard 5 levels:
 | 8 | Tauri production build manual test | Full app packaging bugs |
 
 <Note>
+
 Steps 1-6 are automatable and should be in CI. Steps 7-8 require the full Tauri application and are typically manual or require specialized CI with display servers.
+
 </Note>
 
 ### Step-by-Step Guide
@@ -254,7 +260,9 @@ jobs:
 ```
 
 <Warning>
+
 Note that Tauri E2E tests in CI require WebKit dependencies. On Ubuntu, this means `npx playwright install webkit --with-deps`. On macOS runners, WebKit is already available.
+
 </Warning>
 
 ## The Scheduled Re-exam as Safety Net

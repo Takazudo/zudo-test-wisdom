@@ -1,0 +1,45 @@
+---
+title: Introduction
+description: "Takazudo's personal frontend testing strategy guide for AI-assisted development"
+sidebar_position: 1
+---
+
+Personal dev notes by [Takazudo](https://x.com/Takazudo). Not official testing documentation.
+Written for personal reference and AI-assisted coding.
+
+This site covers **frontend testing strategy** for AI-assisted development. The focus is on choosing the right testing approach when working with AI coding agents -- knowing when a unit test is sufficient, when you need browser-level verification, and how to avoid the common trap of false confidence from passing tests that do not actually verify what matters.
+
+## What This Covers
+
+These are the core topics documented here, all based on patterns extracted from real production projects:
+
+- **Testing Levels** -- The 6-level escalation ladder from unit tests to AI-based visual verification, each with increasing coverage and decreasing blind spots
+- **Decision Guide** -- Which testing level to use based on what changed, where and when a test should run (execution tiers), common failure patterns when the wrong level is chosen, and required behaviors for AI agents
+- **Real-World Patterns** -- Battle-tested Vitest configurations, Playwright E2E patterns, Tauri desktop app testing, and backend/Node.js testing approaches
+- **Tools Reference** -- Quick lookup of tools and commands for each testing level
+
+<Note>
+
+This guide is primarily **frontend-focused**, because the author's strength is in frontend development. Backend testing is covered as a supplementary topic -- specifically the patterns that emerge when frontend and backend are properly separated and each can be tested independently.
+
+</Note>
+
+## The Core Insight
+
+The single most important concept in AI-assisted testing is **test level escalation**. When an AI agent fixes a bug and declares it resolved, the fix is only as reliable as the testing method used to verify it. A unit test can confirm logic is correct, but it cannot confirm that the user actually sees the result on screen. The gap between "logically correct" and "visually correct" is the most common source of false confidence.
+
+Testing should escalate, not repeat. When a lower-level test passes but the problem persists, move to the next level:
+
+1. **Level 1** -- Unit/Logic Tests (vitest, jest)
+2. **Level 2** -- DOM-based Component Tests (jsdom, Testing Library)
+3. **Level 3** -- Build Output Verification (read built files)
+4. **Level 4** -- E2E Browser Tests (Playwright, headless browser)
+5. **Level 5** -- Deterministic + Visual Verification (verify-ui + headless browser)
+6. **Level 6** -- AI-Based Visual Verification (final resort, not for CI)
+
+## How to Use This Guide
+
+1. Start with the [Decision Guide](../decision-guide/index.mdx) to determine which testing level fits your current task
+2. Read the [Testing Levels](../testing-levels/index.mdx) section for detailed coverage of each level
+3. Reference [Real-World Patterns](../real-world-patterns/index.mdx) for production-tested configurations
+4. Keep the [Tools Reference](../tools-reference/index.mdx) open for quick lookup
