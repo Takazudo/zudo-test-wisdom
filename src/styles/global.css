@@ -188,6 +188,13 @@
   /* Font families */
   --font-sans: system-ui, sans-serif;
   --font-mono: ui-monospace, monospace;
+  /* Brand display face for page h1 titles + the header site name. System
+     Futura with graceful fallbacks (Jost / Century Gothic). Verbatim carryover
+     of the pre-zfb site's --font-futura token. Registered here so Tailwind v4
+     emits both the `font-futura` utility and a :root `--font-futura` var. */
+  --font-futura:
+    Futura, Jost, "Century Gothic", system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Noto Sans", "Noto Sans JP", "Hiragino Sans", sans-serif;
 
   /* Font weights (4 steps) */
   --font-weight-normal: 400;
@@ -363,6 +370,18 @@ body {
   line-height: var(--leading-snug);
   margin-top: var(--spacing-vsp-md);
   margin-bottom: var(--spacing-vsp-2xs);
+}
+
+/* ── Brand typography ──
+ * Futura on the header site name. Page-title <h1> elements carry the
+ * `font-futura` utility directly in the page components; the header site-name
+ * anchor is rendered by the @takazudo/zudo-doc package (no className hook), so
+ * it is targeted here via its stable `data-header-logo` attribute. Normal
+ * weight matches the pre-zfb site (the package defaults it to font-bold).
+ * Unlayered, so it overrides Tailwind's layered `font-bold` utility. */
+[data-header-logo] {
+  font-family: var(--font-futura);
+  font-weight: var(--font-weight-normal);
 }
 
 /* ── Heading auto-links ── */

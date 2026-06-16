@@ -62,3 +62,13 @@ pages/lib/_tag-pages.tsx
 # (tagGovernance: "off"). Intentionally absent; add later if tag governance is enabled.
 scripts/tags-audit.ts
 scripts/tags-suggest.ts
+
+# Brand typography (Futura) — the page-title <h1> elements carry the
+# `font-futura` utility + `font-normal` to restore the pre-zfb site's
+# normal-weight Futura titles (the base template ships `font-bold`). The
+# `--font-futura` token + the header `[data-header-logo]` rule live in the
+# already-allowlisted src/styles/global.css. Intentional brand divergence.
+pages/index.tsx
+pages/[locale]/index.tsx
+pages/lib/_doc-content-header.tsx
+pages/lib/_doc-page-shell.tsx
