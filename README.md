@@ -123,5 +123,3 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all ski
 - **PR checks**: typecheck + build + Workers preview (`*.workers.dev` URL posted as PR comment)
 - **Main deploy**: build → `wrangler deploy` → Workers production + IFTTT notification
 - **Secrets**: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `IFTTT_PROD_NOTIFY`
-
-See `CUTOVER.md` for the one-time migration steps (DNS, subdomain binding, old-URL redirect).
