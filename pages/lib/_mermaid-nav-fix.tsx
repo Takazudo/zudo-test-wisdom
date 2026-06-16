@@ -5,7 +5,9 @@
 // client-side (SPA) navigation into a second mermaid page — silently, with
 // no JS error.
 //
-// Root cause (upstream, reported via /dev-upstream-report):
+// Upstream issue: https://github.com/zudolab/zudo-doc/issues/2181
+//
+// Root cause (upstream):
 // zudo-doc's mermaid init (`code-syntax/mermaid-init-script.ts`) re-renders
 // diagrams from a MutationObserver watching <html> `style`/`data-theme`
 // (intended for the theme-toggle / color-tweak panel). But zfb's client-router

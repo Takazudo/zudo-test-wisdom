@@ -27,7 +27,7 @@ export function DocBodyEnd(): JSX.Element {
     <>
       <BodyEndIslands basePath={settings.base ?? "/"} />
       {/* MermaidNavFix: keep mermaid diagrams rendered across SPA navigations.
-          Workaround for an upstream zudo-doc reinit bug — see the component
+          Workaround for upstream zudolab/zudo-doc#2181 — see the component
           file for the full diagnosis. Remove once zudo-doc ships the fix. */}
       <MermaidNavFix />
       {/* SidebarResizerInit: attach drag handle to #desktop-sidebar on load
