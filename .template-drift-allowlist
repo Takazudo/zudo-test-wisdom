@@ -80,9 +80,3 @@ pages/index.tsx
 pages/[locale]/index.tsx
 pages/lib/_doc-content-header.tsx
 pages/lib/_doc-page-shell.tsx
-
-# pages/lib/_doc-body-end.tsx — TEMPORARY: renders <MermaidNavFix /> alongside
-# the template default. Workaround for upstream zudolab/zudo-doc#2181 (mermaid
-# diagrams go blank after SPA navigation). REMOVE this entry and revert the file
-# to the template once zudo-doc ships the fix and @takazudo/zudo-doc is bumped.
-pages/lib/_doc-body-end.tsx

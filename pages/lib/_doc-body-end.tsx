@@ -14,7 +14,6 @@
 import type { JSX } from "preact";
 import { settings } from "@/config/settings";
 import { BodyEndIslands } from "./_body-end-islands";
-import { MermaidNavFix } from "./_mermaid-nav-fix";
 import { SidebarResizerInit } from "@takazudo/zudo-doc/sidebar-resizer";
 
 /**
@@ -26,10 +25,6 @@ export function DocBodyEnd(): JSX.Element {
   return (
     <>
       <BodyEndIslands basePath={settings.base ?? "/"} />
-      {/* MermaidNavFix: keep mermaid diagrams rendered across SPA navigations.
-          Workaround for upstream zudolab/zudo-doc#2181 — see the component
-          file for the full diagnosis. Remove once zudo-doc ships the fix. */}
-      <MermaidNavFix />
       {/* SidebarResizerInit: attach drag handle to #desktop-sidebar on load
           and on AFTER_NAVIGATE_EVENT (zfb:after-swap under the Strategy B
           SPA navigation model). Idempotent — safe on every page. */}
