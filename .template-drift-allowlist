@@ -63,6 +63,14 @@ pages/lib/_tag-pages.tsx
 scripts/tags-audit.ts
 scripts/tags-suggest.ts
 
+# mermaid-enlarge feature — create-zudo-doc 0.2.10 added a new optional island
+# (enlarge + zoom/pan affordance for client-rendered mermaid diagrams), wired in
+# the template via src/components/mermaid-enlarge.tsx + its island registration in
+# pages/lib/_body-end-islands.tsx (already allowlisted) + CSS in the template
+# global.css. This site has NOT opted into it (no references in prod). Intentionally
+# absent; adopt later as a separate task if mermaid-diagram enlarge is wanted.
+src/components/mermaid-enlarge.tsx
+
 # Brand typography (Futura) — the page-title <h1> elements carry the
 # `font-futura` utility + `font-normal` to restore the pre-zfb site's
 # normal-weight Futura titles (the base template ships `font-bold`). The
@@ -72,9 +80,3 @@ pages/index.tsx
 pages/[locale]/index.tsx
 pages/lib/_doc-content-header.tsx
 pages/lib/_doc-page-shell.tsx
-
-# pages/lib/_doc-body-end.tsx — TEMPORARY: renders <MermaidNavFix /> alongside
-# the template default. Workaround for upstream zudolab/zudo-doc#2181 (mermaid
-# diagrams go blank after SPA navigation). REMOVE this entry and revert the file
-# to the template once zudo-doc ships the fix and @takazudo/zudo-doc is bumped.
-pages/lib/_doc-body-end.tsx
