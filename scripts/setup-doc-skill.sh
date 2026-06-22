@@ -9,18 +9,34 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Parse flags: --silent / -y skips the interactive skill-name prompt and uses
+# the pinned DEFAULT_SKILL_NAME directly (needed for non-interactive/automated runs,
+# where `read` would fail on EOF under `set -euo pipefail`).
+SILENT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --silent|-y) SILENT="true" ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
 # Read project name from package.json (used in the generated SKILL.md description/title text)
 PROJECT_NAME=$(node -e "console.log(require('$ROOT_DIR/package.json').name || 'my-project')")
 # Skill name is pinned (not "${PROJECT_NAME}-wisdom") so it stays in lockstep with the .gitignore
 # entry and CLAUDE.md, which both reference `test-wisdom`. See issue #78.
 DEFAULT_SKILL_NAME="test-wisdom"
 
-# Prompt for skill name
-echo ""
-echo "=== zudo-doc Skill Setup ==="
-echo ""
-read -rp "Skill name [$DEFAULT_SKILL_NAME]: " SKILL_NAME
-SKILL_NAME="${SKILL_NAME:-$DEFAULT_SKILL_NAME}"
+# Prompt for skill name (skipped entirely in silent mode)
+if [ -n "$SILENT" ]; then
+  SKILL_NAME="$DEFAULT_SKILL_NAME"
+else
+  echo ""
+  echo "=== zudo-doc Skill Setup ==="
+  echo ""
+  read -rp "Skill name [$DEFAULT_SKILL_NAME]: " SKILL_NAME
+  SKILL_NAME="${SKILL_NAME:-$DEFAULT_SKILL_NAME}"
+fi
 
 # Validate skill name (allow only alphanumeric, hyphens, underscores)
 if [[ ! "$SKILL_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
