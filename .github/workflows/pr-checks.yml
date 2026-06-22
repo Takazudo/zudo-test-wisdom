@@ -186,6 +186,9 @@ jobs:
           path: dist/
           retention-days: 1
           if-no-files-found: error
+          # run_id is reused on "Re-run all jobs"; v4 rejects a duplicate
+          # artifact name, so allow the rerun to replace the prior attempt's.
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Job: HTML validate
@@ -265,6 +268,9 @@ jobs:
           path: doc-history-out/
           retention-days: 1
           if-no-files-found: error
+          # run_id is reused on "Re-run all jobs"; v4 rejects a duplicate
+          # artifact name, so allow the rerun to replace the prior attempt's.
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Job 4: Deploy preview and comment on PR
