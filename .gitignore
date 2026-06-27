@@ -3,6 +3,9 @@ node_modules
 dist
 .zfb
 .zfb-build
+# Package-owned route sources materialized at build time by
+# @takazudo/zudo-doc/plugins/routes (packageOwnedRoutes).
+.zudo-doc/
 
 # macOS
 .DS_Store
