@@ -12,14 +12,12 @@ The patterns in this section come from real production projects, not theoretical
 
 | Project | Type | Key Testing Patterns |
 |---------|------|---------------------|
-| **zudo-text** | Tauri text editor | Mock backend adapter, console error monitoring, @interactive keyboard tests |
-| **zmod** | Web application | Production-build Playwright, CI image interception, sharded E2E |
-| **zudo-pattern-gen** | Pattern generator | Deterministic PNG rendering, Miniflare + D1/R2 integration |
-| **mdx-formatter** | CLI tool | Contract testing Rust via Vitest, idempotency invariant |
-| **zudo-file-sync** | File sync service | In-memory Cloudflare binding mocks, known-answer hashing, rate-limit time-bucketing |
-| **zfb** | Code generator | Binding-shape stubs, emitted-code dynamic import, single-source-of-truth guard, happy-dom router quirks |
-| **zudo-doc2** | Doc framework | remark/rehype golden fixtures + tree factories |
-| **zudo-text2** | Tauri text editor | Editor-input E2E, @flaky tier, console-error allowlist |
+| **zudo-text** | Tauri text editor (monorepo) | Vitest unit across workspace packages, Rust `cargo test` core crate, dual-browser Playwright (Chromium CI / WebKit local), mock backend adapter + console-error monitoring, tiered e2e tags |
+| **zzmod** | Content website (zfb + Preact islands) | Vitest unit (jsdom, Testing Library/Preact, MSW), production-build Playwright, tag-based @smoke/@heavy lanes, CI image interception, heavy E2E off-CI via local b4push |
+| **pgen** | Pattern generator (monorepo + GPU runtime) | Deterministic PNG rendering, Miniflare + D1/R2 worker integration, tag-tiered Playwright e2e, GPU visual-regression (SSIM drift, GLSL parity) |
+| **mdx-formatter** | CLI + npm library (Rust napi) | Contract-testing the Rust engine via Vitest, idempotency invariant, snapshot regression vs committed baselines, CLI integration via execFile |
+| **zfb** | Frontend build orchestrator / SSG | Rust workspace `cargo test` (primary), binding-shape stubs, emitted-code dynamic import, single-source-of-truth guard, happy-dom router quirks, node-free Docker smoke E2E |
+| **zudo-doc** | Doc-site framework | 6-level test taxonomy (Vitest unit → static dist reads → Playwright multi-fixture E2E → verify-ui), remark/rehype golden-fixture corpus + mdast tree factories |
 
 ## Pattern Categories
 
