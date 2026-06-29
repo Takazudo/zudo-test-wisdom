@@ -12,14 +12,12 @@ sidebar_position: 1
 
 | プロジェクト | タイプ | 主要なテストパターン |
 |------------|-------|-------------------|
-| **zudo-text** | Tauriテキストエディタ | モックバックエンドアダプター、コンソールエラーモニタリング、@interactiveキーボードテスト |
-| **zmod** | Webアプリケーション | 本番ビルドPlaywright、CI画像インターセプト、シャードE2E |
-| **zudo-pattern-gen** | パターンジェネレーター | 決定論的PNGレンダリング、Miniflare + D1/R2インテグレーション |
-| **mdx-formatter** | CLIツール | VitestによるRustのコントラクトテスト、冪等性不変条件 |
-| **zudo-file-sync** | ファイル同期サービス | インメモリCloudflareバインディングモック、既知解ハッシュ、レート制限のタイムバケット化 |
-| **zfb** | コードジェネレーター | バインディング形状スタブ、生成コードの動的インポート、信頼できる唯一の情報源ガード、happy-domルーターの癖 |
-| **zudo-doc2** | ドキュメントフレームワーク | remark/rehypeゴールデンフィクスチャ + ツリーファクトリー |
-| **zudo-text2** | Tauriテキストエディタ | エディタ入力E2E、@flakyティア、コンソールエラー許可リスト |
+| **zudo-text** | Tauriテキストエディタ（モノレポ） | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、階層化e2eタグ |
+| **zzmod** | コンテンツWebサイト（zfb + Preactアイランド） | Vitestユニット（jsdom、Testing Library/Preact、MSW）、本番ビルドPlaywright、タグベースの@smoke/@heavyレーン、CI画像インターセプト、ローカルb4push経由のCIオフ重量E2E |
+| **pgen** | パターンジェネレーター（モノレポ + GPUランタイム） | 決定論的PNGレンダリング、Miniflare + D1/R2ワーカーインテグレーション、タグ階層化Playwright e2e、GPUビジュアルリグレッション（SSIMドリフト、GLSLパリティ） |
+| **mdx-formatter** | CLI + npmライブラリ（Rust napi） | VitestによるRustエンジンのコントラクトテスト、冪等性不変条件、コミット済みベースラインに対するスナップショットリグレッション、execFileによるCLIインテグレーション |
+| **zfb** | フロントエンドビルドオーケストレーター / SSG | Rustワークスペース `cargo test`（主要）、バインディング形状スタブ、生成コードの動的インポート、信頼できる唯一の情報源ガード、happy-domルーターの癖、NodeフリーなDockerスモークE2E |
+| **zudo-doc** | ドキュメントサイトフレームワーク | 6レベルのテスト分類（Vitestユニット → 静的dist読み取り → Playwrightマルチフィクスチャーe2e → verify-ui）、remark/rehypeゴールデンフィクスチャのコーパス + mdastツリーファクトリー |
 
 ## パターンカテゴリ
 
