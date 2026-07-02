@@ -262,6 +262,8 @@ The pattern splits into two lanes with different jobs:
 1. **Nightly same-suite re-run.** Re-run the exact CI-safe suite the PR gate runs, unchanged. No new tests are written for this lane -- its only value is as a main-branch drift net, catching whatever regresses between merges for reasons unrelated to any single PR.
 2. **Registry-integration lane.** A real `pnpm install` from the registry, followed by a full build of a scaffolded project that consumes the published packages the way an end user would. This is the lane that actually exercises the external world: the PR gate's lockfile-pinned install can never observe a missing export, a packaging bug, or an unresolvable dependency on a minimal scaffold, because those only surface when the install resolves against the live registry.
 
+The registry-integration lane is the scheduled cousin of a set of [publish-time gates](./publishing-pipeline.mdx): for a CLI shipped as a meta package plus per-platform binaries via `optionalDependencies`, those gates verify the publish pipeline itself -- tarball propagation, file modes, idempotent publish -- once per release, across every platform. This lane catches a registry-side regression nightly and on one platform; those gates catch a publish-side one immediately and on all of them.
+
 ```yaml
 # .github/workflows/drift-net.yml
 name: drift-net
