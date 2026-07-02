@@ -83,14 +83,44 @@ describe("Toggle", () => {
 });
 ```
 
+## Render-to-String SSG-Presence Tests
+
+jsdom is not the only way to do Level 2. For islands and SSG frameworks, there is a second, cheaper variant: render the component to a string with the framework's `render-to-string` under plain Node, then assert the **static markup contract** -- the parts of the output that crawlers and JS-off users depend on. This needs no simulated DOM environment at all, so it runs at roughly Level 1 cost. In one documentation-site project it became the default Level 2 layer, used 27+ times.
+
+The typical target is a presence contract: "these links must exist in the server-rendered HTML, before any JavaScript runs."
+
+```tsx
+// toc.presence.test.tsx
+import { describe, it, expect } from "vitest";
+import { renderToString } from "preact-render-to-string";
+import { TableOfContents } from "./TableOfContents";
+
+describe("TableOfContents SSG presence", () => {
+  it("emits every heading link in static markup", () => {
+    const headings = [
+      { id: "intro", text: "Intro" },
+      { id: "setup", text: "Setup" },
+    ];
+    // Rendered under plain Node -- no jsdom, no browser.
+    const html = renderToString(<TableOfContents headings={headings} />);
+
+    // The contract crawlers and JS-off readers rely on:
+    expect(html).toContain('href="#intro"');
+    expect(html).toContain('href="#setup"');
+  });
+});
+```
+
+What it proves: the **static, pre-hydration markup** the framework emits on the server. What it can *never* prove: browser parse repair, CSS visibility, event wiring, the island's hydration lifecycle, or the DOM shape *after* hydration. Those need a real browser -- and one specific post-hydration failure is documented as the [hydration mis-nesting variant](../decision-guide/common-failure-pattern.mdx#the-hydration-mis-nesting-variant), which requires a Level 4 test with a hydration wait.
+
 ## Blind Spots
 
 <Warning>
 
-Level 2 tests use a **simulated** DOM, not a real browser. They cannot detect:
+Level 2 tests run **outside a real browser** -- whether against a simulated DOM (jsdom / happy-dom) or as render-to-string markup with no DOM at all. Neither variant can detect:
 
-- CSS effects (the DOM has no CSS engine)
-- Visual layout (elements may exist in DOM but be invisible via CSS)
+- CSS effects (there is no CSS engine)
+- Visual layout (elements may exist in the markup but be invisible via CSS)
 - Browser-specific rendering
 - Scroll behavior
 - Animation and transition states
@@ -98,7 +128,7 @@ Level 2 tests use a **simulated** DOM, not a real browser. They cannot detect:
 
 </Warning>
 
-The critical gap: an element can be present in the jsdom tree (Level 2 passes) while being completely invisible on screen due to CSS (Level 5 would catch this).
+The critical gap: an element can be present in the jsdom tree or the render-to-string output (Level 2 passes) while being completely invisible on screen due to CSS (Level 5 would catch this).
 
 ## When to Use Level 2
 

@@ -83,14 +83,44 @@ describe("Toggle", () => {
 });
 ```
 
+## Render-to-String による SSG プレゼンステスト
+
+レベル2の手段は jsdom だけではありません。アイランドや SSG フレームワークには、もう1つの安価なやり方があります。フレームワークの `render-to-string` で素の Node 上でコンポーネントを文字列にレンダリングし、**静的マークアップの契約** -- クローラーや JS オフのユーザーが依存する出力部分 -- をアサートするのです。シミュレートされた DOM 環境がまったく不要なので、おおよそレベル1のコストで動きます。あるドキュメントサイトのプロジェクトでは、これが標準のレベル2レイヤーとなり、27回以上使われました。
+
+典型的な対象は「存在」の契約です。すなわち「これらのリンクは、JavaScript が動く前のサーバーレンダリング済み HTML に存在していなければならない」。
+
+```tsx
+// toc.presence.test.tsx
+import { describe, it, expect } from "vitest";
+import { renderToString } from "preact-render-to-string";
+import { TableOfContents } from "./TableOfContents";
+
+describe("TableOfContents SSG presence", () => {
+  it("emits every heading link in static markup", () => {
+    const headings = [
+      { id: "intro", text: "Intro" },
+      { id: "setup", text: "Setup" },
+    ];
+    // Rendered under plain Node -- no jsdom, no browser.
+    const html = renderToString(<TableOfContents headings={headings} />);
+
+    // The contract crawlers and JS-off readers rely on:
+    expect(html).toContain('href="#intro"');
+    expect(html).toContain('href="#setup"');
+  });
+});
+```
+
+これが証明するのは、フレームワークがサーバーで出力する**静的な、ハイドレーション前のマークアップ**です。逆に*決して*証明できないのは、ブラウザのパース修復、CSS の可視性、イベントの結線、アイランドのハイドレーションのライフサイクル、そしてハイドレーション*後*の DOM 構造です。それらには実際のブラウザが必要で、ハイドレーション後の失敗の1つは[ハイドレーションのミスネスト変種](../decision-guide/common-failure-pattern.mdx#ハイドレーションのミスネスト変種)として文書化されています。これはハイドレーション待ちを伴うレベル4テストを必要とします。
+
 ## ブラインドスポット
 
 <Warning>
 
-レベル2のテストは実際のブラウザではなく**シミュレートされた**DOMを使用します。以下を検出できません：
+レベル2のテストは**実際のブラウザの外**で動きます。シミュレートされた DOM（jsdom / happy-dom）に対してであれ、DOM をまったく使わない render-to-string のマークアップとしてであれ、どちらの手段も以下を検出できません：
 
-- CSSの効果（DOMにはCSSエンジンがない）
-- 視覚的レイアウト（CSSによりDOMに存在しても非表示の要素）
+- CSSの効果（CSSエンジンが存在しない）
+- 視覚的レイアウト（マークアップに存在しても、CSSにより非表示になる要素）
 - ブラウザ固有のレンダリング
 - スクロール動作
 - アニメーションとトランジションの状態
@@ -98,7 +128,7 @@ describe("Toggle", () => {
 
 </Warning>
 
-重要なギャップ：jsdomのツリーに要素が存在していても（レベル2はパス）、CSSにより画面上では完全に非表示になっている場合があります（レベル5ならこれをキャッチ）。
+重要なギャップ：jsdomのツリーや render-to-string の出力に要素が存在していても（レベル2はパス）、CSSにより画面上では完全に非表示になっている場合があります（レベル5ならこれをキャッチ）。
 
 ## レベル2を使用するタイミング
 
