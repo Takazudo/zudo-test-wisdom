@@ -356,3 +356,52 @@ Generalize the pattern: any value shared between two consumers that *should* be 
 </Tip>
 
 This guard catches *in-repo* divergence. It does not catch divergence between your parser and an **external tool's real output schema** -- that case needs a captured-artifact fixture rather than a hand-authored one; see [Pin Reporter-Parsing Fixtures to a Real Captured Report](./scheduled-re-exam.mdx#pin-reporter-parsing-fixtures-to-a-real-captured-report).
+
+## The Mirror-Test Anti-Pattern
+
+The guard above pins duplicated *values*. Functions can fork the same way -- and the failure mode has a distinctive shape: a test file **re-implements the function under test instead of importing it**, sometimes announcing itself with a comment like "we re-implement the helper here rather than importing". Such a mirror test passes forever even when the real implementation regresses, because it locks the hand-copied mirror, not production code.
+
+Observed in the wild:
+
+- A suite mirroring helpers from a source file that was itself **dead code** -- no production importer existed, so the tests locked nothing at all.
+- A mirrored copy citing a source path that no longer existed after a refactor.
+- Two sibling scripts -- a CI guard and a telemetry reporter -- each carrying a private copy of the same URL-extraction function, with only one copy unit-tested, yet both must agree for the pipeline to work.
+
+The pattern emerges for a mundane reason: the real function is module-private, lives inside an inline script string, or sits in a file with top-level CLI side effects. Importing it is inconvenient, so copying feels harmless.
+
+**Never re-implement the function under test.** If it is not importable, that is the bug to fix first: extract it into an exported pure module and import it from both production code and the test.
+
+```typescript
+// mytool.test.ts -- BEFORE (the anti-pattern)
+// re-implemented here for testability   <- review red flag, not a justification
+const extractIssueUrl = (line: string) =>
+  line.match(/https:\/\/github\.com\/\S+/)?.[0] ?? null;
+
+// AFTER: one canonical module, imported by production and tests alike
+import { extractIssueUrl } from "../scripts/lib/extract-issue-url.js";
+```
+
+When extraction is genuinely disproportionate -- say the function lives inside a built IIFE string -- fall back to the guard above, generalized to functions: a build-time pin that extracts the embedded source and compares it against the canonical module, so divergence fails loudly. Compare source text against source text (normalizing line endings); do not pin against `fn.toString()`, whose output shifts with formatting and transpilation.
+
+```typescript
+// Meta-test: it guards duplicate-implementation drift, nothing more.
+// Behavioral tests still target the canonical module directly.
+const normalize = (s: string) => s.replace(/\r\n/g, "\n").trim();
+
+it("the built wrapper embeds the canonical parseRoute source", () => {
+  const built = normalize(readFileSync("dist/worker-wrapper.mjs", "utf8"));
+  const canonical = normalize(readFileSync("src/parse-route.mjs", "utf8"));
+  expect(built).toContain(canonical);
+});
+```
+
+Two corollaries close the loop:
+
+- **A "re-implemented here for testability" comment is a review tell.** Treat it as a red flag to fix, never as a justification to accept.
+- **Before extracting, check the mirrored source is even alive.** A mirror of dead code means the tests locked nothing -- retarget them at the live implementation, or delete them.
+
+<Tip>
+
+The mirror test is the SSoT guard's failure case, inverted: where the guard pins two copies together so they cannot fork, the mirror test creates a second copy with no pin at all. If you find yourself copying a function into a test file, either import it (extracting first if needed) or pin it -- never free-float the copy.
+
+</Tip>
