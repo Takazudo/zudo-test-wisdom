@@ -245,6 +245,56 @@ An undocumented divergence is how a golden corpus silently drifts from prod. If 
 
 </Danger>
 
+### After the port ships
+
+The parity-oracle framing above holds only while the port is in flight -- while something is actually running the diff between the reference implementation's output and the port's output on every fixture. Once the port reaches parity and ships, that active consumer usually goes away: the migration is "done," the CI job that ran the comparison gets deleted along with the branch, and the corpus is left sitting there, green, with nothing reading it.
+
+<Warning>
+
+A corpus that still passes is not evidence it guards anything. "Passing" only means nobody has touched the golden files lately -- not that a build, a CI job, or a human is still comparing anything against them. Treat a parity corpus with no active consumer as a false sense of security, not a safety net.
+
+</Warning>
+
+This is the decay mode observed downstream: a JS-to-native port shipped, the corpus kept "passing" against a JS reference implementation nobody ran anymore, and one fixture had quietly pinned a JS-side bug that the port had *deliberately fixed*. The corpus was not neutral dead weight -- it was actively asserting behavior production had abandoned, while the package's own docs still described it as a parity asset years of commits later.
+
+When the port reaches parity, pick one of these explicitly -- do not let the decision happen by default:
+
+#### Option 1: repoint the corpus at the shipping pipeline
+
+Retarget the golden assertions so they diff the *port's* real output against `expected-html/*.html`, instead of the JS reference implementation's output. The fixtures and expected files do not change -- only which pipeline produces the `html` under test:
+
+```typescript
+import { execFileSync } from "node:child_process";
+
+// Was: const html = String(await buildProcessor().process(src));
+// Now: shell out to the shipping (ported) pipeline binary and assert its
+// output against the same expected-html/*.html the JS reference produced.
+function renderWithPort(fixturePath: string): string {
+  return execFileSync("./target/release/md-plugins-port", [fixturePath], {
+    encoding: "utf8",
+  });
+}
+```
+
+Once the assertion is repointed, the corpus is a regression guard for production again, and the JS reference implementation can be retired -- its only job was to generate a truth nothing consumes independently anymore.
+
+#### Option 2: retire the corpus, with a dated note
+
+If nothing will keep diffing the port's output against these fixtures going forward, delete the corpus rather than let it sit and rot. Leave a dated note -- a line in the package README, or a commit message referenced from one -- recording when and why it was retired, so a future reader who finds `expected-html/*.html` in git history knows it was a deliberate sunset, not an accidental deletion.
+
+#### Audit for pinned reference-implementation bugs first
+
+Before you repoint or retire, audit every fixture for one that pins a **known bug in the reference implementation that the port intentionally fixed**. A fixture like that is not neutral: left as-is under Option 1, it fails the moment you repoint (the port never reproduces the old bug) or -- worse -- it gets silently regenerated against the port's corrected output with no comment explaining what changed and why. Left as-is under Option 2, it ships to git history looking like a legitimate parity artifact instead of a known-wrong one.
+
+```typescript
+// KNOWN DIVERGENCE: nested-definition-list.html pins issue #482 (JS reference
+// double-escapes ampersands in reference-style link titles). The port fixed
+// this deliberately -- do not regenerate this fixture from the JS pipeline;
+// it has already been hand-updated to the corrected (port) output.
+```
+
+Annotate or regenerate each of those fixtures -- do not carry a silently-passing bug-pinned fixture into whichever end state you choose. Either way, the corpus should describe production as it actually behaves, not as the retired reference implementation once did.
+
 ## Putting the halves together
 
 Reach for tree factories when you need surgical control over an input node -- edge cases, malformed input, exotic nesting -- and want to assert on the resulting node shape without parser noise. Reach for the golden corpus when you need confidence that the whole assembled pipeline still emits the exact HTML you expect, and especially when that output has to serve as a cross-language parity reference. A mature AST-plugin test suite uses both: fast, focused unit tests for the transform logic, and a small golden corpus pinning the end-to-end contract.
