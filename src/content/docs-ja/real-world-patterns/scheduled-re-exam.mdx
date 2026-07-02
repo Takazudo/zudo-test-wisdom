@@ -144,6 +144,10 @@ jobs:
 set -euo pipefail
 
 LABEL="exam-failure"
+# Workflow name goes in the issue title so the dedup query matches THIS
+# workflow's issue, not another workflow's -- two jobs can share the label
+WORKFLOW_NAME="${GITHUB_WORKFLOW}"
+TITLE="exam: ${WORKFLOW_NAME} scheduled heavy run is failing"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
 # DRY_RUN=1: echo the gh command instead of running it -- safe to test against a fixture report.json
@@ -155,11 +159,18 @@ run_gh() {
   fi
 }
 
+# Find the open tracking issue for THIS workflow: the label narrows the
+# candidates, the title match keeps a second workflow that reuses this
+# script (and label) from appending to the wrong issue
+find_existing() {
+  gh issue list --label "$LABEL" --state open --json number,title \
+    | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty'
+}
+
 # --green path: close the tracking issue if one is open, then exit.
 # Must come BEFORE reading report.json -- green runs produce no failure report.
 if [ "${1:-}" = "--green" ]; then
-  EXISTING="$(gh issue list --label "$LABEL" --state open \
-    --json number --jq '.[0].number // empty')"
+  EXISTING="$(find_existing)"
   if [ -n "$EXISTING" ]; then
     run_gh issue comment "$EXISTING" --body "Exam green: ${RUN_URL}"
     run_gh issue close "$EXISTING"
@@ -183,23 +194,22 @@ Failing specs:
 ${FAILED_SPECS}
 \`\`\`"
 
-# Is there already an open tracking issue?
-EXISTING="$(gh issue list --label "$LABEL" --state open \
-  --json number --jq '.[0].number // empty')"
+# Is there already an open tracking issue for THIS workflow?
+EXISTING="$(find_existing)"
 
 if [ -n "$EXISTING" ]; then
   # Yes: append this run to it -- do NOT open a duplicate
   run_gh issue comment "$EXISTING" --body "$BODY"
 else
-  # No: create the single tracking issue with the fixed label
+  # No: create the single tracking issue with the fixed label and title
   run_gh issue create \
-    --title "exam: scheduled heavy run is failing" \
+    --title "$TITLE" \
     --label "$LABEL" \
     --body "$BODY"
 fi
 ```
 
-各レポートには、修正セッションが必要とする3つの情報が含まれます：固定ラベル（重複排除クエリがIssueを見つけるため）、失敗したスペック名、そして実行URLです。
+各レポートには、修正セッションが必要とする情報が含まれます：固定ラベルに加えてタイトル内のワークフロー名（重複排除クエリが*このワークフローの*Issueを見つけ、別のワークフローのIssueと取り違えないため）、失敗したスペック名、そして実行URLです。
 
 <Note>
 
@@ -224,6 +234,163 @@ fi
 <Warning>
 
 合成フィクスチャが安全なのは、**あなたがそのコントラクトを所有している場合に限ります**。サードパーティツールの出力に対しては、真実を作ることはできません -- キャプチャするしかありません。手書きフィクスチャが適切なのは、テスト対象のスキーマを読者が所有している場合です：たとえば [remark/rehypeプラグインのテスト](./remark-rehype-plugin-testing.mdx) でのmdastツリーファクトリ（mdastコントラクトはあなたが所有）や、[レベル3のビルド出力テスト](../testing-levels/level-3-build-output.mdx) での合成的なインナーバンドルオブジェクト（バンドルの形はあなたが所有）がそれにあたります。PlaywrightやJest、Viteのようなツールの出力スキーマは彼らが変更する権限を持っているため、実際のアーティファクトをキャプチャすることだけが誠実でいられる唯一の方法です。
+
+</Warning>
+
+## flakyテレメトリのメカニズム
+
+このサイトの他の場所で述べられている2つのルールは、方針であってメカニズムではありません：[実行ティア](../decision-guide/execution-tiers.mdx)は「リトライ後のパスはトリアージのシグナルであって、成功ではない」と述べ、[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx)は「隔離された `@flaky` テストはスケジュールティアで許容失敗として実行され続け、トラッキングIssueに新鮮な失敗データを流し続ける」と述べています。しかしどちらのページも、リトライ後にパスしたテストがどう検知されるのか、そのデータがどうやって実際にIssueへ届くのかは述べていません。以下は、あるダウンストリームプロジェクトが構築し、鍛え上げたメカニズムです -- この2つのルールを実現するためのものです。
+
+### リトライパスの検知
+
+PlaywrightのJSONレポーターは、少なくとも1回失敗した後、リトライ予算の中でパスしたテストに `"status": "flaky"` を付けます。このフィールドを主要なシグナルとして信頼しますが、それだけに頼らないこと -- レポーターラッパーや古いバージョンのPlaywrightがこのフィールドを落とすエッジケースに備えて、構造的な形（`results[]` に2件以上のエントリがあり、最後のエントリが `"status": "passed"`）へのフォールバックも用意します：
+
+```bash
+#!/usr/bin/env bash
+# scripts/annotate-flaky.sh -- detect retry-passes, annotate, then feed each into its own tracking issue
+set -euo pipefail
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+# Playwright marks a retry-pass "flaky" -- fall back to the structural shape
+# (more than one result, the last one "passed") for reporters that drop the field
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)        # a "spec" node: has a title and per-project test runs
+  | .title as $title
+  | .tests[]
+  | select(
+      .status == "flaky"
+      or ((.results // []) | length > 1 and (.[-1].status == "passed"))
+    )
+  | $title
+' playwright-report/report.json |
+while IFS= read -r TITLE; do
+  echo "::warning::${TITLE} -- passed only after retry, record and schedule the fix"
+
+  # The annotation above is decoration until something reads it --
+  # file or append to a deduped tracking issue, one per test, not one per run
+  FLAKY_TITLE="flaky: ${TITLE}"
+  EXISTING="$(gh issue list --label "flaky" --state open --json number,title \
+    | jq -r --arg t "$FLAKY_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')"
+
+  if [ -n "$EXISTING" ]; then
+    gh issue comment "$EXISTING" --body "Retry-pass warning: ${RUN_URL}"
+  else
+    # Best-effort: a fork-originated PR's read-only GITHUB_TOKEN cannot create
+    # issues -- log and move on, the annotation above still stands either way
+    gh issue create --title "$FLAKY_TITLE" --label "flaky" --body "Retry-pass warning: ${RUN_URL}" \
+      || echo "::warning::could not file the tracking issue (read-only token?) -- see the annotation above"
+  fi
+done
+```
+
+一致した各行はGitHub Actionsのランサマリー上のアノテーションになります -- 生のJSONを開かなくても見えます。
+
+### 警告には受け手が必要
+
+<Warning>
+
+**発行されたアノテーションは、起票されたIssueではありません。** アノテーションはランサマリーページ上にしか表示されません -- 購読もなければ通知もなく、誰かがたまたまその特定の実行を開かない限り表面化しません。これは、あるダウンストリームプロジェクトが実際にはまった運用上の罠です：上のようなスクリプトを出荷し、リトライパスの警告は何か月もランログに積み上がり続けましたが、そのうちの1つも隔離パイプラインのトラッキングIssueには届きませんでした -- 誰もそれを消費していなかったからです。アノテーションは、何かがそれを読んで行動しない限り、単なる飾りです。だからこそ上のスクリプトは、後回しにする「フォローアップ」としてではなく、同じループの1回のイテレーションの中で `::warning::` と重複排除されたIssue呼び出しを必ずペアにしています。
+
+</Warning>
+
+### 隔離レーンのテレメトリ
+
+すべての `@flaky` テストの上にある必須のインラインコメント（[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx#flaky-の隔離パイプライン)の証跡ルール）は、機械可読なポインタでもあります：そこから各テストのトラッキングIssue URLを抜き出し、スケジュール実行のたびにそのテストのpass/failを投稿します。fix/demote/deleteの締切判断は、フレイキーがまだ起きているかどうかの当て推量ではなく、データドリブンになります：
+
+```bash
+#!/usr/bin/env bash
+# scripts/quarantine-telemetry.sh -- post pass/fail to each @flaky test's own tracking issue
+set -euo pipefail
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)
+  | select(.title | test("@flaky"))
+  | .title as $title
+  | .tests[]
+  | "\(.status)\t\($title)"
+' playwright-report/report.json |
+while IFS=$'\t' read -r STATUS TITLE; do
+  # The tracking-issue URL sits in the mandatory inline comment directly above test()
+  ISSUE_URL="$(grep -B1 -F "\"${TITLE}" e2e/**/*.spec.ts 2>/dev/null \
+    | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
+  [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
+  ISSUE_NUM="${ISSUE_URL##*/}"
+  VERDICT="$([ "$STATUS" = "expected" ] && echo "pass" || echo "fail")"
+  gh issue comment "$ISSUE_NUM" --body "Quarantine telemetry: **${VERDICT}** -- ${RUN_URL}"
+done
+```
+
+### タグとissueを紐付けるガード
+
+証跡ルール（「`@flaky` は、すぐ隣にインラインのissue URLがある場合にのみ有効」）は、それを機械的に強制する何かがあって初めて現実になります。コメントの欠落でCI/プッシュ前スクリプトを失敗させれば、そのルールは、エージェントが忘れるかもしれない慣習から、スキップできないゲートに変わります：
+
+```bash
+#!/usr/bin/env bash
+# scripts/guard-flaky-paper-trail.sh -- fail the gate if a @flaky test lacks its inline issue URL
+set -euo pipefail
+
+MISSING=0
+while IFS=: read -r FILE LINE _; do
+  ABOVE="$(sed -n "$((LINE - 1))p" "$FILE")"
+  if ! echo "$ABOVE" | grep -qE '// quarantined: https://github\.com/\S+/issues/[0-9]+'; then
+    echo "::error file=${FILE},line=${LINE}::@flaky test is missing its inline tracking-issue comment"
+    MISSING=1
+  fi
+done < <(grep -rn 'test(.*@flaky' --include='*.spec.ts' e2e/)
+
+exit "$MISSING"
+```
+
+### 信頼できるレーンのための2つの小さな修正
+
+<Tip>
+
+**空レーンの使い勝手。** 隔離レーンの健全な終着点は `@flaky` テストがゼロになることです。`--pass-with-no-tests` がなければ、何にもマッチしない `--grep` はPlaywrightの終了コードを非ゼロにし、「隔離すべきものが何もない」という状態でスケジュール実行を赤くしてしまいます -- 本来起きてほしいこととは逆です：
+
+```bash
+pnpm test:e2e --grep "@flaky" --pass-with-no-tests
+```
+
+</Tip>
+
+<Note>
+
+**ランナーの癖：JSONレポーターのリダイレクト。** Playwright 1.58は、古い例でまだ見かける `--reporter=json:<path>` のコロン構文を拒否します -- レポートを書き出す代わりにエラーになります。上のexamワークフローのスケルトンですでに使われている `PLAYWRIGHT_JSON_OUTPUT_NAME` が、現行Playwrightでサポートされている、JSONレポーターの出力パスのリダイレクト方法です。
+
+</Note>
+
+### リトライ予算とトレース取得を組み合わせる
+
+リトライでのみパスするテストはトリアージのシグナルですが、アーティファクトのないシグナルはトリアージセッションを無駄にします。リトライ予算（[リトライ予算](../decision-guide/execution-tiers.mdx#リトライ予算)を参照）と、フレイキーを実際に明らかにするリトライでのトレース取得を組み合わせます：
+
+```ts
+// playwright.config.ts
+export default defineConfig({
+  retries: process.env.CI ? 2 : 0,
+  use: {
+    trace: "on-first-retry",
+  },
+});
+```
+
+<Warning>
+
+**トレースはHTMLレポートのディレクトリではなく、ランナーの `outputDir` に置かれます。** Playwrightのデフォルトの `outputDir` は `test-results/` です -- 失敗・リトライした試行のトレース、スクリーンショット、動画はそこに書き出されます。HTMLレポート（上のexamワークフローで使われている `playwright-report/`）は結果をまとめる別のディレクトリであり、生のトレースファイルを自動的にバンドルしません。`playwright-report/` だけを取得するアーティファクトアップロードのステップは、トレースを静かに全部失います：
+
+```yaml
+- uses: actions/upload-artifact@v4
+  if: failure()
+  with:
+    name: exam-artifacts
+    path: |
+      playwright-report/
+      test-results/
+```
 
 </Warning>
 
