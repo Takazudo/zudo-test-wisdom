@@ -144,6 +144,10 @@ The `if: failure()` step in the skeleton above calls this script:
 set -euo pipefail
 
 LABEL="exam-failure"
+# Workflow name goes in the issue title so the dedup query matches THIS
+# workflow's issue, not another workflow's -- two jobs can share the label
+WORKFLOW_NAME="${GITHUB_WORKFLOW}"
+TITLE="exam: ${WORKFLOW_NAME} scheduled heavy run is failing"
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
 # DRY_RUN=1: echo the gh command instead of running it -- safe to test against a fixture report.json
@@ -155,11 +159,18 @@ run_gh() {
   fi
 }
 
+# Find the open tracking issue for THIS workflow: the label narrows the
+# candidates, the title match keeps a second workflow that reuses this
+# script (and label) from appending to the wrong issue
+find_existing() {
+  gh issue list --label "$LABEL" --state open --json number,title \
+    | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty'
+}
+
 # --green path: close the tracking issue if one is open, then exit.
 # Must come BEFORE reading report.json -- green runs produce no failure report.
 if [ "${1:-}" = "--green" ]; then
-  EXISTING="$(gh issue list --label "$LABEL" --state open \
-    --json number --jq '.[0].number // empty')"
+  EXISTING="$(find_existing)"
   if [ -n "$EXISTING" ]; then
     run_gh issue comment "$EXISTING" --body "Exam green: ${RUN_URL}"
     run_gh issue close "$EXISTING"
@@ -183,23 +194,22 @@ Failing specs:
 ${FAILED_SPECS}
 \`\`\`"
 
-# Is there already an open tracking issue?
-EXISTING="$(gh issue list --label "$LABEL" --state open \
-  --json number --jq '.[0].number // empty')"
+# Is there already an open tracking issue for THIS workflow?
+EXISTING="$(find_existing)"
 
 if [ -n "$EXISTING" ]; then
   # Yes: append this run to it -- do NOT open a duplicate
   run_gh issue comment "$EXISTING" --body "$BODY"
 else
-  # No: create the single tracking issue with the fixed label
+  # No: create the single tracking issue with the fixed label and title
   run_gh issue create \
-    --title "exam: scheduled heavy run is failing" \
+    --title "$TITLE" \
     --label "$LABEL" \
     --body "$BODY"
 fi
 ```
 
-Every report carries the three things a fix session needs: the fixed label (so the dedup query finds it), the failing spec names, and the run URL.
+Every report carries the things a fix session needs: the fixed label plus the workflow name in the title (so the dedup query finds *this* workflow's issue, not a different workflow's), the failing spec names, and the run URL.
 
 <Note>
 
@@ -224,6 +234,163 @@ When the tool changes its schema in a future version, the test fails loudly -- i
 <Warning>
 
 Synthetic fixtures are safe only when **you own the contract**. For a third-party tool's output you cannot author truth -- you can only capture it. Hand-authored fixtures are the right choice when the reader owns the schema being tested: for example, mdast tree factories in [remark/rehype plugin tests](./remark-rehype-plugin-testing.mdx) (you own the mdast contract) or synthetic inner-bundle objects in [level-3 build-output tests](../testing-levels/level-3-build-output.mdx) (you own the bundle shape). For a tool like Playwright, Jest, or Vite whose output schema is theirs to change, capturing a real artifact is the only way to stay honest.
+
+</Warning>
+
+## Flake Telemetry Mechanics
+
+Two rules stated elsewhere on this site are policy, not mechanism: [Execution Tiers](../decision-guide/execution-tiers.mdx) says pass-on-retry is a triage signal, not a success, and the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) says a quarantined `@flaky` test still runs allowed-to-fail in the scheduled tier so fresh failure data keeps flowing into its tracking issue. Neither page says how a passed-after-retry test gets detected, or how that data actually reaches an issue. What follows is the mechanics a downstream project built and hardened to make both rules real.
+
+### Retry-Pass Detection
+
+Playwright's JSON reporter marks a test `"status": "flaky"` when it failed at least once and then passed within the retry budget. Trust that field as the primary signal, but do not trust it exclusively -- fall back to the structural shape (more than one entry in `results[]`, with the last one `"status": "passed"`) for the edge cases where a reporter wrapper or an older Playwright version drops the field:
+
+```bash
+#!/usr/bin/env bash
+# scripts/annotate-flaky.sh -- detect retry-passes, annotate, then feed each into its own tracking issue
+set -euo pipefail
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+# Playwright marks a retry-pass "flaky" -- fall back to the structural shape
+# (more than one result, the last one "passed") for reporters that drop the field
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)        # a "spec" node: has a title and per-project test runs
+  | .title as $title
+  | .tests[]
+  | select(
+      .status == "flaky"
+      or ((.results // []) | length > 1 and (.[-1].status == "passed"))
+    )
+  | $title
+' playwright-report/report.json |
+while IFS= read -r TITLE; do
+  echo "::warning::${TITLE} -- passed only after retry, record and schedule the fix"
+
+  # The annotation above is decoration until something reads it --
+  # file or append to a deduped tracking issue, one per test, not one per run
+  FLAKY_TITLE="flaky: ${TITLE}"
+  EXISTING="$(gh issue list --label "flaky" --state open --json number,title \
+    | jq -r --arg t "$FLAKY_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')"
+
+  if [ -n "$EXISTING" ]; then
+    gh issue comment "$EXISTING" --body "Retry-pass warning: ${RUN_URL}"
+  else
+    # Best-effort: a fork-originated PR's read-only GITHUB_TOKEN cannot create
+    # issues -- log and move on, the annotation above still stands either way
+    gh issue create --title "$FLAKY_TITLE" --label "flaky" --body "Retry-pass warning: ${RUN_URL}" \
+      || echo "::warning::could not file the tracking issue (read-only token?) -- see the annotation above"
+  fi
+done
+```
+
+Each matching line becomes a GitHub Actions annotation on the run summary -- visible without opening the raw JSON.
+
+### Warnings Need a Consumer
+
+<Warning>
+
+**An emitted annotation is not a filed issue.** Annotations render on the run summary page and nowhere else -- no subscription, no notification, nothing that surfaces them unless someone happens to open that specific run. This is the operational trap a downstream project hit directly: a script like the one above shipped, retry-pass warnings accumulated in run logs for months, and not one of them ever reached the quarantine pipeline's tracking issues -- because nothing consumed them. An annotation is decoration until something reads it and acts on it, which is why the script above pairs every `::warning::` with the deduped-issue call in the same loop iteration, not as a follow-up nobody got to.
+
+</Warning>
+
+### Quarantine-Lane Telemetry
+
+The mandatory inline comment above every `@flaky` test (the paper-trail rule from the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky)) is also a machine-readable pointer: extract each test's tracking-issue URL from it and post that test's pass/fail on every scheduled run. The fix/demote/delete deadline decision becomes data-driven instead of a guess at whether the flake is still happening:
+
+```bash
+#!/usr/bin/env bash
+# scripts/quarantine-telemetry.sh -- post pass/fail to each @flaky test's own tracking issue
+set -euo pipefail
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)
+  | select(.title | test("@flaky"))
+  | .title as $title
+  | .tests[]
+  | "\(.status)\t\($title)"
+' playwright-report/report.json |
+while IFS=$'\t' read -r STATUS TITLE; do
+  # The tracking-issue URL sits in the mandatory inline comment directly above test()
+  ISSUE_URL="$(grep -B1 -F "\"${TITLE}" e2e/**/*.spec.ts 2>/dev/null \
+    | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
+  [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
+  ISSUE_NUM="${ISSUE_URL##*/}"
+  VERDICT="$([ "$STATUS" = "expected" ] && echo "pass" || echo "fail")"
+  gh issue comment "$ISSUE_NUM" --body "Quarantine telemetry: **${VERDICT}** -- ${RUN_URL}"
+done
+```
+
+### Tag-to-Issue Guard
+
+The paper-trail rule ("`@flaky` is only valid with an inline issue URL right next to it") is only real if something enforces it mechanically. A CI or pre-push script that fails on a missing comment turns the rule from a convention an agent might forget into a gate it cannot skip:
+
+```bash
+#!/usr/bin/env bash
+# scripts/guard-flaky-paper-trail.sh -- fail the gate if a @flaky test lacks its inline issue URL
+set -euo pipefail
+
+MISSING=0
+while IFS=: read -r FILE LINE _; do
+  ABOVE="$(sed -n "$((LINE - 1))p" "$FILE")"
+  if ! echo "$ABOVE" | grep -qE '// quarantined: https://github\.com/\S+/issues/[0-9]+'; then
+    echo "::error file=${FILE},line=${LINE}::@flaky test is missing its inline tracking-issue comment"
+    MISSING=1
+  fi
+done < <(grep -rn 'test(.*@flaky' --include='*.spec.ts' e2e/)
+
+exit "$MISSING"
+```
+
+### Two Small Fixes for a Trustworthy Lane
+
+<Tip>
+
+**Empty-lane ergonomics.** The healthy end state for the quarantine lane is zero `@flaky` tests. Without `--pass-with-no-tests`, a `--grep` that matches nothing turns Playwright's exit code non-zero and reds out the scheduled run for having *nothing left to quarantine* -- the opposite of what should happen:
+
+```bash
+pnpm test:e2e --grep "@flaky" --pass-with-no-tests
+```
+
+</Tip>
+
+<Note>
+
+**Runner quirk: the JSON reporter redirect.** Playwright 1.58 rejects the `--reporter=json:<path>` colon syntax that older examples still show -- it errors instead of writing the report. `PLAYWRIGHT_JSON_OUTPUT_NAME`, already used in the exam workflow skeleton above, is the supported redirect for the JSON reporter's output path on current Playwright.
+
+</Note>
+
+### Pair the Retry Budget with Trace Capture
+
+A test that passes only on retry is a triage signal -- but a signal with no artifact wastes the triage session. Pair the retry budget (see [Retry Budgets](../decision-guide/execution-tiers.mdx#retry-budgets)) with trace capture on the retry that actually reveals the flake:
+
+```ts
+// playwright.config.ts
+export default defineConfig({
+  retries: process.env.CI ? 2 : 0,
+  use: {
+    trace: "on-first-retry",
+  },
+});
+```
+
+<Warning>
+
+**The trace lands in the runner's `outputDir`, not the HTML report directory.** Playwright's default `outputDir` is `test-results/` -- traces, screenshots, and videos from failed and retried attempts are written there. The HTML report (`playwright-report/`, used in the exam workflow above) is a separate directory that summarizes results; it does not bundle the raw trace files. An artifact-upload step that only grabs `playwright-report/` silently drops every trace:
+
+```yaml
+- uses: actions/upload-artifact@v4
+  if: failure()
+  with:
+    name: exam-artifacts
+    path: |
+      playwright-report/
+      test-results/
+```
 
 </Warning>
 
