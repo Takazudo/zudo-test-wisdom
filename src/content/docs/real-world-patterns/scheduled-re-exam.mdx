@@ -149,7 +149,7 @@ Wiring it into both surfaces is two one-line additions: inside the `guards:begin
 
 ### The Allowlist Needs a Reason
 
-A guard can be legitimately local-only or CI-only -- but that has to be a decision someone made, not an omission nobody noticed. The allowlist is a separate file, and every entry carries a mandatory `# reason:` comment directly above it. An allowlist without a reason is indistinguishable from the drift the whole mechanism exists to catch, so treat a bare entry the same as a missing one:
+A guard can legitimately have no CI equivalent -- a script-only convenience check, say -- but that has to be a decision someone made, not an omission nobody noticed. The allowlist is a separate file, and every entry carries a mandatory `# reason:` comment directly above it. An allowlist without a reason is indistinguishable from the drift the whole mechanism exists to catch, so treat a bare entry the same as a missing one:
 
 ```bash
 # scripts/guard-allowlist.sh -- guards intentionally exempt from the CI surface
