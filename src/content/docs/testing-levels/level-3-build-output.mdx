@@ -208,7 +208,7 @@ This still is not a full runtime test. Importing the emitted module exercises it
 Level 3 tests verify file contents, not runtime behavior. They cannot detect:
 
 - JavaScript runtime errors
-- Client-side hydration issues
+- Client-side hydration issues (correct dist HTML can still mis-nest once an island hydrates -- see the [hydration mis-nesting variant](../decision-guide/common-failure-pattern.mdx#the-hydration-mis-nesting-variant), which only a Level 4 post-hydration test catches)
 - Visual rendering problems
 - Browser API interactions
 - Dynamic content loaded after page load

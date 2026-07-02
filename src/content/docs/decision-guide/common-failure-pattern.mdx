@@ -100,6 +100,40 @@ The `overflow: hidden` + `height: 0` pattern is just one variant. Other common c
 | `transform: scale(0)` | Element shrunk to nothing | No | Yes |
 | `position: absolute` + off-screen | Element positioned off viewport | No | Yes |
 
+## The Hydration Mis-Nesting Variant
+
+The CSS variants above are one family of "lower levels pass, page is broken." Islands architectures have another, structural one: **hydration mis-nesting**. When an island hydrates, its runtime re-emits the marker wrapper and re-parents the server-rendered children one level off -- a "double-wrap." The children are all still there; they are just nested one element too deep.
+
+What makes this class dangerous is that **every level below Level 4 passes**:
+
+- Level 1 / Level 2 (including render-to-string SSG-presence tests) pass -- the pre-hydration markup is correct.
+- Level 3 passes -- the built dist HTML is correct.
+
+The breakage appears *only after hydration runs in a real browser*, so nothing that inspects static output can see it. This is a **structural, deterministic** bug -- not a [hydration race](../real-world-patterns/deflaking-recipe.mdx) (a flake). It also recurs: one project hit this exact class twice, in two different island components.
+
+Only a **Level 4 test with a hydration wait** catches it: trigger hydration (scroll the island into view, or otherwise activate it), wait for the hydration signal, then assert the post-hydration DOM structure -- child counts and vertical stacking, not just presence.
+
+```typescript
+// island.hydration.spec.ts (Playwright)
+test("island children are not double-wrapped after hydration", async ({ page }) => {
+  await page.goto("/article-with-island");
+
+  // Trigger + wait for hydration, not a fixed timeout.
+  await page.locator("[data-island]").scrollIntoViewIfNeeded();
+  await page.waitForSelector("[data-island][data-hydrated]");
+
+  // Assert STRUCTURE, not just presence: the items must be direct
+  // children of the list, and they must stack vertically (a wrong
+  // nesting level collapses or re-flows them).
+  const items = page.locator("[data-island] > ul > li");
+  await expect(items).toHaveCount(3);
+
+  const first = await items.nth(0).boundingBox();
+  const second = await items.nth(1).boundingBox();
+  expect(second!.y).toBeGreaterThan(first!.y);
+});
+```
+
 ## Key Takeaway
 
 <Warning>
