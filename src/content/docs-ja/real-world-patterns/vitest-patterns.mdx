@@ -356,3 +356,52 @@ describe("single source of truth", () => {
 </Tip>
 
 このガードが捕捉するのは*リポジトリ内*の分岐です。**外部ツールの実際の出力スキーマ**とパーサーの間の分岐は捕捉できません -- そのケースは手書きではなくキャプチャしたアーティファクトのフィクスチャが必要です。詳細は[レポーターのパースフィクスチャを実際にキャプチャしたレポートに固定する](./scheduled-re-exam.mdx#レポーターのパースフィクスチャを実際にキャプチャしたレポートに固定する)を参照してください。
+
+## ミラーテスト・アンチパターン
+
+上のガードが固定するのは重複した*値*でした。関数も同じように分岐しえます -- そしてその失敗モードには特徴的な形があります。テストファイルが、テスト対象の関数を import せずに**再実装してしまう**のです。ときには「import せずここで再実装する」といったコメント付きで。このようなミラーテストは、実際の実装がリグレッションしても永遠にパスし続けます。固定しているのは手書きコピーのミラーであって、プロダクションコードではないからです。
+
+実際に観測された例：
+
+- それ自体が**デッドコード**だったソースファイルのヘルパーをミラーしていたテストスイート -- プロダクションからの importer が存在せず、テストは何も固定していなかった。
+- リファクタリング後に存在しなくなったソースパスを引用し続けていたミラーコピー。
+- 兄弟スクリプト 2 つ（CI ガードとテレメトリレポーター）がそれぞれ同じ URL 抽出関数のプライベートコピーを持ち、ユニットテストされているのは片方だけ -- しかしパイプラインが動くには両者が一致していなければならない。
+
+このパターンが生まれる理由はありふれています。本物の関数がモジュールプライベートだったり、インラインスクリプト文字列の中にあったり、トップレベルに CLI の副作用を持つファイルにあったりする。import が面倒で、コピーが無害に感じられるのです。
+
+**テスト対象の関数を再実装してはいけません。** import できないなら、それこそ先に直すべきバグです。エクスポートされた純粋なモジュールへ抽出し、プロダクションコードとテストの両方からそれを import してください。
+
+```typescript
+// mytool.test.ts -- BEFORE (the anti-pattern)
+// re-implemented here for testability   <- review red flag, not a justification
+const extractIssueUrl = (line: string) =>
+  line.match(/https:\/\/github\.com\/\S+/)?.[0] ?? null;
+
+// AFTER: one canonical module, imported by production and tests alike
+import { extractIssueUrl } from "../scripts/lib/extract-issue-url.js";
+```
+
+抽出が本当に割に合わない場合 -- たとえば関数がビルド済み IIFE 文字列の中にある場合 -- は、上のガードを関数へ一般化したフォールバックを使います。埋め込まれたソースを取り出して正準モジュールと比較するビルド時のピンで、分岐を大きな音で失敗させるのです。比較はソーステキスト同士で行ってください（改行コードは正規化）。`fn.toString()` に対してピンしてはいけません -- フォーマットやトランスパイルで出力が変わってしまいます。
+
+```typescript
+// Meta-test: it guards duplicate-implementation drift, nothing more.
+// Behavioral tests still target the canonical module directly.
+const normalize = (s: string) => s.replace(/\r\n/g, "\n").trim();
+
+it("the built wrapper embeds the canonical parseRoute source", () => {
+  const built = normalize(readFileSync("dist/worker-wrapper.mjs", "utf8"));
+  const canonical = normalize(readFileSync("src/parse-route.mjs", "utf8"));
+  expect(built).toContain(canonical);
+});
+```
+
+締めくくりに 2 つの系：
+
+- **「テストしやすさのためにここで再実装した」というコメントはレビューの兆候です。** 直すべき赤信号として扱い、受け入れる正当化にしてはいけません。
+- **抽出する前に、ミラー元のソースが生きているかを確認してください。** デッドコードのミラーは何も固定していません -- テストを生きている実装へ向け直すか、削除してください。
+
+<Tip>
+
+ミラーテストは SSoT ガードの失敗ケースを裏返したものです。ガードが 2 つのコピーを固定して分岐を防ぐのに対し、ミラーテストはピンのない 2 つ目のコピーを作ってしまいます。テストファイルへ関数をコピーしそうになったら、import する（必要なら先に抽出する）かピンで固定する -- コピーを宙に浮かせたままにしてはいけません。
+
+</Tip>
