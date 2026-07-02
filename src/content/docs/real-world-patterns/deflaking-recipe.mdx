@@ -99,7 +99,7 @@ await page.locator(".submit-btn").click();
 
 ## Part 2 — The Deflaking Recipe
 
-Apply these four steps in order. Each step is mechanical — no judgment required.
+Apply these four steps in order. Each step is mechanical — no judgment required. Step 5 below is the escalation for when none of the four leaves you anything to wait on.
 
 ### Step 1 — Replace timing waits with event-keyed waits, listener installed before trigger
 
@@ -130,6 +130,32 @@ await page.waitForFunction(() => window.__navDone);
 <Warning>
 
 Never use an in-page `setTimeout` as a fallback. It runs inside the browser's own event loop and is subject to timer throttling, page freeze, and tab backgrounding. Playwright's `waitForFunction` polls from outside the page using its own timeout mechanism — it is the correct tool here.
+
+</Warning>
+
+#### Hardened variant: atomic listener + click in a single `evaluate`
+
+The install-then-trigger pattern above still leaves a narrow gap: between `page.evaluate()` resolving and `page.click()` firing, an unrelated event of the same name could land and flip the flag before the click that is supposed to cause it. For most navigations this window is negligible, but when it isn't, register the listener **and** perform the click inside a single `page.evaluate` call, so both happen synchronously in the page's own event loop with no round-trip in between:
+
+```typescript
+// Hardened: listener + click atomic in a single page.evaluate call
+await page.evaluate(() => {
+  window.__navDone = false;
+  addEventListener("framework:after-swap", () => {
+    window.__navDone = true;
+  });
+  document.querySelector('a[href="/about"], a[href="/about/"]')?.click();
+});
+
+await page.waitForFunction(() => window.__navDone);
+```
+
+<Warning>
+
+Two caveats to this hardened variant:
+
+- **It bypasses actionability checks.** An in-page `element.click()` skips the visibility, stability, hit-target, and enabled checks that `page.click()` performs before clicking. Use it only for chrome-level elements already known to be attached and visible — not for arbitrary UI under test.
+- **Match hrefs trailing-slash-tolerantly.** Different SSG builds emit `/about` and `/about/` inconsistently. A selector like `'a[href="/about"], a[href="/about/"]'` matches both; an exact single-value match is a recurring papercut in static-site E2E suites.
 
 </Warning>
 
@@ -166,6 +192,24 @@ See the `// wait-ok:` exception documented in the [Editor Input section of Playw
 <Note>
 
 There is a second, distinct legitimate class of `waitForTimeout`: asserting the **absence** of a failure over a time window (e.g., "no console errors fire in the first 2000ms after mount"). Converting that sleep to a condition wait guts the assertion — there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep for absence-window assertions; scope this step to positive completion waits only. See the `POST_MOUNT_LOOP_SETTLE_MS` example in [Playwright Patterns](./playwright-patterns.mdx) for the full pattern.
+
+</Note>
+
+### Step 5 — Escalation: add the missing signal to production code
+
+Steps 1-4 all presume the signal to wait on already exists — a framework event, a hydration flag, a stable DOM state. Sometimes it doesn't. When there is no observable state transition to key a wait to, the fix is not a cleverer wait in the test — it's a one-line addition to the **production code**:
+
+- A data attribute flipped when the work finishes (`el.dataset.ready = "true"`).
+- A custom event dispatched after a transition (`dispatchEvent(new CustomEvent("app:ready"))`).
+- A flag set on `window` after async initialization (`window.__appReady = true`).
+
+The `dataset.hydrated` flag used in [Hydration races](#part-1-—-root-cause-catalog-5-hydration-races) above is exactly this kind of signal: it is not a Playwright or browser primitive, it is application code deliberately set once an island's hydration runtime finishes wiring up its event handlers. The same convention shows up as `data-hydrated` on `[data-island]` in [the hydration mis-nesting variant](../decision-guide/common-failure-pattern.mdx#the-hydration-mis-nesting-variant) elsewhere in this guide — one island-lifecycle attribute, read by two different tests for two different purposes.
+
+An untestable wait is a product-code observability gap, not a spec problem. Once the signal exists, wait on it the same way as Step 1: install the listener or poll before triggering the action, trigger, then await.
+
+<Note>
+
+**Closing invariant: every wait must be keyed to an observable state transition, not a duration.** If a wait cannot be tied to a signal the production code emits, the fix belongs in the production code — not in a longer timeout.
 
 </Note>
 
