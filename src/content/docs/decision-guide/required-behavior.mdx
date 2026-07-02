@@ -154,12 +154,19 @@ Never introduce any of the following without a linked open issue reference:
 
 Making a gate pass by editing existing assertions requires a fresh-context review of the test diff — do not apply such edits in the same session that authored the original change.
 
+**This requirement extends to gate-defining files, not just assertions.** A gate can be neutralized without touching a single assertion: narrowing a `testMatch` pattern so failing specs stop running, adding a `--grep-invert` filter, raising a retry count, dropping or de-requiring a CI job, or editing a fixture/setup script so the failing scenario is never built. Because retry budgets, grep filters, testMatch patterns, and job wiring can neutralize a gate this way, any edit to a **gate-defining file** — test-runner config, CI workflow definitions, fixture/setup scripts, the pre-push gate script — requires the same fresh-context review: read the gate file from scratch rather than trust the author's diff summary, and do not apply such edits in the same session that authored the original change.
+
+Projects should enumerate their concrete gate-file list in their testing strategy doc (for example: the runner config, the fixture setup script, both CI workflow files, and the pre-push script).
+
 ```
 # Wrong — no issue reference
 test.skip('banner renders correctly', () => { ... })
 
 # Wrong — no issue reference
 expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
+
+# Wrong — gate-defining file edited to make a gate pass, no fresh-context review
+testMatch: ['**/*.spec.ts', '!**/banner-*.spec.ts'] // silently excludes failing spec
 
 # Right
 test.skip('banner renders correctly', () => { ... })

@@ -154,12 +154,19 @@ PR #42 authored by agent-session-A
 
 既存のアサーションを編集してゲートをパスさせる場合、テスト差分についてフレッシュコンテキストのレビューが必要です — 元の変更を作成したのと同じセッションで編集を適用してはなりません。
 
+**この要件はアサーションだけでなく、ゲートを定義するファイルにも及びます。** ゲートは、アサーションに一切手を触れずに無力化できます：失敗しているスペックが動かなくなるように `testMatch` パターンを狭める、`--grep-invert` フィルタを追加する、リトライ回数を引き上げる、CIジョブを削除または必須指定から外す、失敗するシナリオがそもそもビルドされないようにフィクスチャ／セットアップスクリプトを編集する、などです。リトライ予算、grepフィルタ、testMatchパターン、ジョブの配線がこのようにゲートを無力化しうるため、**ゲートを定義するファイル**（テストランナー設定、CIワークフロー定義、フィクスチャ／セットアップスクリプト、pre-pushゲートスクリプト）への編集にも同じフレッシュコンテキストのレビューが必要です — 作者のdiff要約を鵜呑みにせず、ゲートファイルを最初から読み直し、元の変更を作成したのと同じセッションで編集を適用してはなりません。
+
+プロジェクトは、テスト戦略ドキュメントに具体的なゲートファイルの一覧を列挙すべきです（例：ランナー設定、フィクスチャセットアップスクリプト、両方のCIワークフローファイル、pre-pushスクリプト）。
+
 ```
 # Wrong — no issue reference
 test.skip('banner renders correctly', () => { ... })
 
 # Wrong — no issue reference
 expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
+
+# Wrong — gate-defining file edited to make a gate pass, no fresh-context review
+testMatch: ['**/*.spec.ts', '!**/banner-*.spec.ts'] // silently excludes failing spec
 
 # Right
 test.skip('banner renders correctly', () => { ... })
