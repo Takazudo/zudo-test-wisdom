@@ -330,6 +330,75 @@ it("falls back to a plain DOM swap when the API is absent", async () => {
 });
 ```
 
+## プリコンパイル済みランタイムのエイリアス（React → Preact）
+
+プリコンパイル済みのアイランドランタイム -- あるいは React 向けに書かれた任意の dist -- を相手にテストする Preact/compat プロジェクトは、3 つの壁に立て続けにぶつかります。どれも自分のコードを読んでいても解決できません。それぞれの原因は、vite とパッケージマネージャーが*相手側*をどう解決するかにあるからです。
+
+### 壁 1：素の `react` エイリアスが `react/jsx-runtime` を飲み込む
+
+症状：`react` をエイリアスしているのに `Failed to resolve import "react/jsx-runtime"`（または `jsx-dev-runtime`）が出る。配列形式の vite `resolve.alias` は最初にマッチしたものが勝つため、エントリは「具体的なものから先」の順に並べます。また jsx ランタイムのマッピング先は `preact/compat` ではなく `preact/jsx-runtime` である点にも注意：
+
+```typescript
+// vitest.config.ts -- resolve.alias is TOP-LEVEL vite config, not under `test`
+export default defineConfig({
+  resolve: {
+    alias: [
+      { find: "react/jsx-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react-dom", replacement: "preact/compat" },
+      // exact-match regex: immune to reordering, never swallows subpaths
+      { find: /^react$/, replacement: "preact/compat" },
+    ],
+  },
+});
+```
+
+### 壁 2：外部化された依存に対してエイリアスが黙って無視される
+
+症状：上のエイリアスは自分のソースには効くのに、プリコンパイル済みの依存だけは本物の React を読み込み続ける -- しかもエラーは出ない。3 つの中で最も厄介な壁です。vitest はデフォルトで node_modules の依存を外部化し、外部化されたモジュールは Node のネイティブリゾルバー経由で読み込まれるため、vite の `resolve.alias` を完全にバイパスします。`server.deps.inline` で当該の依存だけを vite の変換パイプラインに通してください -- このオプションは `test` の下にあります：
+
+```typescript
+export default defineConfig({
+  test: {
+    server: {
+      deps: {
+        // Inline ONLY the precompiled package (plus at most its small
+        // runtime deps). Inlining everything slows the run and masks
+        // other resolution issues.
+        inline: ["@acme/island-runtime"],
+      },
+    },
+  },
+});
+```
+
+### 壁 3：ピン留めした pnpm ストアパスは腐る
+
+症状：ホイストされているのに表に出ていない peer（たとえばランタイムが引き込む `preact-render-to-string`）へ、ハードコードした `node_modules/.pnpm/preact-render-to-string@6.5.0_preact@10.22.0/...` パスでアクセスしている -- そして `pnpm up preact` のたびにパスが壊れる。バージョンと peer のハッシュがディレクトリ名の一部だからです。代わりにストアを動的にスキャンします（pnpm 固有）：
+
+```typescript
+import { readdirSync } from "node:fs";
+import path from "node:path";
+
+// Scoped packages encode as "@scope+name@version" in .pnpm --
+// adjust the prefix accordingly.
+const findPnpmDir = (pkgName: string) => {
+  const store = path.join(process.cwd(), "node_modules", ".pnpm");
+  const hit = readdirSync(store).find((d) => d.startsWith(`${pkgName}@`));
+  if (!hit) throw new Error(`no .pnpm entry for ${pkgName}`);
+  return path.join(store, hit, "node_modules", pkgName);
+};
+
+// Resolves whatever version is currently installed:
+const rtsDir = findPnpmDir("preact-render-to-string");
+```
+
+<Tip>
+
+可能なら、足りない peer を実際の依存として宣言するほうを選んでください -- そうすれば素の `import` が動き、スキャンは不要になります。動的スキャンは、インストール済みアーティファクトをテストしていて peer がホイストされているのに表に出ておらず、依存として追加するとパッケージの本当の契約を偽ってしまう、という狭いケースのためのものです。
+
+</Tip>
+
 ## 信頼できる唯一の情報源を守る
 
 ある定数が単一のソースファイルにのみ存在するのに、2 つの異なる import チェーンを通じて参照される場合――たとえば TypeScript の ESM エントリと手書きの `.mjs` bin など――、どちらかのチェーンが壊れると 2 つのコピーは静かに分岐しうります。ごく小さな「メタ」テストが両者を固定します。zfb-adapter-cloudflare では、ワーカーラッパーの文字列が `src/build.ts` から 1 回、`bin/cli.mjs` 経由の再エクスポートで 1 回 import され、たった 1 つのアサーションが両者の分岐を防ぎます：
