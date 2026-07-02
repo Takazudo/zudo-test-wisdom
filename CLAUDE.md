@@ -29,7 +29,7 @@ pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 Top-level directories under `src/content/docs/`. Directories with header nav entries are mapped via `categoryMatch` in `src/config/settings.ts`:
 
 - `overview/` - Introduction and purpose of the testing guide
-- `testing-levels/` - The 5 testing levels from unit to visual verification
+- `testing-levels/` - The 6 testing levels from unit to AI-based verification
 - `decision-guide/` - Which level to use, common failure patterns, required behaviors
 - `real-world-patterns/` - Vitest patterns, Playwright E2E, Tauri app testing
 - `tools-reference/` - Quick reference of tools per testing level
