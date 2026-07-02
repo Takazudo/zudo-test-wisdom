@@ -330,6 +330,75 @@ it("falls back to a plain DOM swap when the API is absent", async () => {
 });
 ```
 
+## Aliasing a Precompiled Runtime (React → Preact)
+
+A Preact/compat project that tests against a precompiled island runtime -- or any dist authored against React -- hits three walls in a row. None of them are recoverable by reading your own code; each lives in how vite and the package manager resolve the *other* side.
+
+### Wall 1: the bare `react` alias swallows `react/jsx-runtime`
+
+Symptom: `Failed to resolve import "react/jsx-runtime"` (or `jsx-dev-runtime`) even though `react` is aliased. In array form, vite's `resolve.alias` is first-match-wins -- order the entries most-specific-first, and note the jsx runtimes map to Preact's own jsx runtimes (`preact/jsx-runtime`, `preact/jsx-dev-runtime`), not `preact/compat`:
+
+```typescript
+// vitest.config.ts -- resolve.alias is TOP-LEVEL vite config, not under `test`
+export default defineConfig({
+  resolve: {
+    alias: [
+      { find: "react/jsx-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-dev-runtime" },
+      { find: "react-dom", replacement: "preact/compat" },
+      // exact-match regex: immune to reordering, never swallows subpaths
+      { find: /^react$/, replacement: "preact/compat" },
+    ],
+  },
+});
+```
+
+### Wall 2: aliases are silently ignored for externalized deps
+
+Symptom: the aliases above work for your own source, but the precompiled dependency still loads the real React -- with no error. This is the trickiest of the three. Vitest externalizes node_modules deps by default, and externalized modules load through Node's native resolver, which bypasses vite's `resolve.alias` entirely. Force the one dependency through vite's transform pipeline with `server.deps.inline` -- this option lives under `test`:
+
+```typescript
+export default defineConfig({
+  test: {
+    server: {
+      deps: {
+        // Inline ONLY the precompiled package (plus at most its small
+        // runtime deps). Inlining everything slows the run and masks
+        // other resolution issues.
+        inline: ["@acme/island-runtime"],
+      },
+    },
+  },
+});
+```
+
+### Wall 3: pinned pnpm store paths rot
+
+Symptom: a test reaches a hoisted-but-unsurfaced peer (say, `preact-render-to-string` pulled in by the runtime) via a hard-coded `node_modules/.pnpm/preact-render-to-string@6.5.0_preact@10.22.0/...` path -- and the path breaks on every `pnpm up preact`, because the version-and-peer hash is part of the directory name. Scan the store dynamically instead (pnpm-specific):
+
+```typescript
+import { readdirSync } from "node:fs";
+import path from "node:path";
+
+// Scoped packages encode as "@scope+name@version" in .pnpm --
+// adjust the prefix accordingly.
+const findPnpmDir = (pkgName: string) => {
+  const store = path.join(process.cwd(), "node_modules", ".pnpm");
+  const hit = readdirSync(store).find((d) => d.startsWith(`${pkgName}@`));
+  if (!hit) throw new Error(`no .pnpm entry for ${pkgName}`);
+  return path.join(store, hit, "node_modules", pkgName);
+};
+
+// Resolves whatever version is currently installed:
+const rtsDir = findPnpmDir("preact-render-to-string");
+```
+
+<Tip>
+
+Prefer declaring the missing peer as a real dependency when you can -- then a plain `import` works and no scan is needed. The dynamic scan is for the narrower case of testing an installed artifact whose peer is hoisted but unsurfaced, where adding the dependency would misrepresent the package's real contract.
+
+</Tip>
+
 ## Guard the Single Source of Truth
 
 When one constant lives in a single source file but is consumed through two different import chains -- say a TypeScript ESM entry and a hand-written `.mjs` bin -- the two copies can silently fork if either chain breaks. A tiny "meta" test pins them together. From zfb-adapter-cloudflare, the worker wrapper string is imported once from `src/build.ts` and once via re-export from `bin/cli.mjs`, and a single assertion guards that they never diverge:
