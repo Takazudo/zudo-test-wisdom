@@ -172,6 +172,32 @@ Worked case: a drag-and-drop spec was quarantined because Playwright-WebKit neve
 
 </Warning>
 
+### Verifying a Re-placement or Fix
+
+Confirming the test mechanics are sound (the first of the two verifications above) has its own two traps — both surface specifically when deciding whether a quarantined test is ready to leave quarantine, or whether a re-placement into a different tier actually holds.
+
+**Burn-in proves determinism, not CI-capability.** Running a test N times in a loop locally (`--repeat-each=N` in Playwright) proves the test is deterministic *on the machine that ran it*. It does not prove the test is CI-capable — CI is a different environment, with a different filesystem layout, different environment variables, and different resource limits. Treat burn-in and a real CI run as two separate, both-required signals:
+
+- **Burn-in** (`--repeat-each=N`) — proves the test is not internally non-deterministic
+- **A real CI run** — proves the test tolerates the CI environment itself
+
+Worked case: during a quarantine-tag refactor, four tests passed a local burn-in N/N — genuinely deterministic — yet rendered deterministically-empty data the moment they ran inside the CI container. Local burn-in alone would have cleared them for un-quarantining; only the real CI run caught the gap.
+
+<Warning>
+
+**The simulated-environment fix trap.** Reproducing a CI-only failure locally by faking the suspected condition — an environment variable that simulates the CI-specific mechanism — can make a fix look confirmed when it actually validates a different mechanism than the real cause. Worked case: a fix was validated under a git-ownership simulation environment variable, then disproven by a real CI run — the simulation modeled a different mechanism than the one actually happening in CI. A fix validated only under a simulated environment condition must still be confirmed against the real environment before the test leaves quarantine.
+
+</Warning>
+
+### Dissolving an Overloaded Quarantine Tag
+
+An overloaded tag — a catch-all conflating multiple, unrelated reasons a test doesn't run cleanly (non-determinism, slowness, environment-dependence), running in no scheduled tier, carrying no tracking issues — is the graveyard state warned about in Step 3 above, grown large across an entire tag. Dissolving one back into meaningful tags is mechanical:
+
+1. **Split by meaning.** Replace the single catch-all with single-meaning tags: one for non-determinism (`@flaky`), one for slowness (`@heavy`), one for environment-dependence (`@gpu` / `@interactive` / `@macos-only`, per [Classify by Why It Is Heavy](#classify-by-why-it-is-heavy)).
+2. **Require a tracking issue per surviving tag.** No tag survives the split without an inline issue URL — the same paper-trail rule as `@flaky` above.
+3. **Clear determinism via burn-in.** For each test now tagged `@flaky`, run a local burn-in to confirm it is genuinely non-deterministic. A test that comes back deterministic was misfiled — it belongs under `@heavy` or an environment tag instead.
+4. **Let a real CI run decide CI-capability.** Burn-in alone cannot clear a test for return to the PR gate — see [Verifying a Re-placement or Fix](#the-quarantine-pipeline-for-flaky-verifying-a-re-placement-or-fix) above.
+
 ## Where to Go Next
 
 - [Execution Tiers](./execution-tiers.mdx) — the definitions of T0–T4 and when a project should adopt each one
