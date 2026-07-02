@@ -474,3 +474,65 @@ it("the built wrapper embeds the canonical parseRoute source", () => {
 ミラーテストは SSoT ガードの失敗ケースを裏返したものです。ガードが 2 つのコピーを固定して分岐を防ぐのに対し、ミラーテストはピンのない 2 つ目のコピーを作ってしまいます。テストファイルへ関数をコピーしそうになったら、import する（必要なら先に抽出する）かピンで固定する -- コピーを宙に浮かせたままにしてはいけません。
 
 </Tip>
+
+## ジェネレーターとホストのロックステップテスト
+
+上の「[信頼できる唯一の情報源を守る](#信頼できる唯一の情報源を守る)」は、重複した*値*を 1 つ固定するものでした。同じリスクは、プロジェクトが*生きたホスト実装*を追随しなければならないジェネレーターやスキャフォールダーを提供している場合にスケールします -- ジェネレーター側にコピーされた機能リスト、オプションセット、あるいは CLI サーフェス全体は、リリースを重ねるごとにホストの実際のエクスポートから少しずつ乖離しえます。そして、誰か他の人の手元で生成済みプロジェクトが壊れるまで、何も失敗しません。この隙間を塞ぐ 2 つのテスト形状を紹介します。これらはシェルベースのテンプレートドリフトガードのテストレベルでの補完でもあります（下記の補足を参照）。
+
+### ラウンドトリップテスト：生成 → 再パース → 比較
+
+境界の**両側**を同じテストで import します：ホストの生きた設定ロジックと、ジェネレーターの実際の CLI パーサーです（どちらの手書きスタブでもありません）。生きたホストの状態から CLI コマンドを組み立て、ユーザーのシェルが行うのと同じ方法でそのコマンドを再パースし、ラウンドトリップが信頼できる情報源の値に戻ることをアサートします：
+
+```typescript
+// tests/roundtrip.test.ts
+import { describe, it, expect } from "vitest";
+import { buildFeatureFlags } from "../../host/src/config/feature-flags.js";
+import { buildCliCommand } from "../src/generator.js";
+import { parseCliArgs } from "../src/cli-parser.js";
+
+describe("generator roundtrip", () => {
+  it("re-parsing a generated command reproduces the host's live flags", () => {
+    // Source of truth: the host's real config function, not a copied list.
+    const sourceOfTruth = buildFeatureFlags({ tier: "pro" });
+
+    const command = buildCliCommand(sourceOfTruth);
+    const reparsed = parseCliArgs(command);
+
+    expect(reparsed).toEqual(sourceOfTruth);
+  });
+});
+```
+
+<Tip>
+
+このテストはジェネレーターの*実際の*パーサーを import しています。モックではありません。アサーションを通すためにパース処理を再実装したラウンドトリップテストは、上のミラーテスト・アンチパターンが別の姿を取ったものにすぎません -- 固定しているのは手書きコピーのパーサーであって、ユーザーが実際に実行するものではないからです。
+
+</Tip>
+
+### 同期リストテスト：パッケージ境界をまたぐ列挙を固定する
+
+ラウンドトリップテストが捕捉するのは壊れた変換です。ジェネレーターが単に更新し忘れた列挙 -- 機能リスト、テンプレートレジストリ、オプションセット -- は捕捉できません。そのためには、ジェネレーターのリストがホストの生きたエクスポートと一致することを直接アサートします：
+
+```typescript
+// tests/sync-list.test.ts
+import { describe, it, expect } from "vitest";
+import { AVAILABLE_TEMPLATES } from "../../host/src/config/templates.js";
+import { GENERATOR_TEMPLATE_CHOICES } from "../src/template-choices.js";
+
+describe("generator/host template sync", () => {
+  it("the generator offers exactly the host's live template list", () => {
+    // Whole configuration surface, not a single constant -- this is the
+    // SSoT guard generalized across a package boundary.
+    const hostIds = AVAILABLE_TEMPLATES.map((t) => t.id).sort();
+    const generatorIds = GENERATOR_TEMPLATE_CHOICES.map((c) => c.id).sort();
+
+    expect(generatorIds).toEqual(hostIds);
+  });
+});
+```
+
+<Warning>
+
+テンプレートファイルのコピーを、包括的な許可リスト（ブランケットアローリスト）でドリフトチェックから除外してはいけません。許可リストが証明するのは、リストされたファイルがかつてコピーとして認識されていたことだけです -- 今日のコピーが今日のソースとまだ一致しているかどうかについては何も語りませんし、後から追加された新しいコピーはタダでその除外を引き継いでしまいます。正規化した差分チェック（パッケージ名やバージョンなど、正当に変わることが期待される値だけを取り除く）か、さらに強力には、テンプレート自身のテストスイートをインストール済みパッケージに対して実行する方法を選んでください。どちらも、コピーが実際にドリフトすれば失敗します -- 包括的な許可リストは決して失敗しません。
+
+</Warning>
