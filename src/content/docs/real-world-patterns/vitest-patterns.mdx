@@ -336,7 +336,7 @@ A Preact/compat project that tests against a precompiled island runtime -- or an
 
 ### Wall 1: the bare `react` alias swallows `react/jsx-runtime`
 
-Symptom: `Failed to resolve import "react/jsx-runtime"` (or `jsx-dev-runtime`) even though `react` is aliased. In array form, vite's `resolve.alias` is first-match-wins -- order the entries most-specific-first, and note the jsx runtimes map to `preact/jsx-runtime`, not `preact/compat`:
+Symptom: `Failed to resolve import "react/jsx-runtime"` (or `jsx-dev-runtime`) even though `react` is aliased. In array form, vite's `resolve.alias` is first-match-wins -- order the entries most-specific-first, and note the jsx runtimes map to Preact's own jsx runtimes (`preact/jsx-runtime`, `preact/jsx-dev-runtime`), not `preact/compat`:
 
 ```typescript
 // vitest.config.ts -- resolve.alias is TOP-LEVEL vite config, not under `test`
@@ -344,7 +344,7 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: "react/jsx-runtime", replacement: "preact/jsx-runtime" },
-      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-dev-runtime" },
       { find: "react-dom", replacement: "preact/compat" },
       // exact-match regex: immune to reordering, never swallows subpaths
       { find: /^react$/, replacement: "preact/compat" },

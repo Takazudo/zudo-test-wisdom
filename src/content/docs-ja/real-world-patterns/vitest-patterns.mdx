@@ -336,7 +336,7 @@ it("falls back to a plain DOM swap when the API is absent", async () => {
 
 ### 壁 1：素の `react` エイリアスが `react/jsx-runtime` を飲み込む
 
-症状：`react` をエイリアスしているのに `Failed to resolve import "react/jsx-runtime"`（または `jsx-dev-runtime`）が出る。配列形式の vite `resolve.alias` は最初にマッチしたものが勝つため、エントリは「具体的なものから先」の順に並べます。また jsx ランタイムのマッピング先は `preact/compat` ではなく `preact/jsx-runtime` である点にも注意：
+症状：`react` をエイリアスしているのに `Failed to resolve import "react/jsx-runtime"`（または `jsx-dev-runtime`）が出る。配列形式の vite `resolve.alias` は最初にマッチしたものが勝つため、エントリは「具体的なものから先」の順に並べます。また jsx ランタイムのマッピング先は `preact/compat` ではなく Preact 自身の jsx ランタイム（`preact/jsx-runtime`、`preact/jsx-dev-runtime`）である点にも注意：
 
 ```typescript
 // vitest.config.ts -- resolve.alias is TOP-LEVEL vite config, not under `test`
@@ -344,7 +344,7 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: "react/jsx-runtime", replacement: "preact/jsx-runtime" },
-      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-dev-runtime" },
       { find: "react-dom", replacement: "preact/compat" },
       // exact-match regex: immune to reordering, never swallows subpaths
       { find: /^react$/, replacement: "preact/compat" },
