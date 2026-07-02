@@ -194,8 +194,9 @@ name: exam
 
 on:
   schedule:
-    # Nightly at 03:00 UTC -- pick a quiet hour for your timezone
-    - cron: "0 3 * * *"
+    # Off-minute on purpose: GitHub delays -- and under load, DROPS -- runs
+    # queued at the top of the hour. Nightly ~03:43 UTC.
+    - cron: "43 3 * * *"
   # On-demand runs for pre-merge escalation (see below)
   workflow_dispatch:
 
@@ -261,13 +262,17 @@ jobs:
 1. **夜間の同一スイート再実行。** PRゲートが実行するのと全く同じCIセーフなスイートを、そのまま再実行します。このレーンのために新しいテストを書くことはありません -- その価値は純粋にメインブランチのドリフトネットとしてのものであり、個々のPRとは無関係な理由でマージの間に退行したものを捕まえます。
 2. **レジストリ統合レーン。** レジストリからの実際の`pnpm install`に続けて、公開されたパッケージをエンドユーザーと同じように消費するスキャフォールドプロジェクトのフルビルドを行います。実際に外部世界を運動させるのはこのレーンです：PRゲートのlockfile固定インストールでは、欠落したエクスポート、パッケージングのバグ、最小スキャフォールド上での解決不能な依存関係を観測できません -- これらはインストールが生きたレジストリに対して解決されたときにしか表面化しないからです。
 
+レジストリ統合レーンは、一連の[公開時ゲート](./publishing-pipeline.mdx)のスケジュール版のいとこです：メタパッケージ + `optionalDependencies`経由のプラットフォーム別バイナリとして出荷されるCLIにおいて、これらのゲートは公開パイプラインそのもの -- tarballの伝播、ファイルモード、冪等な公開 -- を、リリースのたびに1回、すべてのプラットフォームにわたって検証します。このレーンはレジストリ側のリグレッションを夜間に、1つのプラットフォーム上で捕まえます。あちらのゲートは公開側のリグレッションを即座に、すべてのプラットフォームで捕まえます。
+
 ```yaml
 # .github/workflows/drift-net.yml
 name: drift-net
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    # Off-minute on purpose: GitHub delays -- and under load, DROPS -- runs
+    # queued at the top of the hour. Nightly ~04:29 UTC.
+    - cron: "29 4 * * *"
   workflow_dispatch:
 
 jobs:
@@ -505,6 +510,63 @@ while IFS=$'\t' read -r STATUS TITLE; do
   gh issue comment "$ISSUE_NUM" --body "Quarantine telemetry: **${VERDICT}** -- ${RUN_URL}"
 done
 ```
+
+### 失敗許容（allowed-to-fail）は `continue-on-error` ではなくキャプチャした終了コードで実現する
+
+隔離レーンは*本来*赤を許容するものです -- `@flaky` テストが失敗するのは想定内であり、このレーンの仕事はその失敗をトラッキングIssueに記録することであって、何かをブロックすることではありません。「このステップは失敗してよい」を表す一番わかりやすい方法は `continue-on-error: true` ですが、これは罠です。
+
+<Warning>
+
+**`continue-on-error: true` と `if: failure()` の組み合わせは、死んだ起票ステップです。** ステップレベルの `continue-on-error` は、ステップの `steps.<id>.outcome` を `failure` のまま保ちますが、`conclusion` を `success` に書き換えます。するとジョブは成功として結了するため、後続の `if: failure()` は決して真になりません -- 起票ステップはデッドコードになり、レーンは緑を表示したまま腐っていきます。
+
+</Warning>
+
+```yaml
+# BROKEN: the job concludes success, so `if: failure()` can never be true --
+# the filing step below is dead code and the lane rots while showing green
+- name: Run quarantine lane
+  continue-on-error: true
+  run: pnpm test:e2e --grep "@flaky" --pass-with-no-tests
+
+- name: File or update the tracking issue
+  if: failure()          # never fires
+  run: bash scripts/file-exam-issue.sh
+```
+
+代わりに終了コードをキャプチャし、起票のパスを*その*終了コードから駆動して、ステップは意図的に緑で終わらせます：
+
+```yaml
+- name: Run quarantine lane (allowed-to-fail BY DESIGN)
+  id: quarantine
+  env:
+    PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report/report.json
+  run: |
+    set +e
+    pnpm test:e2e --grep "@flaky" --pass-with-no-tests --reporter=list,json
+    rc=$?
+    set -e
+    echo "rc=$rc" >> "$GITHUB_OUTPUT"
+    # Deliberate: this lane is green-by-design. The captured rc -- not the
+    # job status -- drives the filing step below.
+    exit 0
+
+- name: Post per-test telemetry (pass AND fail)
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: bash scripts/quarantine-telemetry.sh
+
+- name: File or update the lane tracking issue
+  if: steps.quarantine.outputs.rc != '0'
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: bash scripts/file-exam-issue.sh
+```
+
+これを誠実に保つための3つのルール：
+
+- **依拠しているセマンティクスを明示する。** ステップレベルの `continue-on-error` は `steps.<id>.outcome` を `failure` のまま保ちつつ、`conclusion` を `success` にします。そして `if: failure()` はジョブのステータス（`conclusion` に従う）を読みます。そのため終了コードのキャプチャには、YAMLネイティブな代替手段があります：`continue-on-error: true` を残し、ステップに `id` を付け、後続ステップを `if: steps.<id>.outcome == 'failure'` でキーイングするのです。どちらでも動きます -- 罠は具体的に `continue-on-error` と `failure()` の**組み合わせ**にあります。（ジョブレベルの `continue-on-error` なら `if: failure()` は動き続けますが、赤を許容すべきレーンの実行ごとに赤い ✗ を描いてしまいます -- 人々がそれを無視することを学習するほどにノイジーです。）
+- **緑になるのが設計であることは、記録された決定でなければなりません。** `exit 0` に付けるインラインコメント -- 「allowed-to-fail BY DESIGN, rc drives the filing step」 -- は必須です。テスト実行直後の裸の `exit 0` は、さもなければバグに見え、いずれ誰かがレーンを緑に保っている行を削除して「修正」してしまいます。
+- **起票のパスが発火することを -- 一度 -- 証明する。** ブランチ上で隔離されたテストを壊し、`gh workflow run` でそのレーンを実行し（スケルトンにはすでに `workflow_dispatch` があります）、トラッキングIssueに実際にコメントが付くことを確認します。一度も発火したことのない起票のパスは飾りです -- 上の「読まれないアノテーション」と同じ罠です。
 
 ### タグとissueを紐付けるガード
 

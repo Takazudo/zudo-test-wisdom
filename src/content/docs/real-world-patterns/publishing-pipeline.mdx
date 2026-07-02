@@ -1,0 +1,141 @@
+---
+title: Publishing-Pipeline Verification for Platform-Binary npm Packages
+description: Publish-time gates for the esbuild-style meta + per-platform optionalDependencies layout -- three failure modes the nightly registry drift net cannot see.
+sidebar_position: 12
+---
+
+A CLI shipped the esbuild way -- one meta package plus a set of per-platform binary packages resolved through `optionalDependencies` -- has a verification surface that neither the PR gate nor the nightly registry drift net can see: **the publish pipeline itself**. The PR gate installs from a lockfile, so it never resolves against the live registry. The [nightly drift net](./scheduled-re-exam.mdx) does resolve against the registry, but it runs once a day, on one platform, and it only ever exercises install-and-build. Between them sits an unverified gap -- `pack`, `publish`, and CDN propagation -- where three distinct failure modes live, each silent, each a property of the npm registry and client rather than of any one project.
+
+This page documents those three failure modes and the publish-time gate that closes each. The patterns are the standard ones (esbuild, swc, Biome, and Turborepo all ship binaries this way), so the gates generalize to any project distributing platform binaries through npm.
+
+## The Package Shape
+
+The layout is a single meta package that users install (`my-cli`) plus one package per target triple (`my-cli-linux-x64-gnu`, `my-cli-darwin-arm64`, `my-cli-win32-x64-msvc`, and so on). Each platform package carries only the prebuilt binary for its triple. The meta package lists every platform package under `optionalDependencies`, and at install time npm resolves only the entries whose `os`/`cpu` fields match the current machine -- so a Linux user downloads the Linux binary and nothing else.
+
+The word **optional** is the whole problem. npm's semantics for an `optionalDependency` are "install it if you can; if anything goes wrong, skip it and exit successfully." That is exactly the behavior you want when a package genuinely does not apply to this platform -- and exactly the behavior that turns every *distribution* bug into a **silent** one. A tarball that fails to download, a binary that ships with the wrong mode, a version that half-published -- none of these make `npm install` fail. They all make it exit `0` with the binary quietly absent or unusable, and the failure surfaces later, at the user's first invocation, far from the pipeline that caused it.
+
+<Warning>
+
+"Optional = skippable on failure" means the install step can never be your gate. A green `npm install` on the meta package proves the metadata resolved, not that the binary arrived and runs. Every gate below exists because the one signal you would reach for first -- the install exit code -- is structurally blind to these bugs.
+
+</Warning>
+
+## Failure Mode 1: Silent Skip on Unpropagated Tarballs
+
+Registry **metadata** propagates through the CDN faster than large binary **tarballs**. On a project whose per-platform tarballs run ~78 MB, the version metadata becomes resolvable within seconds of publish while the tarball itself is still replicating across CDN edges. In that window, a client that resolves the `optionalDependency` and then fails to fetch the tarball hits npm's "optional = skippable" path: `npm install` exits `0`, the binary is simply absent, and the user's first invocation fails at runtime -- a broken release that looks green from the pipeline's side.
+
+A post-publish smoke test that merely installs the meta package proves nothing here until the tarball is actually fetchable, and even then it only ever proves the *runner's own* platform. The gate is to force a real tarball fetch for **every** platform package before declaring the release good:
+
+`npm pack --dry-run <platform-pkg>@<dist-tag>` forces a genuine tarball download rather than mere metadata resolution, so it fails until the tarball has propagated. Poll it with backoff, for every platform package -- not just the smoke runner's arch -- placed *between* the publish job and the clean-room smoke install:
+
+```yaml
+# .github/workflows/release.yml (excerpt) -- runs AFTER the publish job and
+# BEFORE the clean-room smoke install, gating on real tarball fetchability.
+wait-for-propagation:
+  needs: publish
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    # Probe EVERY platform package, not just the smoke runner's arch.
+    # `npm pack --dry-run` forces a real tarball fetch -- metadata resolving
+    # is not enough; the ~78 MB tarball itself must be downloadable.
+    - name: Wait for every platform tarball to propagate
+      run: |
+        TAG="${{ inputs.dist_tag }}"
+        for pkg in \
+          my-cli-linux-x64-gnu \
+          my-cli-darwin-x64 \
+          my-cli-darwin-arm64 \
+          my-cli-win32-x64-msvc; do
+          for attempt in $(seq 1 30); do
+            if npm pack --dry-run "${pkg}@${TAG}" >/dev/null 2>&1; then
+              echo "ok: ${pkg} tarball is fetchable"
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              echo "::error::${pkg}@${TAG} tarball never propagated after 30 attempts"
+              exit 1
+            fi
+            sleep $(( attempt < 10 ? attempt * 5 : 60 ))
+          done
+        done
+
+smoke-clean-room:
+  needs: wait-for-propagation
+  runs-on: ${{ matrix.os }}
+  strategy:
+    matrix:
+      os: [ubuntu-latest, macos-latest, windows-latest]
+  # ...npx create-my-cli@<tag> in a temp dir, build, assert output
+```
+
+<Danger>
+
+Probing only the runner's own arch is the trap that looks fixed but is not. A release job on `ubuntu-latest` that probes only `my-cli-linux-x64-gnu` ships darwin and win32 users an unverified tarball every time -- their propagation window is never observed. The gate has to loop over every platform triple you publish, or it is a gate for one platform wearing the costume of a gate for all of them.
+
+</Danger>
+
+## Failure Mode 2: Pack Strips the Exec Bit
+
+`pnpm pack` normalizes file modes to `0644`, silently stripping the `0755` executable bit off a shipped binary. The install succeeds, the file lands on disk, and spawning it fails with `EACCES` -- another green pipeline, another runtime-only failure. There are two gates here, and they work together.
+
+First, **publish platform packages with `npm publish`**, which preserves the source file modes. Reserve `pnpm` for the packages that actually need its `workspace:*` rewriting; the platform packages carry a single prebuilt binary and no workspace protocol dependencies, so they gain nothing from `pnpm publish` and lose the exec bit to it.
+
+Second, assert the mode inside the packed tarball *before* publishing, so the constraint is enforced by CI rather than remembered by whoever last touched the release script:
+
+```bash
+# CI gate: binary must be 0755 (493 decimal) inside the tarball
+MODE=$(cd "$pkg_dir" && npm pack --dry-run --json 2>/dev/null \
+  | jq -r --arg b "$BIN_NAME" '.[] | .files[] | select(.path == $b) | .mode')
+if [[ "$MODE" != "493" ]]; then
+  echo "::error::${pkg_dir}: binary mode is '${MODE}', expected 493 (0755). Was pnpm publish used instead of npm publish?"
+  exit 1
+fi
+```
+
+The `493` is `0755` in decimal -- the mode as `npm pack --json` reports it. Run this gate over every platform package **except the Windows ones**: execute bits are not meaningful on Windows and tar may report a different value there, so asserting `493` on a win32 package would fail the gate for a non-problem.
+
+<Tip>
+
+The value of the pre-publish assertion is that it fails *loudly on a future regression*. If someone later flips the release script back to `pnpm publish` -- for consistency, or by copy-paste -- the mode gate goes red before anything reaches the registry, and the error message names the exact cause. A convention that lives only in a maintainer's head is one refactor away from being lost; a CI gate is not.
+
+</Tip>
+
+## Failure Mode 3: The Double-PUT Lost-ACK Race
+
+npm's publish is an HTTP PUT, and a network blip can lose the success **ACK** after the registry has already stored the version. The client, seeing no acknowledgement, retries the PUT -- and the retry gets `403 ... cannot publish over the previously published versions` (`EPUBLISHCONFLICT`). The publish *succeeded*; it only *looks* failed. Under `set -e`, a multi-package release then dies mid-list -- publish 7 of 9 packages, hit the phantom conflict on the 8th, and the job aborts. Worse, it cannot simply be re-run: every already-published package now 403s on the second attempt, so a naive retry of the whole list fails immediately.
+
+Two gates in the publish script fix this, and both belong per package:
+
+- **Idempotent.** Before publishing a package, check whether `npm view <name>@<version>` already resolves; if it does, skip it. This makes a partially-completed release re-runnable to completion -- the second run walks past the packages that already landed and finishes the rest.
+- **Conflict-tolerant.** When a publish fails, match the *specific* conflict error text (plus a post-failure registry recheck with backoff to confirm the version really is up there), and tolerate that one case as a skip. Fail hard on everything else -- auth errors, validation errors, a genuine hard network failure. Matching a bare `403`/`E403` is too broad; it would swallow real permission failures.
+
+```bash
+is_publish_conflict() {
+  printf '%s' "$1" | grep -qiE 'cannot publish over the previously published versions|EPUBLISHCONFLICT'
+}
+# per package: precheck registry → publish → on failure, is_publish_conflict OR
+# registry recheck (N attempts, backoff) → tolerate as skip; anything else → fail
+```
+
+Publish **one package per invocation** so a mid-list conflict can never abort the rest of the release. Combined with the idempotent precheck, this makes the whole publish a set of independent, re-runnable steps rather than one fragile sequence that a single phantom 403 can wedge.
+
+<Warning>
+
+This one is not a test -- it is a robustness property of the publish script. The nightly drift net exercises install-and-build against the registry; it can never observe a lost-ACK race, because that race happens *inside the publish step*, before anything is installable. No amount of consumer-side testing reaches it. The gate has to live in the publisher.
+
+</Warning>
+
+## Where These Sit in the Tier Model
+
+These are **release-pipeline gates**: they run once per publish, and they alert or block right at the moment the bug would otherwise ship. That makes them a different animal from the [nightly registry drift net](./scheduled-re-exam.mdx), which runs on a schedule, on one platform, and exercises install-and-build. The drift net is the scheduled cousin of these gates -- it catches a registry-side regression eventually and on one arch; these gates catch a *publish-side* regression immediately and across every platform. Failure mode 3 makes the boundary concrete: the drift net structurally cannot see a lost-ACK race at all, because that failure happens inside the publish step, before there is anything to install.
+
+The post-publish clean-room smoke -- `npx create-my-cli@<tag>` in a fresh temp directory, build a scaffold, assert the output -- sits in a third position again. It is an **alerting guard, not a gate**: by the time it runs, publish has already happened, so it cannot *prevent* a bad release, only detect one that already shipped. Wire its failures into the same [one-tracking-issue-per-workflow](./scheduled-re-exam.mdx) pattern the drift net uses, so a broken release opens exactly one tracking issue and closes it when the next release goes green.
+
+<Info>
+
+Read the three positions as a sequence in time. The pre-publish gates (mode 2, mode 3) block *before* the registry is touched. The propagation poll (mode 1) blocks *between* publish and the smoke install. The clean-room smoke *alerts after* the release is live. Each covers a window the others cannot, and none of them is the install exit code -- which, for this package shape, is blind to all three.
+
+</Info>

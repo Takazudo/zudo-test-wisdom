@@ -53,6 +53,10 @@ The five causes of E2E flakiness (timing waits, `networkidle` misuse, animations
 
 Operating heavy, platform-bound test lanes on a schedule — the CI re-exam workflow, deduped failure issue filing, on-demand pre-merge dispatch, and the local night exam with agent triage.
 
+### [Publishing-Pipeline Verification](./publishing-pipeline.mdx)
+
+Publish-time gates for platform-binary npm packages (esbuild-style meta package + per-platform `optionalDependencies`) — catching silent skips on unpropagated tarballs, stripped executable bits, and the double-PUT publish race that the nightly registry drift net cannot see.
+
 ## Common Theme
 
 Across all these projects, one theme emerges: **the testing approach must match the deployment target**. A web app needs browser-level testing. A CLI tool needs output verification. A Tauri app needs WebKit-specific testing. There is no universal test setup -- only appropriate test setups for specific contexts.

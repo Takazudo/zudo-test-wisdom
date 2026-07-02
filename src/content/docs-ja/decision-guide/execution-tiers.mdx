@@ -42,6 +42,57 @@ sidebar_position: 4
 
 T0とT1は、正当化の必要なく、すべてのプロジェクトが持ちます。T0はフィードバック速度です -- エージェントが実装中に常時実行するもの。T1は**正式なゲート**です：PRはrequired checksがグリーンになればマージ可能であり、required checksの外にあるものはマージをブロックしません。T1より上のすべては、T1に取って代わるためではなく、T1に仕えるために存在します。
 
+#### ゲートを宣言ではなく強制にする
+
+T1を「正式なゲート」と呼べるのは、マージとプッシュを実際にブロックする強制レイヤーが存在する場合だけです。この戦略ドキュメントの中だけに存在するゲートは、規約であって制御ではありません：赤いチェックのあるPRはマージ可能なままで、`main`への直接プッシュもブロックされないままです。強制レイヤーが存在することを検証してください -- 思い込みではなく、APIコール1つで：
+
+```sh
+gh api repos/{owner}/{repo}/rulesets                      # [] means no rulesets
+gh api repos/{owner}/{repo}/branches/main/protection      # 404 means no branch protection
+```
+
+両方とも空で返ってくるなら、「正式なゲート」は紳士協定にすぎません。デフォルトブランチにブランチルールセットを設定して直しましょう（ルールセットが現行のメカニズムで、クラシックなブランチ保護はレガシーなものです）：pull requestとrequired status checksを必須にします。
+
+**ルールセットを追加するときの3つの落とし穴チェックリスト：**
+
+1. **required status checksは直接プッシュもブロックする。** `main`に直接プッシュされたコミットは、プッシュ時点で完了したチェックを持たないため拒否されます -- これは、バージョンバンプのコミットを`main`に直接プッシュするリリース自動化を壊します。明示的な`bypass_actors`エントリを設定し、その後**実際のテストプッシュでバイパスを検証**してください（本物のリリース経路を通したno-opコミット）。
+2. **パスフィルタされたチェックをrequiredにしてはいけない。** `on.pull_request.paths:`を持つワークフローは、マッチしないPRでは決して走らないため、そのPRは「Expected -- waiting for status」で永遠に待ち続け、決してマージできません。requiredにできるのは常に走るチェックだけです。パスフィルタされたチェックはnon-requiredのままにします（それでもルール7により、その赤は作者にとってブロッキングです）。
+3. **正確なcheck-run名を最近マージされたPRから列挙する -- 推測しない。** required checksは正確なcheck-run名（ジョブ名、またはその`name:`オーバーライド -- ワークフロー名ではない）で一致します。推測やタイポした名前は、落とし穴2とまったく同じように「Expected」でハングします。推測せず、本物の名前を取得してください：
+
+```sh
+gh pr view <recent-merged-PR> --json statusCheckRollup --jq '.statusCheckRollup[].name' | sort -u
+```
+
+`gh api -X POST repos/{owner}/{repo}/rulesets --input ruleset.json` でルールセットを作成します：
+
+```json
+{
+  "name": "main gate",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    { "type": "pull_request",
+      "parameters": { "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false } },
+    { "type": "required_status_checks",
+      "parameters": {
+        "required_status_checks": [ { "context": "health" } ],
+        "strict_required_status_checks_policy": false } }
+  ],
+  "bypass_actors": [
+    { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+  ]
+}
+```
+
+正確な`context`の値は落とし穴3から得られ、`bypass_actors`エントリは落とし穴1のテストプッシュが検証するものです。
+
+ルール7（「赤いチェックは作者をブロックする」）とルールセットは補完し合うレイヤーであり、互いの代替ではありません。規約レイヤーはPRを作成したエージェントを統制し、強制レイヤーはマージボタンや直接プッシュを含む、それ以外のすべての人・すべてのものを統制します。規約レイヤーしかない戦略にはゲートがありません -- ルール7については[必須テスト行動](./required-behavior.mdx)を参照してください。
+
 ### T2: フルE2E分離 -- T1があふれたときのみ
 
 トリガーは具体的です：T1が約10分の予算を超えたとき。それでも、分離したe2eスイートはPR上でrequiredのまま維持するのが望ましいです。シャーディングに手を伸ばす前に、ランナーのワーカー数をチューニングしてください -- シャードはおおよそ100以上のテスト**かつ**30分超のランタイムになってからです。
@@ -172,6 +223,8 @@ fi
 
 - **リトライで通ったことは、成功ではなくトリアージのシグナルです。** そのテストは自分が非決定論的であると告げています。記録し、修正を予定してください。
 - **2回を超えるリトライはにおいます。** その時点で、非決定性を修正する代わりに計算資源で支払っている状態です。
+
+プレーンな `cargo test` では、この予算は実装不可能です — 組み込みのハーネスにはリトライの仕組みがまったくありません。Rustスイートが `retries`・pass-on-retryのテレメトリ・テストごとのタイムアウトをどう得るかは、[nextestへの移行レシピ](../real-world-patterns/cargo-nextest-migration.mdx)を参照してください。
 
 ## 移行ルール
 
