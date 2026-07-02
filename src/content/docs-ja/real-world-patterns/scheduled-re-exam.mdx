@@ -60,6 +60,124 @@ JSのカット順序と同じ原理で、軸だけが違います：あちらは
 
 </Tip>
 
+## b4pushとCI間のガードマニフェスト・パリティ
+
+### 失敗モード：ガードセットのドリフト
+
+上記の分割は、`b4push`とCIを同じ仕事に対する2つの予算として扱います -- しかし、それぞれが実際に*どのライトウェイトなゲート*を実行しているかについては何も語りません。実際には両者は独立してドリフトしていきます：締切のプレッシャーの中で誰かがプッシュ前スクリプトに新しいlintルールを追加し、CIワークフローへの反映を忘れる、あるいはCIジョブがリネームされ、対応する`b4push`ステップが静かに何にもマッチしなくなる、といった具合です。どちらの側もそれ単体では間違っていません -- プッシュ前スクリプトは相変わらず実行され、CIワークフローは相変わらず通ります -- そのため何も壊れていないように見えます。静かに消えたゲートは、その時点からバイパス可能になります：ローカルでは二度と実行されず（誰もb4pushの行を再追加しない）、CIでは二度とrequiredにならない（誰もワークフローステップを再追加しない）からです。修正は、より大きなプッシュ前スクリプトやより大きなワークフローファイルではありません。「両サーフェスに配線されていること」を、手作業の習慣ではなく、チェック可能な不変条件として扱うメカニズムです。
+
+### 1つのマニフェストエントリ、2つのサーフェス
+
+各ライトウェイトなガードは、マニフェスト内にちょうど1つのエントリを持ち、そのエントリは**2つの照合可能な形式**を持ちます：`ciNeedle` -- CIワークフローYAML内で検索される部分文字列 -- と、`scriptToken` -- プッシュ前スクリプトのマーク付きガード領域（後述）内で検索される部分文字列です。マニフェストは「このガードは両サーフェスに存在しなければならない」という単一の真実の源です。2つの形式が存在するのは、ワークフローステップとスクリプトの行が異なる種類のテキストであり、メタチェックがそれぞれの側で検索するリテラルな部分文字列を必要とするからです。
+
+```bash
+# scripts/guard-manifest.sh -- one line per guard: id | ciNeedle | scriptToken
+# ciNeedle is matched against .github/workflows/*.yml; scriptToken against the
+# guards region of scripts/b4push.sh. Both must be present for a guard to be wired.
+GUARD_MANIFEST=(
+  "lint|pnpm lint|pnpm lint"
+  "typecheck|pnpm check|pnpm check"
+  "format|pnpm format:md -- --check|pnpm format:md -- --check"
+)
+```
+
+### マーク付きガード領域
+
+`b4push`は手作業でメンテナンスされるスクリプトであり、パリティ契約の一部ではないセットアップ、ロギング、ステップ（例えば後述の重いビルドステップ）も含んでいます。ファイル全体をスキャンする代わりに、メタチェックは明示的にマークされた領域の中だけを見ます：
+
+```bash
+#!/usr/bin/env bash
+# scripts/b4push.sh
+set -euo pipefail
+
+# >>> guards:begin -- every scriptToken in scripts/guard-manifest.sh must appear here
+pnpm lint
+pnpm check
+pnpm format:md -- --check
+# >>> guards:end
+
+pnpm build
+```
+
+このマーカーは契約を狭く保ちます：`guards:begin`/`guards:end`の外にあるステップは、マニフェストエントリなしに自由に存在でき、メタチェックはどの行をカウントすべきか推測する必要がありません。
+
+### メタチェックは両サーフェスで実行される
+
+メタチェックスクリプトはマニフェストを読み込み、CIワークフローファイルを各`ciNeedle`でグレップし、ガード領域を各`scriptToken`でグレップして、明示的に許可リストに載っていない（次のセクション）エントリがどちらかの側で欠けている瞬間に失敗します。これは`b4push`のステップとしても、requiredなCIジョブとしても**両方**実行されます -- そのため、ドリフトはどちらに持ち込まれたものであっても、誰かがテストを覚えていた側だけでなく捕まえられます：
+
+```bash
+#!/usr/bin/env bash
+# scripts/guard-parity-check.sh -- fails if a manifest guard is missing from either surface
+set -euo pipefail
+
+source scripts/guard-manifest.sh
+source scripts/guard-allowlist.sh
+
+GUARDS_REGION="$(sed -n '/# >>> guards:begin/,/# >>> guards:end/p' scripts/b4push.sh)"
+CI_YAML="$(cat .github/workflows/*.yml)"
+
+FAIL=0
+for entry in "${GUARD_MANIFEST[@]}"; do
+  IFS='|' read -r id ci_needle script_token <<< "$entry"
+
+  if ! grep -qF -- "$script_token" <<< "$GUARDS_REGION"; then
+    echo "::error::guard '$id' is in the manifest but missing from b4push's guards region"
+    FAIL=1
+  fi
+
+  is_allowed=0
+  for allowed in "${GUARD_CI_ALLOWLIST[@]}"; do
+    [ "$allowed" = "$id" ] && is_allowed=1
+  done
+
+  if [ "$is_allowed" -eq 0 ] && ! grep -qF -- "$ci_needle" <<< "$CI_YAML"; then
+    echo "::error::guard '$id' is in the manifest but missing from CI, and not allowlisted"
+    FAIL=1
+  fi
+done
+
+exit "$FAIL"
+```
+
+両サーフェスへの配線は、1行の追加を2箇所行うだけです：`b4push.sh`の`guards:begin`/`guards:end`領域の中（これにより、汚れたチェックアウトでもローカルでドリフトを捕まえられます）と、CIワークフローの独立したステップとしてです：
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+- name: Guard-manifest parity check
+  run: bash scripts/guard-parity-check.sh
+```
+
+### 許可リストには理由が必要
+
+あるガードには正当にCI側の対応物が存在しないことがあり得ます -- 例えばスクリプト専用の利便性チェックなど -- しかしそれは誰かが下した決定でなければならず、誰も気づかなかった見落としであってはいけません。許可リストは別ファイルであり、すべてのエントリはその直前の行に必須の`# reason:`コメントを持ちます。理由のない許可リストは、このメカニズム全体が捕まえようとしているドリフトと見分けがつきません。そのため、理由のないエントリは欠落しているのと同じものとして扱います：
+
+```bash
+# scripts/guard-allowlist.sh -- guards intentionally exempt from the CI surface
+# Every entry MUST carry a "# reason:" comment on the line above it --
+# an allowlist entry without one is the same silent hole this mechanism exists to close
+GUARD_CI_ALLOWLIST=(
+  # reason: covered by CI's separate full-install `build` job (see below),
+  # not a substring-matchable script step
+  "build"
+)
+```
+
+<Warning>
+
+**理由のない許可リストエントリはメカニズム全体を無効化します。** 許可リストが存在するのは、CI免除を記録された決定にするためであって、抜け道にするためではありません。メタチェック自体が`# reason:`コメントを強制していないなら、`guard-parity-check.sh`の中にもう1つ、安価なチェックとして追加してください -- 誰でも裸のidで拡張できる許可リストは、変装したドリフトです。
+
+</Warning>
+
+### 重いステップは意図的にマニフェストの外に置く
+
+マニフェストがカバーするのは**ライトウェイトで部分文字列照合可能なガード**だけです -- lint、型チェック、フォーマットチェックなど、両サーフェスで単一のコマンドになる類のステップです。`build`、フルテスト実行、検証は、純粋なスクリプトステップとしてではなく、独立したフルインストールのCIジョブとして実行されるのが正当です：それらは独自の依存関係インストール、独自のタイムアウト、時には独自のランナーを必要とします。これらをマニフェストの`ciNeedle`/`scriptToken`の形に押し込めるのは間違った契約でしょう -- CIジョブは、ワークフローステップの`run:`行のようにYAMLファイル内の部分文字列ではないからです。この非対称性は意図的なものであり、それこそが上記の`build`許可リストエントリが記録していることです：見落としでマニフェストから漏れているのではなく、重いステップが別種のものだから除外されているのです。
+
+<Tip>
+
+このパターンは、上記の`b4push`/`exam`分割に対して純粋に追加的です：どちらのコマンドが何を実行するかは変えず、その分割が両サーフェスで共有されていると前提しているライトウェイトなゲートが、静かに乖離しないことだけを保証します。
+
+</Tip>
+
 ## スケジュールCI再試験ワークフロー
 
 <Note>
