@@ -60,6 +60,124 @@ Same principle as the JS cut-order, different axis: there the cut is by test cou
 
 </Tip>
 
+## Guard-Manifest Parity Between b4push and CI
+
+### The Failure Mode: Guard-Set Drift
+
+The split above treats `b4push` and CI as two budgets for the same job -- but it says nothing about *which lightweight gates* each one actually runs. In practice they drift independently: someone adds a new lint rule to the pre-push script under deadline pressure and forgets to mirror it in the CI workflow, or a CI job gets renamed and the corresponding `b4push` step quietly stops matching anything. Neither side is wrong on its own -- the pre-push script still runs, the CI workflow still passes -- so nothing looks broken. The gate that silently went missing is bypassable from that point on: locally it never ran (nobody re-adds the b4push line), and in CI it was never required (nobody re-adds the workflow step). The fix is not a bigger pre-push script or a bigger workflow file; it is a mechanism that treats "wired into both surfaces" as a checkable invariant instead of a manual habit.
+
+### One Manifest Entry, Two Surfaces
+
+Each lightweight guard gets exactly one entry in a manifest, and the entry carries **two matchable forms**: a `ciNeedle` -- a substring searched for in the CI workflow YAML -- and a `scriptToken` -- a substring searched for inside the pre-push script's marked guards region (below). The manifest is the single source of truth for "this guard must exist on both surfaces"; the two forms exist because a workflow step and a script line are different kinds of text, and the meta-check needs a literal substring to search for on each side.
+
+```bash
+# scripts/guard-manifest.sh -- one line per guard: id | ciNeedle | scriptToken
+# ciNeedle is matched against .github/workflows/*.yml; scriptToken against the
+# guards region of scripts/b4push.sh. Both must be present for a guard to be wired.
+GUARD_MANIFEST=(
+  "lint|pnpm lint|pnpm lint"
+  "typecheck|pnpm check|pnpm check"
+  "format|pnpm format:md -- --check|pnpm format:md -- --check"
+)
+```
+
+### The Marked Guards Region
+
+`b4push` is a hand-maintained script that also contains setup, logging, and steps that are not part of the parity contract (the heavy build step below, for instance). Rather than scan the whole file, the meta-check only looks inside an explicitly marked region:
+
+```bash
+#!/usr/bin/env bash
+# scripts/b4push.sh
+set -euo pipefail
+
+# >>> guards:begin -- every scriptToken in scripts/guard-manifest.sh must appear here
+pnpm lint
+pnpm check
+pnpm format:md -- --check
+# >>> guards:end
+
+pnpm build
+```
+
+The markers keep the contract narrow: a step outside `guards:begin`/`guards:end` is free to exist without a manifest entry, and the meta-check never has to guess which lines count.
+
+### The Meta-Check Runs on Both Surfaces
+
+A meta-check script reads the manifest, greps the CI workflow files for each `ciNeedle` and the guards region for each `scriptToken`, and fails the moment either side is missing an entry that is not explicitly allowlisted (next section). It runs as **both** a `b4push` step and a required CI job -- so drift is caught wherever it was introduced, not only on the side someone remembered to test:
+
+```bash
+#!/usr/bin/env bash
+# scripts/guard-parity-check.sh -- fails if a manifest guard is missing from either surface
+set -euo pipefail
+
+source scripts/guard-manifest.sh
+source scripts/guard-allowlist.sh
+
+GUARDS_REGION="$(sed -n '/# >>> guards:begin/,/# >>> guards:end/p' scripts/b4push.sh)"
+CI_YAML="$(cat .github/workflows/*.yml)"
+
+FAIL=0
+for entry in "${GUARD_MANIFEST[@]}"; do
+  IFS='|' read -r id ci_needle script_token <<< "$entry"
+
+  if ! grep -qF -- "$script_token" <<< "$GUARDS_REGION"; then
+    echo "::error::guard '$id' is in the manifest but missing from b4push's guards region"
+    FAIL=1
+  fi
+
+  is_allowed=0
+  for allowed in "${GUARD_CI_ALLOWLIST[@]}"; do
+    [ "$allowed" = "$id" ] && is_allowed=1
+  done
+
+  if [ "$is_allowed" -eq 0 ] && ! grep -qF -- "$ci_needle" <<< "$CI_YAML"; then
+    echo "::error::guard '$id' is in the manifest but missing from CI, and not allowlisted"
+    FAIL=1
+  fi
+done
+
+exit "$FAIL"
+```
+
+Wiring it into both surfaces is two one-line additions: inside the `guards:begin`/`guards:end` region of `b4push.sh` (so a dirty checkout still catches the drift locally), and as its own step in the CI workflow:
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+- name: Guard-manifest parity check
+  run: bash scripts/guard-parity-check.sh
+```
+
+### The Allowlist Needs a Reason
+
+A guard can be legitimately local-only or CI-only -- but that has to be a decision someone made, not an omission nobody noticed. The allowlist is a separate file, and every entry carries a mandatory `# reason:` comment directly above it. An allowlist without a reason is indistinguishable from the drift the whole mechanism exists to catch, so treat a bare entry the same as a missing one:
+
+```bash
+# scripts/guard-allowlist.sh -- guards intentionally exempt from the CI surface
+# Every entry MUST carry a "# reason:" comment on the line above it --
+# an allowlist entry without one is the same silent hole this mechanism exists to close
+GUARD_CI_ALLOWLIST=(
+  # reason: covered by CI's separate full-install `build` job (see below),
+  # not a substring-matchable script step
+  "build"
+)
+```
+
+<Warning>
+
+**A reason-less allowlist entry defeats the whole mechanism.** The allowlist exists to make CI-exemption a recorded decision, not a workaround. If the meta-check itself does not enforce the `# reason:` comment, add that as a second, cheap check inside `guard-parity-check.sh` -- an allowlist that anyone can extend with a bare id is drift wearing a disguise.
+
+</Warning>
+
+### Heavy Steps Stay Outside the Manifest, by Design
+
+The manifest only covers **lightweight, substring-matchable guards** -- lint, typecheck, format checks, the kind of step that is a single command on both surfaces. `build`, full test runs, and validation legitimately run as separate full-install CI jobs rather than pure-script steps: they need their own dependency install, their own timeout, sometimes their own runner. Forcing them into the manifest's `ciNeedle`/`scriptToken` shape would be the wrong contract -- a CI job is not a substring inside a YAML file the way a workflow step's `run:` line is. This asymmetry is intentional, which is exactly what the `build` allowlist entry above documents: it is not missing from the manifest by oversight, it is excluded because heavy steps are a different kind of thing.
+
+<Tip>
+
+This pattern is purely additive to the `b4push`/`exam` split above: it does not change what either command runs, only guarantees that the lightweight gates the split assumes both surfaces share do not quietly drift apart.
+
+</Tip>
+
 ## The Scheduled CI Re-exam Workflow
 
 <Note>
