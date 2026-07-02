@@ -162,6 +162,8 @@ fn drag_preview_follows_cursor() {
 - **Excluded from the strict gate.** `cargo test` skips `#[ignore]` tests by default, so a quarantined flake no longer blocks the gate — the analogue of `--grep-invert "@flaky"`.
 - **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs the ignored set and `cargo test -- --include-ignored` runs everything; schedule one as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue. Caveat: `--ignored` matches *every* `#[ignore]` test, so if your suite also uses `#[ignore]` for slow or manual tests, narrow the run with a name filter (e.g. `cargo test flaky_ -- --ignored` over a naming convention) so unrelated ignored tests do not pollute the flake signal — `#[ignore]` is a broader marker than the flake-specific `@flaky` title substring. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../real-world-patterns/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
 
+Once this suite also adopts the guide's retry budget and pass-on-retry telemetry, plain `cargo test` can no longer implement the policy — it has no retry mechanism, per-test timeout, or stable machine-readable output. See [Migrating a Rust Suite to cargo-nextest](../real-world-patterns/cargo-nextest-migration.mdx), whose checklist runs exactly this `#[ignore]` quarantine as `cargo nextest run --run-ignored ignored-only`.
+
 </Note>
 
 <Warning>

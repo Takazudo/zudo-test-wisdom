@@ -1,0 +1,75 @@
+---
+title: Rustスイートをcargoからnextestへ移行する
+description: このガイドのリトライ予算とflakyテレメトリのポリシーが、プレーンな cargo test では実装不可能である理由と、Rustスイートをcargo-nextestへ移行するための機械的なチェックリスト。
+sidebar_position: 11
+---
+
+## なぜnextestがRustのflakeパイプラインのゲートなのか
+
+[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx)と[実行ティア](../decision-guide/execution-tiers.mdx)は、このガイドのすべてのCIスイートに同じ3つの義務を課します：1〜2回のリトライ予算、トリアージのシグナルとして記録されるpass-on-retry、そして1つのテストがハングしてもジョブ全体をハングさせない、テストごとのタイムアウトです。Rustプロジェクトでは、これらはプレーンな `cargo test` の上では単に扱いづらいだけではなく — **実装不可能**です。`cargo test` にはリトライの仕組みも、テストごとのタイムアウトも、安定した機械可読な出力もありません。[cargo-nextest](https://nexte.st/) はその3つすべてを提供します。だからこそRustのflakeパイプラインは、組み込みのハーネスではなくnextestを通して動くのです。
+
+| Policy requirement (this guide) | plain `cargo test` | `cargo nextest` |
+|---|---|---|
+| CI retry budget 1–2 | none | `retries = 2` |
+| Pass-on-retry recorded as triage signal | invisible | reported as FLAKY, in JUnit |
+| Per-test timeout (no hung CI jobs) | none (job-level only) | `slow-timeout` + `terminate-after` |
+| Machine-readable output for issue filing | none stable | JUnit XML |
+
+リトライ予算は `retries` に、pass-on-retryのトリアージシグナルはnextestのFLAKYレポートとJUnit出力に、テストごとのタイムアウトは `slow-timeout` + `terminate-after` に、issue起票のための機械可読なフィードはJUnit XMLに対応します。このガイドの各ポリシー行には、直接対応するnextestの仕組みがあり、`cargo test` には等価物がありません。
+
+## 設定のスケッチ
+
+ポリシーは2つのファイルが担います。nextestのプロファイルがリトライ予算・テストごとのタイムアウト・JUnitテレメトリをエンコードし、さらにプレーンな `cargo test` がスイートに無償で与えていた直列化を再確立します：
+
+```toml
+# .config/nextest.toml
+[profile.ci]
+retries = 2                                              # the CI retry budget (1–2)
+slow-timeout = { period = "60s", terminate-after = 4 }   # per-test timeout
+
+[profile.ci.junit]
+path = "junit.xml"                                       # flake telemetry / deduped issue filing
+
+# Preserve the serialization the suite silently relied on under cargo test:
+[test-groups]
+heavy-serial = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# every integration-test binary that boots a dev server / binds ports / embeds V8
+filter = 'binary(dev_serve_e2e) | binary(dev_build_static_parity) | binary(dev_serve_injected_routes_e2e)'
+test-group = 'heavy-serial'
+```
+
+CIステップは `cargo test` を `cargo nextest run` に置き換えます — ただしnextestはdoctestを**実行しません**。そのため、doctestのステップは明示的に残す必要があります：
+
+```yaml
+# CI
+- run: cargo nextest run --workspace --profile ci
+- run: cargo test --doc --workspace   # nextest does not run doctests — drop this step and doctest coverage silently disappears
+```
+
+<Warning>
+
+**`cargo test --doc` のステップを削ることは、静かなカバレッジの喪失です。** nextestはdoctestを一切実行しません。移行が `cargo test` を `cargo nextest run` に置き換えるだけで他に何もしなければ、すべてのdoctestが実行されなくなり、それでもスイートはグリーンになります。doctestの実行は独立したステップとして残してください。
+
+</Warning>
+
+## 移行チェックリスト（機械的）
+
+1. **まずdoctestのサーフェスを計測する** — フェンスを分類する（実行可能な `rust` と、rustdocが決して実行しない `text`／`ts`／`html`／`json`）。実際の数を移行PRに記録する。`cargo test --doc --workspace` は独立したステップとして残す。（言い伝えの数は、たいてい計測した数よりはるかに多いものです。）
+2. **暗黙の直列化を列挙する** — `cargo test` はテストバイナリを順番に実行しますが、nextestはバイナリをまたいで並列化します。ポートにバインドする／サーバを起動する／重量級ランタイムを埋め込む、すべての統合テストバイナリをリストアップし、最初のflake storm*の後*ではなく、最初の並列実行*の前*に `max-threads = 1` のテストグループに入れる。防御を厚くするため、共有のtest-utilsクレートにアドバイザリな `flock` を追加してもよい。
+3. **コメント中の並行性の主張を監査する** — 主張されている仕組み（`flock`、ロックファイル、mutex）をgrepし、信頼する前にそれが実際に存在することを確認する。
+4. **インベントリを突き合わせる** — バイナリごとに `cargo test -- --list` と `cargo nextest list` を差分し、すべての差分をPRで説明する。静かな欠落（nextestが異なる基準でフィルタするテスト）が主要な失敗モードです — より少ないテストを実行するグリーンな移行PRは、移行しないより悪いのです。
+5. **隔離の相互運用** — 既存の `#[ignore]` 隔離ノートはきれいに対応します：T3の失敗許容ジョブは `cargo nextest run --run-ignored ignored-only`（任意で名前フィルタ、現在のノートと同じ注意点）になります。
+
+<Note>
+
+ステップ5は、このレシピを[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx#flaky-の隔離パイプライン)の隔離パイプラインへ結び付けます：そこで説明されている `#[ignore]` ベースの隔離は、nextestの下では `cargo nextest run --run-ignored ignored-only` として実行され、同じ名前フィルタの注意点が当てはまります。
+
+</Note>
+
+## 次に読むページ
+
+- [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx) — Rustのflakeを `#[ignore]` で隔離する方法。このnextest設定がT3で動かし続けるパイプラインです
+- [実行ティア](../decision-guide/execution-tiers.mdx) — この移行がRustスイート上で実装可能にするために存在する、リトライ予算
+- [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) — nextestがバイナリをまたいで並列化した瞬間に表面化する、ネイティブスイートのflake原因（ポートレース、暗黙の直列化、共有状態）

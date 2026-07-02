@@ -1,0 +1,75 @@
+---
+title: Migrating a Rust Suite to cargo-nextest
+description: "Why the guide's retry-budget and flake-telemetry policy is unimplementable on plain cargo test, and a mechanical checklist for migrating a Rust suite to cargo-nextest."
+sidebar_position: 11
+---
+
+## Why nextest Is the Gate for the Rust Flake Pipeline
+
+The [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) and [Execution Tiers](../decision-guide/execution-tiers.mdx) impose the same three obligations on every CI suite in this guide: a retry budget of 1–2, pass-on-retry recorded as a triage signal, and a per-test timeout so a hung test cannot hang the whole job. On a Rust project those are not merely awkward on plain `cargo test` — they are **unimplementable**. `cargo test` has no retry mechanism, no per-test timeout, and no stable machine-readable output. [cargo-nextest](https://nexte.st/) supplies all three, which is why the Rust flake pipeline runs through nextest rather than the built-in harness.
+
+| Policy requirement (this guide) | plain `cargo test` | `cargo nextest` |
+|---|---|---|
+| CI retry budget 1–2 | none | `retries = 2` |
+| Pass-on-retry recorded as triage signal | invisible | reported as FLAKY, in JUnit |
+| Per-test timeout (no hung CI jobs) | none (job-level only) | `slow-timeout` + `terminate-after` |
+| Machine-readable output for issue filing | none stable | JUnit XML |
+
+The retry budget maps to `retries`, the pass-on-retry triage signal to nextest's FLAKY report and JUnit output, the per-test timeout to `slow-timeout` + `terminate-after`, and the machine-readable issue-filing feed to JUnit XML. Each policy line in this guide has a direct nextest mechanism and no `cargo test` equivalent.
+
+## Config Sketch
+
+Two files carry the policy. The nextest profile encodes the retry budget, the per-test timeout, and the JUnit telemetry, and it re-establishes the serialization that plain `cargo test` gave the suite for free:
+
+```toml
+# .config/nextest.toml
+[profile.ci]
+retries = 2                                              # the CI retry budget (1–2)
+slow-timeout = { period = "60s", terminate-after = 4 }   # per-test timeout
+
+[profile.ci.junit]
+path = "junit.xml"                                       # flake telemetry / deduped issue filing
+
+# Preserve the serialization the suite silently relied on under cargo test:
+[test-groups]
+heavy-serial = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# every integration-test binary that boots a dev server / binds ports / embeds V8
+filter = 'binary(dev_serve_e2e) | binary(dev_build_static_parity) | binary(dev_serve_injected_routes_e2e)'
+test-group = 'heavy-serial'
+```
+
+The CI step swaps `cargo test` for `cargo nextest run` — but nextest does **not** run doctests, so the doctest step has to be kept explicitly:
+
+```yaml
+# CI
+- run: cargo nextest run --workspace --profile ci
+- run: cargo test --doc --workspace   # nextest does not run doctests — drop this step and doctest coverage silently disappears
+```
+
+<Warning>
+
+**Dropping the `cargo test --doc` step is a silent coverage loss.** nextest never runs doctests; if the migration replaces `cargo test` with `cargo nextest run` and nothing else, every doctest stops executing and the suite still goes green. Keep the doctest run as its own step.
+
+</Warning>
+
+## Migration Checklist (Mechanical)
+
+1. **Measure the doctest surface first** — classify fences (runnable `rust` vs `text`/`ts`/`html`/`json` that rustdoc never runs); record the real count in the migration PR. Keep `cargo test --doc --workspace` as a separate step. (Folklore counts are usually far higher than the measured count.)
+2. **Enumerate implicit serialization** — `cargo test` runs test binaries sequentially; nextest parallelizes across binaries. List every integration-test binary that binds ports / boots servers / embeds a heavyweight runtime and put them in a `max-threads = 1` test-group *before* the first parallel run, not after the first flake storm. Optionally add an advisory `flock` in the shared test-utils crate as defense-in-depth.
+3. **Audit concurrency claims in comments** — grep for the claimed mechanism (`flock`, lock files, mutexes) and verify it actually exists before trusting it.
+4. **Reconcile inventories** — diff `cargo test -- --list` vs `cargo nextest list` per binary; explain every delta in the PR. Silent omission (a test nextest filters differently) is the main failure mode — a green migration PR running fewer tests is worse than no migration.
+5. **Quarantine interop** — the existing `#[ignore]` quarantine Note maps cleanly: the T3 allowed-to-fail job becomes `cargo nextest run --run-ignored ignored-only` (optionally name-filtered, same caveat as the current Note).
+
+<Note>
+
+Step 5 connects this recipe back to the quarantine pipeline in the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky): the `#[ignore]`-based quarantine described there runs under nextest as `cargo nextest run --run-ignored ignored-only`, with the same name-filter caveat.
+
+</Note>
+
+## Where to Go Next
+
+- [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) — how a Rust flake is quarantined with `#[ignore]`, the pipeline this nextest config keeps running in T3
+- [Execution Tiers](../decision-guide/execution-tiers.mdx) — the retry budget this migration exists to make implementable on a Rust suite
+- [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) — the native-suite flake causes (port races, implicit serialization, shared state) that surface the moment nextest parallelizes across binaries

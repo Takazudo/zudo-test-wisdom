@@ -224,6 +224,8 @@ Two rules keep retries honest:
 - **Pass-on-retry is a triage signal, not a success.** The test is telling you it is nondeterministic; record it and schedule the fix.
 - **More than 2 retries is a smell.** At that point you are paying compute for nondeterminism instead of fixing it.
 
+On plain `cargo test` this budget is unimplementable — the built-in harness has no retry mechanism at all; see the [nextest migration recipe](../real-world-patterns/cargo-nextest-migration.mdx) for how a Rust suite gets `retries`, pass-on-retry telemetry, and per-test timeouts.
+
 ## The Migration Rule
 
 <Warning>
