@@ -474,3 +474,65 @@ Two corollaries close the loop:
 The mirror test is the SSoT guard's failure case, inverted: where the guard pins two copies together so they cannot fork, the mirror test creates a second copy with no pin at all. If you find yourself copying a function into a test file, either import it (extracting first if needed) or pin it -- never free-float the copy.
 
 </Tip>
+
+## Generator/Host Lockstep Tests
+
+[Guard the Single Source of Truth](#guard-the-single-source-of-truth) above pins one duplicated *value*. The same risk scales up whenever a project ships a generator or scaffolder that must track a *live host implementation* -- the generator's copy of a feature list, an option set, or a whole CLI surface can drift from the host's real exports one release at a time, and nothing fails until a generated project breaks in someone else's hands. Two test shapes close that gap, and they are the test-level complement of a shell-based template-drift guard (see the companion note below).
+
+### Roundtrip Tests: Produce, Re-Parse, Compare
+
+Import **both** sides of the boundary in the same test: the host's live configuration logic, and the generator's real CLI parser (not a hand-copied stub of either). Build a CLI command from live host state, re-parse the command the same way a user's shell would, and assert the roundtrip lands back on the source-of-truth values:
+
+```typescript
+// tests/roundtrip.test.ts
+import { describe, it, expect } from "vitest";
+import { buildFeatureFlags } from "../../host/src/config/feature-flags.js";
+import { buildCliCommand } from "../src/generator.js";
+import { parseCliArgs } from "../src/cli-parser.js";
+
+describe("generator roundtrip", () => {
+  it("re-parsing a generated command reproduces the host's live flags", () => {
+    // Source of truth: the host's real config function, not a copied list.
+    const sourceOfTruth = buildFeatureFlags({ tier: "pro" });
+
+    const command = buildCliCommand(sourceOfTruth);
+    const reparsed = parseCliArgs(command);
+
+    expect(reparsed).toEqual(sourceOfTruth);
+  });
+});
+```
+
+<Tip>
+
+The test imports the generator's *real* parser, not a mock. A roundtrip test that reimplements parsing to make the assertion pass is the mirror-test anti-pattern above, wearing a different hat -- it locks the hand-copied parser, not the one users actually run.
+
+</Tip>
+
+### Sync-List Tests: Pin Enumerations Across the Package Boundary
+
+Roundtrip tests catch a broken conversion. They do not catch an enumeration -- a feature list, a template registry, an option set -- that the generator simply forgot to update. For that, assert the generator's list equals the host's live export directly:
+
+```typescript
+// tests/sync-list.test.ts
+import { describe, it, expect } from "vitest";
+import { AVAILABLE_TEMPLATES } from "../../host/src/config/templates.js";
+import { GENERATOR_TEMPLATE_CHOICES } from "../src/template-choices.js";
+
+describe("generator/host template sync", () => {
+  it("the generator offers exactly the host's live template list", () => {
+    // Whole configuration surface, not a single constant -- this is the
+    // SSoT guard generalized across a package boundary.
+    const hostIds = AVAILABLE_TEMPLATES.map((t) => t.id).sort();
+    const generatorIds = GENERATOR_TEMPLATE_CHOICES.map((c) => c.id).sort();
+
+    expect(generatorIds).toEqual(hostIds);
+  });
+});
+```
+
+<Warning>
+
+Do not exempt template file copies from drift-checking with a blanket allowlist. An allowlist only proves the files it lists were once acknowledged as copies -- it says nothing about whether today's copy still matches today's source, and new copies added later inherit the exemption for free. Prefer a normalized-diff check (strip only the values expected to legitimately vary, such as a package name or version) or, stronger still, running the template's own test suite against the installed package. Either one fails when the copy actually drifts; a blanket allowlist never does.
+
+</Warning>
