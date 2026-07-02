@@ -42,6 +42,57 @@ The enforceable agent rules around graduation -- verification specs are tagged a
 
 Every project gets T0 and T1, no justification needed. T0 is feedback speed -- what the agent runs constantly while implementing. T1 is **the authoritative gate**: a PR is mergeable when its required checks are green, and nothing outside the required checks blocks a merge. Everything above T1 exists to serve it, not to replace it.
 
+#### Make the gate enforced, not just declared
+
+Calling T1 "the authoritative gate" means something only if an enforcement layer actually blocks merges and pushes. A gate that lives only in this strategy doc is a convention, not a control: every red-check PR stays mergeable and direct pushes to `main` stay unblocked. Verify the enforcement layer exists -- one API call, not an assumption:
+
+```sh
+gh api repos/{owner}/{repo}/rulesets                      # [] means no rulesets
+gh api repos/{owner}/{repo}/branches/main/protection      # 404 means no branch protection
+```
+
+If both come back empty, "the authoritative gate" is a gentleman's agreement. Fix it with a branch ruleset on the default branch (rulesets are the current mechanism; classic branch protection is the legacy one): require a pull request plus required status checks.
+
+**The 3-pitfall checklist when adding the ruleset:**
+
+1. **Required status checks block direct pushes too.** A commit pushed straight to `main` has no completed checks at push time, so it is rejected -- which breaks release automation that pushes version-bump commits directly to `main`. Configure an explicit `bypass_actors` entry, then **verify the bypass with an actual test push** (a no-op commit through the real release path).
+2. **Never mark a path-filtered check as required.** A workflow with `on.pull_request.paths:` never runs on a non-matching PR, so that PR waits forever on "Expected -- waiting for status" and can never merge. Only always-running checks can be required; path-filtered checks stay non-required (Rule 7 still makes their reds blocking for the author).
+3. **Enumerate exact check-run names from a recent merged PR -- never guess.** Required checks match by exact check-run name (the job name, or its `name:` override -- not the workflow name). A typo'd or guessed name hangs on "Expected" exactly like pitfall 2. Pull the real names instead of guessing:
+
+```sh
+gh pr view <recent-merged-PR> --json statusCheckRollup --jq '.statusCheckRollup[].name' | sort -u
+```
+
+Create the ruleset via `gh api -X POST repos/{owner}/{repo}/rulesets --input ruleset.json`:
+
+```json
+{
+  "name": "main gate",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "rules": [
+    { "type": "pull_request",
+      "parameters": { "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false } },
+    { "type": "required_status_checks",
+      "parameters": {
+        "required_status_checks": [ { "context": "health" } ],
+        "strict_required_status_checks_policy": false } }
+  ],
+  "bypass_actors": [
+    { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+  ]
+}
+```
+
+Exact `context` values come from pitfall 3; the `bypass_actors` entry is what pitfall 1's test push validates.
+
+Rule 7 ("red checks block the author") and the ruleset are complementary layers, not substitutes for each other. The convention layer governs the agent that authored the PR; the enforcement layer governs everyone and everything else, including the merge button and direct pushes. A strategy with only the convention layer has no gate -- see [Required Testing Behavior](./required-behavior.mdx) for Rule 7.
+
 ### T2: full-e2e split -- only when T1 overflows
 
 The trigger is concrete: T1 exceeds its ~10 minute budget. Even then, prefer keeping the split e2e suite required on the PR. Tune the runner's worker count before reaching for sharding -- shard only at roughly 100+ tests **and** 30+ minutes of runtime.
