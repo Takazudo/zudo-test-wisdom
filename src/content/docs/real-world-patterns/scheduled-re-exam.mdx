@@ -194,8 +194,9 @@ name: exam
 
 on:
   schedule:
-    # Nightly at 03:00 UTC -- pick a quiet hour for your timezone
-    - cron: "0 3 * * *"
+    # Off-minute on purpose: GitHub delays -- and under load, DROPS -- runs
+    # queued at the top of the hour. Nightly ~03:43 UTC.
+    - cron: "43 3 * * *"
   # On-demand runs for pre-merge escalation (see below)
   workflow_dispatch:
 
@@ -267,7 +268,9 @@ name: drift-net
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    # Off-minute on purpose: GitHub delays -- and under load, DROPS -- runs
+    # queued at the top of the hour. Nightly ~04:29 UTC.
+    - cron: "29 4 * * *"
   workflow_dispatch:
 
 jobs:
@@ -505,6 +508,63 @@ while IFS=$'\t' read -r STATUS TITLE; do
   gh issue comment "$ISSUE_NUM" --body "Quarantine telemetry: **${VERDICT}** -- ${RUN_URL}"
 done
 ```
+
+### Allowed-to-Fail Is an Exit-Code You Capture, Not `continue-on-error`
+
+The quarantine lane is _supposed_ to be red-tolerant -- a `@flaky` test failing is expected, and the lane's whole job is to record that failure into the tracking issue, not to block anything. The obvious way to say "this step is allowed to fail" is `continue-on-error: true`, and it is a trap.
+
+<Warning>
+
+**`continue-on-error: true` paired with `if: failure()` is a dead filing step.** Step-level `continue-on-error` preserves the step's `steps.<id>.outcome` as `failure` but rewrites its `conclusion` to `success`. The job then concludes success, so a downstream `if: failure()` can never be true -- the filing step is dead code and the lane rots while showing green.
+
+</Warning>
+
+```yaml
+# BROKEN: the job concludes success, so `if: failure()` can never be true --
+# the filing step below is dead code and the lane rots while showing green
+- name: Run quarantine lane
+  continue-on-error: true
+  run: pnpm test:e2e --grep "@flaky" --pass-with-no-tests
+
+- name: File or update the tracking issue
+  if: failure()          # never fires
+  run: bash scripts/file-exam-issue.sh
+```
+
+Capture the exit code instead, drive the filing path from _that_, then end the step green on purpose:
+
+```yaml
+- name: Run quarantine lane (allowed-to-fail BY DESIGN)
+  id: quarantine
+  env:
+    PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report/report.json
+  run: |
+    set +e
+    pnpm test:e2e --grep "@flaky" --pass-with-no-tests --reporter=list,json
+    rc=$?
+    set -e
+    echo "rc=$rc" >> "$GITHUB_OUTPUT"
+    # Deliberate: this lane is green-by-design. The captured rc -- not the
+    # job status -- drives the filing step below.
+    exit 0
+
+- name: Post per-test telemetry (pass AND fail)
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: bash scripts/quarantine-telemetry.sh
+
+- name: File or update the lane tracking issue
+  if: steps.quarantine.outputs.rc != '0'
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: bash scripts/file-exam-issue.sh
+```
+
+Three rules keep this honest:
+
+- **Name the semantics you are relying on.** Step-level `continue-on-error` keeps `steps.<id>.outcome` at `failure` but sets `conclusion` to `success`, and `if: failure()` reads job status (which follows `conclusion`). So there is a YAML-native alternative to the exit-code capture: keep `continue-on-error: true`, give the step an `id`, and key the downstream step on `if: steps.<id>.outcome == 'failure'`. Either works -- the trap is specifically `continue-on-error` **paired with** `failure()`. (Job-level `continue-on-error` does keep `if: failure()` working, but it paints a red ✗ on every run of a lane that is meant to be red-tolerant -- noisy enough that people learn to ignore it.)
+- **Green-by-design must be a recorded decision.** The inline comment on the `exit 0` -- "allowed-to-fail BY DESIGN, rc drives the filing step" -- is mandatory. A bare `exit 0` right after a test run otherwise reads as a bug, and someone will eventually "fix" it by deleting the line that keeps the lane green.
+- **Prove the filing path fires -- once.** Break a quarantined test on a branch, `gh workflow run` the lane (the skeleton already has `workflow_dispatch`), and confirm the tracking issue actually gets its comment. A filing path that has never fired is decoration -- the same trap as the unread annotation above.
 
 ### Tag-to-Issue Guard
 
