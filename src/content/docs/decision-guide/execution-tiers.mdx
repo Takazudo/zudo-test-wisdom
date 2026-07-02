@@ -93,6 +93,8 @@ When `playwright.config.ts` lists `webServer` as an array of N entries, every ru
 
 The inner loop becomes minutes, not seconds. Worse, booting N servers in parallel multiplies the port-race surface: `EADDRINUSE` collisions and inter-server start-stagger appear as intermittent test failures, which look like flaky tests but are actually a topology problem. The right fix is to design away the port-race surface, not to quarantine it with retries -- see also [Heavy Test Decision Rule](./heavy-test-decision.mdx) for when flakiness is a signal that topology needs attention.
 
+Distinct app ports alone do not close this surface: each dev-server instance can also open an auxiliary socket (a devtools inspector, HMR websocket, or metrics endpoint) on a shared default port unrelated to the app port. See [The Hidden Auxiliary-Socket Port Race](../real-world-patterns/playwright-patterns.mdx#the-hidden-auxiliary-socket-port-race) for the symptom, diagnosis, and fix.
+
 ### Mechanism 1: scope build, `webServer`, and specs to one fixture via env var
 
 Introduce a single `FIXTURE=<name>` env var that narrows the build step, the `webServer` array, **and the spec set** to just the target fixture. Scoping the servers alone is not enough: if `FIXTURE=site-a` boots only site-a's server while Playwright still collects site-b and site-c's specs, those specs run against servers that were never started and fail. Narrow the `projects` array by the same env var so only the target fixture's specs are collected. The inner loop then builds one site, boots one server, and runs one fixture's specs -- no N-way stagger, no port-race. CI (no env var set) still builds, serves, and tests all N.

@@ -504,6 +504,38 @@ When `webServer` is a list of N entries (one per fixture or app), every inner-lo
 
 </Note>
 
+## The Hidden Auxiliary-Socket Port Race
+
+The port-race guidance above, and in [Execution Tiers](../decision-guide/execution-tiers.mdx#making-t0-real-for-multi-fixture-e2e), covers the **application** port: give each fixture its own `port` and the `EADDRINUSE` collisions across N parallel `webServer` entries go away. There is a subtler variant that distinct app ports do not fix.
+
+**Symptom:** N parallel `webServer` entries, each with a correctly distinct app port, still crash intermittently. The failure names a port that appears nowhere in `playwright.config.ts`:
+
+```
+Error: listen EADDRINUSE: address already in use :::9229
+```
+
+**Diagnosis:** the dev-server process each `webServer` entry boots doesn't only open the app port — it also opens an **auxiliary socket**: a devtools inspector, an HMR websocket, or a metrics endpoint, each with its own default port that is independent of the app port you configured. Node's inspector, for example, defaults to `9229` no matter which app port the process serves on. When N fixtures boot in parallel, every instance races to bind that same shared default, and whichever loses dies with `EADDRINUSE` — on a port nobody put in the config. The diagnostic tell: **the crashing port is unfamiliar** — it matches no `port` or `baseURL` value anywhere in the test setup.
+
+**Fix:** configure the auxiliary socket to an OS-assigned port (`0`), the same way you would the app port itself:
+
+```bash
+# Anti-pattern: --inspect binds the fixed default (9229) regardless of app port
+node --inspect ./server.js
+
+# Fix: --inspect=0 binds an OS-assigned port -- no shared default left to race on
+node --inspect=0 ./server.js
+```
+
+The same move applies to any dev-tool's auxiliary channel — an HMR websocket port, a metrics/telemetry port, a bundler's own devtools bridge: whatever config knob it exposes, point it at `0` instead of leaving the tool's built-in default in place.
+
+<Warning>
+
+A boot stagger (delaying each fixture's start by a few seconds) narrows this race but does not close it — it is **mitigation, not a fix**. A 3-second stagger between boots was empirically unreliable, reproducing the collision in roughly 1 of every 2 concurrent boots. The durable fix is pinning the auxiliary socket to port `0`; keep a stagger only as a cheap belt-and-suspenders on top of that, never as the sole defense.
+
+</Warning>
+
+See also the native-suite "Port races (`EADDRINUSE`)" entry in the [Flake Root-Cause Catalog](./deflaking-recipe.mdx#part-1-—-root-cause-catalog) — same root cause, a fixed port shared across parallel processes, here specific to a dev-server's non-obvious secondary socket rather than its primary one.
+
 ## Sharded CI Runs
 
 For large test suites, shard across multiple CI runners:
