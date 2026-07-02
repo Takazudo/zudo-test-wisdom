@@ -132,6 +132,69 @@ jobs:
 
 </Warning>
 
+## T3 as an External-Dependency Drift Net
+
+Everything above assumes T3 exists to reach hardware or a platform the PR runner cannot provide. A second, unrelated trigger lands a test in the same tier for a different reason: **the project's core dependencies are external packages that move independently of the repo** -- published npm packages consumed by pin, where the registry can ship a breaking change on a schedule the repo never controls. The PR gate cannot catch this by construction: it installs from the lockfile, so it can never see what changed in the registry since that lockfile was generated. This shape needs no GPU, no macOS, no special hardware -- the runner should match T1 (plain ubuntu), because the trigger is external drift, not platform capability.
+
+### Two Lanes: Same-Suite Re-run and Registry-Integration
+
+The pattern splits into two lanes with different jobs:
+
+1. **Nightly same-suite re-run.** Re-run the exact CI-safe suite the PR gate runs, unchanged. No new tests are written for this lane -- its only value is as a main-branch drift net, catching whatever regresses between merges for reasons unrelated to any single PR.
+2. **Registry-integration lane.** A real `pnpm install` from the registry, followed by a full build of a scaffolded project that consumes the published packages the way an end user would. This is the lane that actually exercises the external world: the PR gate's lockfile-pinned install can never observe a missing export, a packaging bug, or an unresolvable dependency on a minimal scaffold, because those only surface when the install resolves against the live registry.
+
+```yaml
+# .github/workflows/drift-net.yml
+name: drift-net
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  same-suite-rerun:
+    # Matches T1's runner -- the trigger is external drift, not platform capability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:ci # the exact PR-gate suite, no new tests
+
+  registry-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # No --frozen-lockfile: resolve against the live registry, not the pin
+      - run: pnpm install
+      - run: pnpm create my-scaffold ./scaffold-under-test
+      - run: pnpm --dir ./scaffold-under-test build
+```
+
+Both lanes file into the same one-tracking-issue-per-workflow pattern described below -- they do not need a separate issue-filing scheme of their own.
+
+<Tip>
+
+**Runner reconciliation.** The macOS skeleton above is for the heavy/platform-bound trigger; it does not apply here. An external-dependency drift net runs on the same plain-`ubuntu` runner as T1 -- see [Execution Tiers](../decision-guide/execution-tiers.mdx) for how this reads as a third T3 trigger alongside heavy and platform-bound.
+
+</Tip>
+
+### One Month of Telemetry: Where the Signal Landed
+
+One month of production telemetry from a downstream project running this exact pattern settled which lane earns its keep: **all 5** scheduled-exam failures that month came from the registry-integration lane -- a missing package export, a packaging bug, and an unresolvable dependency on a minimal scaffold, among others -- and **zero** came from the same-suite re-run lane. Each failure was fixed within 1-2 days of the nightly catching it.
+
+The asymmetry follows from what each lane can structurally see. The same-suite re-run lane runs the identical suite the PR gate already ran, against the identical lockfile -- it can only catch main-branch drift the PR gate itself would also have caught, which is rare once T1 is healthy. The registry-integration lane is the only one that resolves against the live registry, so it is the only one positioned to see a registry-side regression at all. That does not make the re-run lane worthless -- it is nearly free to add, since it needs zero new tests -- but the registry-integration lane is where the actual catches are.
+
 ## One Tracking Issue, Never One Per Run
 
 A nightly job that stays red for a week must not file seven issues. Per-run filing buries the signal under duplicates and trains everyone to ignore the label. The rule: **one open tracking issue per workflow** -- comment on it while the failure persists, close it when the exam goes green, and let the next failure open a fresh one.
