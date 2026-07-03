@@ -15,7 +15,7 @@ These are the core topics documented here, all based on patterns extracted from 
 
 - **Testing Levels** -- The 6-level escalation ladder from unit tests to AI-based visual verification, each with increasing coverage and decreasing blind spots
 - **Decision Guide** -- Which testing level to use based on what changed, where and when a test should run (execution tiers), common failure patterns when the wrong level is chosen, and required behaviors for AI agents
-- **Real-World Patterns** -- Battle-tested Vitest configurations, Playwright E2E patterns, Tauri desktop app testing, and backend/Node.js testing approaches
+- **Real-World Patterns** -- Battle-tested Vitest configurations, Playwright E2E patterns, Tauri desktop app testing, backend/Node.js testing approaches, and operational concerns like deflaking, scheduled re-exam lanes, and publishing-pipeline verification
 - **Tools Reference** -- Quick lookup of tools and commands for each testing level
 
 <Note>
@@ -30,12 +30,18 @@ The single most important concept in AI-assisted testing is **test level escalat
 
 Testing should escalate, not repeat. When a lower-level test passes but the problem persists, move to the next level:
 
-1. **Level 1** -- Unit/Logic Tests (vitest, jest)
-2. **Level 2** -- DOM-based Component Tests (jsdom, Testing Library)
-3. **Level 3** -- Build Output Verification (read built files)
-4. **Level 4** -- E2E Browser Tests (Playwright, headless browser)
-5. **Level 5** -- Deterministic + Visual Verification (verify-ui + headless browser)
-6. **Level 6** -- AI-Based Visual Verification (final resort, not for CI)
+1. **[Level 1](../testing-levels/level-1-unit-tests.mdx)** -- Unit/Logic Tests (vitest, jest)
+2. **[Level 2](../testing-levels/level-2-dom-tests.mdx)** -- DOM-based Component Tests (jsdom, Testing Library)
+3. **[Level 3](../testing-levels/level-3-build-output.mdx)** -- Build Output Verification (read built files)
+4. **[Level 4](../testing-levels/level-4-e2e-browser.mdx)** -- E2E Browser Tests (Playwright, headless browser)
+5. **[Level 5](../testing-levels/level-5-visual-verification.mdx)** -- Deterministic + Visual Verification (verify-ui + headless browser)
+6. **[Level 6](../testing-levels/level-6-ai-based-verification.mdx)** -- AI-Based Visual Verification
+
+Level 6 is not the natural top rung of a ladder you climb by default -- it is a final-resort escape hatch for the rare case where neither Level 4 nor Level 5 can reach the assertion (canvas-driven editors, free-form drawing, multi-layer compositing). It is non-deterministic and never belongs in a CI gate.
+
+### A Second Axis: Level vs. Tier
+
+The levels above answer **what a test can see**. A separate question is **where and when it runs** -- the *execution tier* (inner loop, PR CI, a nightly schedule, a local heavy lane). A pixel-level Level 5 spec can run on every PR, or only on a schedule if it needs a real GPU; a plain Level 1 unit test almost always lives in the inner loop and the PR gate. "Too heavy for PR CI" is a tier question, not a reason to drop to a lower level. See [Execution Tiers](../decision-guide/execution-tiers.mdx) for the full breakdown.
 
 ## How to Use This Guide
 
