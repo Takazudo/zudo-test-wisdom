@@ -36,15 +36,29 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom", // or "happy-dom"
+    globals: true, // required for Testing Library auto-cleanup between tests
   },
 });
 ```
 
 <Tip>
 
-**happy-dom** はほとんどのケースで jsdom より高速です。より広いブラウザAPI互換性が必要な場合は jsdom を使用してください。
+**happy-dom** はほとんどのケースで jsdom より高速です。より広いブラウザAPI互換性が必要な場合は jsdom を使用してください。いずれにせよ `jsdom` と `happy-dom` は Vitest 本体とは別の devDependencies です -- 使う方をインストールしないと、最初の実行が module-not-found エラーで失敗します。
 
 </Tip>
+
+<Note>
+
+`globals: true` がないと Testing Library の自動クリーンアップが登録されず、同じファイル内の2つ目の`render()`が前のコンポーネントのDOMを残してしまいます（例えば`getByRole("button")`が2つのボタンにマッチしてしまう）。`globals: true`をプロジェクト全体で有効にしたくない場合は、代わりに明示的にクリーンアップしてください：
+
+```typescript
+import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+
+afterEach(cleanup);
+```
+
+</Note>
 
 ## 例
 
@@ -76,8 +90,9 @@ describe("Toggle", () => {
   });
 
   it("toggles to ON on click", async () => {
+    const user = userEvent.setup();
     render(<Toggle label="Sound" />);
-    await userEvent.click(screen.getByRole("button"));
+    await user.click(screen.getByRole("button"));
     expect(screen.getByText("Sound: ON")).toBeTruthy();
   });
 });
