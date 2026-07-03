@@ -4,8 +4,6 @@ description: Which testing level to use based on what changed.
 sidebar_position: 1
 ---
 
-## Quick Decision Table
-
 Use this table to determine the minimum testing level for your current task:
 
 | What Changed | Minimum Level | Why |
@@ -33,13 +31,15 @@ flowchart TD
   A[What are you verifying?] --> B{Is it pure logic?}
   B -->|Yes| L1[Level 1: Unit Test]
   B -->|No| C{Is it component behavior?}
-  C -->|Yes| D{Does it involve CSS/visibility?}
+  C -->|Yes| D2{Verifiable with simulated events in jsdom?<br/>no real focus/scroll/navigation/hydration/browser APIs}
+  D2 -->|No| L4[Level 4: E2E Browser Test]
+  D2 -->|Yes| D{Does it involve CSS/visibility?}
   D -->|No| L2[Level 2: DOM Component Test]
   D -->|Yes| L5a[Level 5: Visual Verification]
   C -->|No| E{Is it build output?}
   E -->|Yes| L3[Level 3: Build Output Test]
   E -->|No| F{Is it interactive UI?}
-  F -->|Yes| L4[Level 4: E2E Browser Test]
+  F -->|Yes| L4
   F -->|No| G{Is it visual/CSS?}
   G -->|Yes| L5b[Level 5: Visual Verification]
   G -->|No| L1b[Level 1: Start with Unit Test]
@@ -47,16 +47,18 @@ flowchart TD
   L5b -. L4 intractable AND L5 unreachable .-> L6
 ```
 
+**The L2-vs-L4 discriminator:** "component behavior" alone does not decide the level. If the behavior can be verified with simulated events in jsdom -- a plain dispatched event, no real focus, scroll, navigation, hydration, or other browser API -- it is Level 2. If it needs any of those real browser primitives, jsdom cannot simulate it convincingly enough to trust a passing test, so it is Level 4.
+
 ## Key Principle: CSS Always Needs Level 5
 
 Any change involving CSS, layout, or visual appearance should default to Level 5. This is because:
 
 1. **Level 1** (unit tests) -- has no DOM at all, cannot process CSS
-2. **Level 2** (jsdom) -- has a DOM but no CSS engine; `getComputedStyle()` returns empty strings
+2. **Level 2** (jsdom) -- has a DOM but no CSS engine; `getComputedStyle()` returns default, cascade-less values -- no layout is performed and no stylesheet cascade is applied, so it cannot verify real CSS
 3. **Level 3** (build output) -- checks file contents, not rendering
-4. **Level 4** (Playwright) -- runs in a real browser but typically asserts on DOM state, not visual appearance
+4. **Level 4** (Playwright) -- runs in a real browser, but a spec written the typical way asserts DOM state, not computed style or pixel output
 
-Only Level 5 (verify-ui + headless-browser) can deterministically check computed style values and visually confirm the result.
+This is a distinction about what the assertion checks, not what the tool can do: Playwright itself can assert computed styles (`toHaveCSS`) and take screenshots (`toHaveScreenshot`) just as deterministically as any Level 5 tool. A spec that asserts DOM state is doing Level 4 work; a spec that asserts computed style values or visual output is doing Level 5 work, whichever runner executes it. The rule stands regardless: **CSS changes need Level 5-type verification.**
 
 ## Escalation Triggers
 
@@ -75,7 +77,7 @@ Escalation to [Level 6 (AI-based)](../testing-levels/level-6-ai-based-verificati
 1. **L4 is intractable.** Writing a clean E2E for this surface is genuinely infeasible — canvas-driven, multi-camera/zoom, stateful resize transforms, or similar — not just "harder than usual."
 2. **L5 cannot reach the assertion.** There is no DOM element with a stable bounding rect, computed styles don't apply (the surface is `<canvas>`), and screenshot pixel-diff is too noisy.
 
-If only one of the two is true, the right answer is the other tier. L6 is the final resort, not "the next thing to try when L5 is hard."
+If only one of the two is true, the right answer is the other level. L6 is the final resort, not "the next thing to try when L5 is hard."
 
 ## After Choosing a Level: Decide Where It Runs
 
