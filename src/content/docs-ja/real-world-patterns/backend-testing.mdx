@@ -39,14 +39,31 @@ export async function createTestEnv() {
   });
   const env = await mf.getBindings();
 
-  // Run SQL migrations
+  // Run SQL migrations. D1's exec() splits its input on newlines (one
+  // statement per line), so a pretty-printed multi-statement migration
+  // file throws D1_EXEC_ERROR -- split on `;`, collapse each statement
+  // to a single line, and exec() one at a time instead.
   const migration = readFileSync("migrations/0001_init.sql", "utf-8");
   const db = env.DB as D1Database;
-  await db.exec(migration);
+  const statements = migration
+    .split(";")
+    .map((statement) => statement.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  for (const statement of statements) {
+    await db.exec(statement);
+  }
 
   return { mf, env, db, bucket: env.BUCKET as R2Bucket };
 }
 ```
+
+<Warning>
+
+**D1の`exec()`はセミコロンではなく改行で分割されます。** 入力文字列の各行が個別のステートメントとして実行されるため、複数行のマイグレーションファイルをそのまま渡すと`D1_EXEC_ERROR: incomplete input`をスローします。ファイルを自分で`;`で分割し、各ステートメントの空白を1行に折りたたんでから、ステートメントごとに`exec()`を呼び出してください -- これはプラットフォーム固有のクセであり、自分のコードをいくら読んでも回復できるものではありません。
+
+上記の`split(";")`は単純な行ベースの分割にすぎません -- 文字列リテラル、コメント、トリガー本体の中にセミコロンが含まれるマイグレーションでは壊れます。単純な`CREATE TABLE`/`CREATE INDEX`ステートメントを超える場合は、素の文字列分割ではなく実際のSQLステートメント分割ライブラリ（例：`@databases/split-sql-query`）を使用してください。
+
+</Warning>
 
 ### テストデータファクトリ
 
@@ -133,7 +150,13 @@ export default defineConfig({
 
 ```ts
 // test/helpers/mock-kv.ts
-export function createMockKV(): KVNamespace {
+// Extends the real interface with the escape hatch tests use to seed and
+// inspect state directly -- see "The inspectable-mock-store design" below.
+export interface MockKVNamespace extends KVNamespace {
+  _store: Map<string, string>;
+}
+
+export function createMockKV(): MockKVNamespace {
   const store = new Map<string, string>();
 
   return {
@@ -148,7 +171,8 @@ export function createMockKV(): KVNamespace {
       store.delete(key);
       return Promise.resolve();
     },
-  } as unknown as KVNamespace;
+    _store: store,
+  } as unknown as MockKVNamespace;
 }
 ```
 
@@ -385,7 +409,11 @@ describe("ApiClient", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    // vi.restoreAllMocks() does not undo vi.stubGlobal, and it does not
+    // clear fetchMock's queued mockResolvedValueOnce() calls -- both leak
+    // into the next test unless cleared explicitly.
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
   });
 
   it("sends auth header", async () => {
@@ -440,7 +468,7 @@ it("retries with refreshed token on 401", async () => {
 ### 一時ディレクトリパターン
 
 ```ts
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";

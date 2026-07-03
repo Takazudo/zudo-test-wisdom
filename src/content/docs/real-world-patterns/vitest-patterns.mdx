@@ -4,42 +4,46 @@ description: Unit tests, component tests, and build output tests with Vitest.
 sidebar_position: 2
 ---
 
-## Workspace-Level Vitest Configs
+## Project-Level Vitest Configs
 
-Large projects often need different Vitest configurations for different test types. Use Vitest workspaces to manage this:
+Large projects often need different Vitest configurations for different test types. Define multiple projects inside a single root config with `test.projects`:
 
 ```typescript
-// vitest.workspace.ts
-import { defineWorkspace } from "vitest/config";
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
 
-export default defineWorkspace([
-  {
-    test: {
-      name: "unit",
-      include: ["src/**/*.test.ts"],
-      environment: "node",
-    },
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "component",
+          include: ["src/**/*.test.tsx"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "build",
+          include: ["tests/build/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+    ],
   },
-  {
-    test: {
-      name: "component",
-      include: ["src/**/*.test.tsx"],
-      environment: "jsdom",
-    },
-  },
-  {
-    test: {
-      name: "build",
-      include: ["tests/build/**/*.test.ts"],
-      environment: "node",
-    },
-  },
-]);
+});
 ```
 
 <Tip>
 
-Separate configs let you run fast unit tests independently from slower component or build tests: `vitest --project unit` vs `vitest --project component`.
+Separate projects let you run fast unit tests independently from slower component or build tests: `vitest --project unit` vs `vitest --project component`.
 
 </Tip>
 
@@ -172,15 +176,13 @@ describe("Worker with D1", () => {
       r2Buckets: ["STORAGE"],
     });
 
-    // Run migrations
+    // Run migrations. D1's exec() splits its input on newlines (one
+    // statement per line), so a pretty-printed multi-line CREATE TABLE
+    // throws D1_EXEC_ERROR -- keep the statement on a single line.
     const db = await mf.getD1Database("DB");
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS patterns (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        data TEXT NOT NULL
-      )
-    `);
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS patterns (id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL)",
+    );
   });
 
   it("stores and retrieves a pattern", async () => {
@@ -197,6 +199,12 @@ describe("Worker with D1", () => {
   });
 });
 ```
+
+<Warning>
+
+**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so a SQL statement pretty-printed across multiple lines throws `D1_EXEC_ERROR: incomplete input` -- D1 tries to run each fragment on its own. Collapse each statement to a single line before calling `exec()`, or split a multi-statement migration file yourself (see [`createTestEnv`](./backend-testing.mdx#cloudflare-functions-with-miniflare) for the multi-statement case). This is a platform quirk, not something recoverable by reading more of your own code.
+
+</Warning>
 
 <Tip>
 
@@ -297,8 +305,11 @@ function enableTransitions(): void {
 }
 enableTransitions();
 
-// Late import after the document is primed.
-import { init, navigate } from "../../client-router/router.js";
+// Dynamic import AFTER the document is primed. A static `import` here
+// would hoist above enableTransitions(), so the router would still see
+// the pre-injection document -- `await import(...)` runs at this exact
+// point in the file instead.
+const { init, navigate } = await import("../../client-router/router.js");
 ```
 
 <Danger>
@@ -309,17 +320,18 @@ If the module under test reads `document` (or any global) at eval time, a top-of
 
 ### Bonus: mock `startViewTransition` to test both paths
 
-`document.startViewTransition` is a progressive-enhancement API. happy-dom does not implement it, and you want to cover both the View-Transition path and the plain fallback. Stub its presence or absence with `vi`:
+`document.startViewTransition` is a progressive-enhancement API. happy-dom does not implement it, and you want to cover both the View-Transition path and the plain fallback. Assign the method directly on `document` rather than stubbing the whole global -- `vi.stubGlobal("document", { ...document, ... })` spreads `document` into a plain object literal, which loses every prototype-based DOM method (`createElement`, `getElementById`, and so on), breaking anything else the test touches:
 
 ```typescript
 // router.test.ts
+afterEach(() => {
+  delete (document as any).startViewTransition;
+});
+
 it("uses the View Transitions path when available", async () => {
-  vi.stubGlobal("document", {
-    ...document,
-    startViewTransition: vi.fn((cb: () => void) => {
-      cb();
-      return { finished: Promise.resolve(), ready: Promise.resolve() };
-    }),
+  (document as any).startViewTransition = vi.fn((cb: () => void) => {
+    cb();
+    return { finished: Promise.resolve(), ready: Promise.resolve() };
   });
   // ...drive navigate() and assert the transition branch ran
 });
