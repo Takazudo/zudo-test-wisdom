@@ -4,9 +4,9 @@ description: Testing patterns specific to Tauri v2 desktop applications.
 sidebar_position: 4
 ---
 
-## The WebKit-Only Rule
+## WebKit First: Matching the Production Engine
 
-Tauri uses WebKit as its rendering engine on all platforms. When writing Playwright E2E tests for a Tauri frontend, always test against WebKit:
+Tauri's rendering engine is platform-dependent, not a single engine everywhere: WKWebView on macOS, WebKitGTK on Linux, and WebView2 (Chromium-based) on Windows. When writing Playwright E2E tests for a Tauri frontend, include WebKit to match the macOS/Linux production engine, and include Chromium too — it matches Windows exactly and runs more reliably in headless CI:
 
 ```typescript
 // playwright.config.ts
@@ -18,20 +18,24 @@ export default defineConfig({
       name: "webkit",
       use: { ...devices["Desktop Safari"] },
     },
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+    },
   ],
 });
 ```
 
 <Warning>
 
-Testing **only** in Chromium gives false confidence — the production app uses WebKit on macOS and Linux, so Chromium-only coverage can miss real bugs.
+Testing **only** in Chromium gives false confidence for macOS and Linux users — those platforms render the production app in WebKit (WKWebView / WebKitGTK), so Chromium-only coverage can miss real WebKit-specific bugs.
 
 **Recommended dual strategy:**
 
-- **WebKit for local verification** — matches the production WebKit engine. Use this for any test that exercises WebKit-specific behavior (CSS quirks, focus handling, keyboard shortcuts via the app's shortcut engine).
-- **Chromium for CI** — more reliable in headless CI environments. CI-safe tests (DOM-only assertions, clicks, no keyboard shortcuts) behave identically across engines and run faster in headless Chromium.
+- **WebKit for local verification** — matches the production engine on macOS and Linux. Use this for any test that exercises WebKit-specific behavior (CSS quirks, focus handling, keyboard shortcuts via the app's shortcut engine).
+- **Chromium for CI** — more reliable in headless CI environments, and for Windows users it isn't a tradeoff at all: Tauri's Windows webview (WebView2) is Chromium-based, so a Chromium CI run gives Windows real engine coverage for free.
 
-The key rule: always verify locally with WebKit, and ensure WebKit is in your Playwright project matrix. Using Chromium in CI for DOM-only tests is a pragmatic tradeoff, not a shortcut.
+The key rule: always verify locally with WebKit for macOS/Linux coverage, and keep both projects in your Playwright matrix. Using Chromium in CI for DOM-only tests is a pragmatic tradeoff for macOS/Linux, and genuine coverage for Windows — not a shortcut either way.
 
 </Warning>
 
@@ -159,10 +163,12 @@ export function createMockBackend(
 import { tauriBackend } from "./adapters/backend";
 import { createMockBackend } from "./adapters/mock-backend";
 
+// Runtime detection, not build-mode detection: import.meta.env.MODE === "test"
+// only ever fires under Vitest. Playwright drives the built app in a real
+// browser, so the mock must be selected by checking for the Tauri WebView's
+// injected global -- otherwise E2E runs would hit the real IPC bridge.
 const backend =
-  import.meta.env.MODE === "test"
-    ? createMockBackend()
-    : tauriBackend;
+  "__TAURI_INTERNALS__" in window ? tauriBackend : createMockBackend();
 ```
 
 ## The 8-Step Escalation Ladder
@@ -205,16 +211,21 @@ pnpm vitest --project component
 
 ```bash
 # Step 4: E2E against dev server (WebKit only)
-pnpm dev &
+# playwright.config.ts's webServer starts `pnpm dev` and waits for it to be
+# ready -- no manual backgrounding, so Playwright can't race an unready server.
 npx playwright test --project=webkit
 
 # Step 5: E2E against production build
 pnpm build
-pnpm preview &
+# webServer's command is `pnpm preview` here (see CI Configuration below);
+# Playwright starts it and waits for port 4173 before any test runs.
 npx playwright test --project=webkit
 
-# Step 6: Visual verification
-verify-ui --url http://localhost:4173 --selector ".app" --check "display: flex"
+# Step 6: Visual verification -- extract computed styles + screenshots, then
+# compare the JSON `styles` output against the expected values (verify-ui is
+# a plain Node script, not a CLI with its own --check flag)
+node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
+  "http://localhost:4173" ".app" "./verify-ui-out" "400,800,1200" "light,dark"
 ```
 
 **Steps 7-8: Need full Tauri app**
@@ -230,6 +241,20 @@ pnpm tauri build
 ```
 
 ## CI Configuration for Tauri Projects
+
+Point `webServer` at the already-built preview server instead of backgrounding a build+boot chain in the workflow step — this mirrors the [Production Build Verification](./playwright-patterns.mdx#production-build-verification) pattern from the sibling Playwright page:
+
+```typescript
+// playwright.config.ts (excerpt)
+export default defineConfig({
+  webServer: {
+    command: "pnpm preview",
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+  // ...projects from "WebKit First: Matching the Production Engine" above
+});
+```
 
 ```yaml
 # .github/workflows/test.yml
@@ -255,13 +280,13 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install
       - run: npx playwright install webkit --with-deps
-      - run: pnpm build && pnpm preview &
+      - run: pnpm build
       - run: npx playwright test --project=webkit
 ```
 
 <Warning>
 
-Note that Tauri E2E tests in CI require WebKit dependencies. On Ubuntu, this means `npx playwright install webkit --with-deps`. On macOS runners, WebKit is already available.
+Tauri E2E tests need the WebKit *browser binary* installed regardless of OS — Playwright always drives its own bundled WebKit build, never the system's Safari. `npx playwright install webkit` is required on every runner, macOS included. Only the `--with-deps` flag (which installs Linux system libraries WebKit needs) is Ubuntu-specific; on a macOS runner, `npx playwright install webkit` alone is enough.
 
 </Warning>
 
