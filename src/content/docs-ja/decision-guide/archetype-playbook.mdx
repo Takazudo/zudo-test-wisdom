@@ -71,6 +71,9 @@ flowchart TD
 **最初に書くテスト。** T1 に組み込む3コマンドのコアゲート：
 
 ```sh
+# One-time setup: add the gate tools as dev dependencies
+pnpm add -D html-validate linkinator
+
 # The SSG core gate — runs in T1 on every PR
 pnpm build                                # must succeed
 pnpm exec html-validate "dist/**/*.html"  # emitted HTML is valid

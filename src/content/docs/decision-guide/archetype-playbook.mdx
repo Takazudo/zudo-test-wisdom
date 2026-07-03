@@ -71,6 +71,9 @@ The output is mostly prose and markup. The dangerous failures are not logic bugs
 **First test to write.** The three-command core gate, wired into T1:
 
 ```sh
+# One-time setup: add the gate tools as dev dependencies
+pnpm add -D html-validate linkinator
+
 # The SSG core gate — runs in T1 on every PR
 pnpm build                                # must succeed
 pnpm exec html-validate "dist/**/*.html"  # emitted HTML is valid
