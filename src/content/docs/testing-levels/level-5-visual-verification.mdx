@@ -1,46 +1,94 @@
 ---
 title: "Level 5: Deterministic + Visual Verification"
-description: Combining computed style checks with visual screenshots for maximum coverage.
+description: Deterministic computed-style assertions paired with an informal visual screenshot review.
 sidebar_position: 6
 ---
 
 ## What Level 5 Tests
 
-Level 5 combines **deterministic computed style assertions** with **visual screenshot verification** to catch bugs that all lower levels miss. This is the highest-confidence verification method for UI/CSS work.
+Level 5 covers UI/CSS verification through two distinct techniques, used together:
 
-The two complementary tools:
+1. **Deterministic computed-style assertions** -- extract exact CSS values from a running page and compare them against expected values. No LLM interpretation involved.
+2. **Screenshot capture for visual review** -- an informal look at the rendered page to catch composition problems (overlap, stacking context) that computed styles alone can't reveal.
 
-- **verify-ui** -- Extracts computed CSS values from a running page and asserts exact values (no LLM interpretation)
-- **headless-browser** -- Takes screenshots for visual comparison and interaction testing
+The two tools:
+
+- **[`/verify-ui`](../claude-skills/verify-ui/index.mdx)** -- dumps computed styles as JSON via `verify-styles.mjs`
+- **[`/headless-browser`](../claude-skills/headless-browser/index.mdx)** -- captures screenshots via `headless-check.js`
 
 ## Why Both Are Needed
 
-Computed style checks alone can miss visual issues that come from element interaction (overlapping, stacking context). Screenshots alone rely on LLM interpretation which can have confirmation bias. Together, they provide:
+Computed style checks alone can miss visual issues that come from element interaction (overlapping, stacking context). Screenshots alone rely on human/LLM interpretation, which can have confirmation bias. Used together:
 
 | Approach | Strength | Weakness |
 |----------|----------|----------|
-| verify-ui | Deterministic, exact values | Cannot see visual composition |
-| headless-browser | Sees full visual result | LLM interpretation may have bias |
-| Both combined | Deterministic + visual | Minimal blind spots |
+| Computed-style assertions | Deterministic, exact values | Cannot see visual composition |
+| Screenshot review | Shows the full visual result | Relies on interpretation, not a pass/fail signal |
+| Both combined | Deterministic values + an informal visual sanity check | Still blind to canvas/non-DOM surfaces (see Blind Spots) |
 
-## verify-ui Example
+## Part 1: Deterministic Computed-Style Assertions
+
+Run `verify-styles.mjs` against the element in question. It navigates to the page, extracts computed styles and the bounding box for the selector, and dumps the result as JSON -- there is no `--check` flag. The assertion step is comparing the JSON values against what you expect.
 
 ```bash
-# Check computed styles of an element
-verify-ui --url http://localhost:3000 \
-  --selector ".hero-title" \
-  --check "font-size: 48px" \
-  --check "color: rgb(255, 255, 255)" \
-  --check "display: block"
+LOGDIR=$(node $HOME/.claude/scripts/get-logdir.js)
+mkdir -p "$LOGDIR"
+node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
+  "http://localhost:3000" ".hero-title" "$LOGDIR/verify-ui" "1200" "light"
 ```
 
+Relevant excerpt of the JSON output:
+
+```json
+{
+  "styles": {
+    "font-size": "48px",
+    "color": "rgb(255, 255, 255)",
+    "display": "block"
+  }
+}
+```
+
+Compare each value against the requirement:
+
+```
+[PASS] font-size: 48px (expected: 48px)
+[PASS] color: rgb(255, 255, 255) (expected: rgb(255, 255, 255))
+[PASS] display: block (expected: block)
+```
+
+The same script also reveals visibility problems that Level 1/2 tests cannot see -- see "The Common Failure This Catches" below.
+
+## Part 2: Screenshot Capture for Visual Review
+
+<Note>
+
+This is an **informal visual review**, not a deterministic pixel-diff check. This guide's current skill set has no pixel-diff tool -- capturing and reading a screenshot is a sanity look, useful for catching composition problems computed styles alone can't reveal, not a repeatable regression gate.
+
+</Note>
+
 ```bash
-# Verify visibility
-verify-ui --url http://localhost:3000 \
-  --selector ".notification-banner" \
-  --check "display: block" \
-  --check "opacity: 1" \
-  --check "visibility: visible"
+# Full-page screenshot
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --screenshot full
+
+# Viewport-only screenshot
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --screenshot viewport
+```
+
+There is no `--width`/`--height` flag. For a specific device viewport, pass it via stdin JSON instead:
+
+```bash
+echo '{"url":"http://localhost:3000","viewport":{"width":375,"height":812},"captureScreenshot":"viewport"}' \
+  | node $HOME/.claude/skills/headless-browser/scripts/headless-check.js
+```
+
+For responsive checks across several widths in one run, use `verify-styles.mjs`'s `WIDTHS` argument instead -- it captures a screenshot at every width x scheme combination alongside the computed-style dump:
+
+```bash
+node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
+  "http://localhost:3000" ".hero" "$LOGDIR/verify-ui" "375,800,1200" "light,dark"
 ```
 
 ## The Common Failure This Catches
@@ -53,39 +101,35 @@ Consider the classic scenario:
 4. But the parent container has `overflow: hidden` and `height: 0`
 5. The banner exists in the DOM but is completely invisible
 
-Level 5 catches this:
+Level 5 catches this. Running `verify-styles.mjs` against `.notification-container` returns:
 
-```bash
-# verify-ui would reveal:
-# .notification-banner parent has height: 0px, overflow: hidden
-verify-ui --url http://localhost:3000 \
-  --selector ".notification-container" \
-  --check "height: auto" \
-  --check "overflow: visible"
+```json
+{
+  "styles": {
+    "height": "0px",
+    "overflow": "hidden"
+  }
+}
 ```
 
-And the screenshot from headless-browser would visually confirm the banner is not visible.
+`getComputedStyle` always resolves `height` to a pixel value -- it is never `auto`. Assert that it is not `0px` (or matches the specific pixel height the layout requires), not `height: auto`:
 
-## headless-browser for Visual Verification
-
-```bash
-# Full-page screenshot
-node headless-check.js --url http://localhost:3000 --screenshot --full-page
-
-# Screenshot of specific viewport
-node headless-check.js --url http://localhost:3000 \
-  --screenshot --width 375 --height 812  # iPhone viewport
 ```
+[FAIL] height: 0px (expected: not 0px)
+[FAIL] overflow: hidden (expected: visible)
+```
+
+The screenshot from `headless-check.js` gives the same conclusion visually -- the banner is not visible on the page.
 
 ## Combined Workflow
 
 For UI/CSS changes, the recommended verification workflow is:
 
 1. Make the CSS/layout change
-2. Run **verify-ui** to assert exact computed values
-3. Take a **screenshot** with headless-browser to visually confirm
-4. If verify-ui passes but screenshot looks wrong, investigate stacking/composition issues
-5. If screenshot looks right but verify-ui fails, update the expected values
+2. Run `verify-styles.mjs` to extract exact computed values
+3. Capture a screenshot with `headless-check.js` for an informal visual look
+4. If computed styles pass but the screenshot looks wrong, investigate stacking/composition issues
+5. If the screenshot looks right but a computed-style value fails, re-derive the expected value from the original requirement. Update the expectation ONLY if the requirement changed -- never to silence a failing check based on a screenshot impression
 
 <Note>
 
@@ -95,12 +139,11 @@ This two-step approach eliminates both false positives (screenshot looks fine bu
 
 ## Blind Spots
 
-Level 5 has minimal blind spots, but some remain:
-
 - Font rendering differences across operating systems
 - Sub-pixel rendering variations
 - Animation timing (mid-frame states)
 - Browser-specific quirks not present in the test browser
+- Canvas-rendered content or any surface with no stable DOM bounding rect -- computed-style checks don't apply to `<canvas>` internals, and screenshot comparison is too noisy for anti-aliased or zoomed content. See [Level 6](./level-6-ai-based-verification.mdx).
 
 ## When to Use Level 5
 
@@ -111,4 +154,3 @@ Level 5 has minimal blind spots, but some remain:
 | Layout spacing looks wrong | Yes |
 | Color or font-size incorrect | Yes |
 | Responsive breakpoint issue | Yes |
-| Any time user says "it's still broken" after lower-level test passed | Yes |

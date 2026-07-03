@@ -1,46 +1,94 @@
 ---
 title: "レベル5: 決定論的 + 視覚的検証"
-description: 算出スタイルのチェックとビジュアルスクリーンショットを組み合わせた最大カバレッジ。
+description: 決定論的な算出スタイルのアサーションと、非公式なスクリーンショットレビューを組み合わせる。
 sidebar_position: 6
 ---
 
 ## レベル5がテストするもの
 
-レベル5は**決定論的な算出スタイルのアサーション**と**視覚的なスクリーンショット検証**を組み合わせて、すべての下位レベルが見逃すバグをキャッチします。UI/CSS作業における最も信頼度の高い検証方法です。
+レベル5は、UI/CSS検証を2つの異なる手法で組み合わせて行います：
 
-2つの補完的なツール：
+1. **決定論的な算出スタイルのアサーション** -- 実行中のページから正確なCSS値を抽出し、期待値と比較します。LLMの解釈は介在しません。
+2. **視覚的レビューのためのスクリーンショット撮影** -- 算出スタイルだけでは見抜けない構成上の問題（重なり、スタッキングコンテキスト）を発見するための、非公式なレンダリング結果の確認です。
 
-- **verify-ui** -- 実行中のページから算出CSS値を抽出し、正確な値をアサート（LLMの解釈なし）
-- **headless-browser** -- 視覚的な比較とインタラクションテスト用のスクリーンショットを撮影
+2つのツール：
+
+- **`/verify-ui`**（英語版のスキルドキュメント: [`/verify-ui`](/docs/claude-skills/verify-ui)） -- `verify-styles.mjs` を通じて算出スタイルをJSONとして出力する
+- **`/headless-browser`**（英語版のスキルドキュメント: [`/headless-browser`](/docs/claude-skills/headless-browser)） -- `headless-check.js` を通じてスクリーンショットを撮影する
 
 ## 両方が必要な理由
 
-算出スタイルのチェックだけでは、要素間のインタラクション（重なり、スタッキングコンテキスト）から生じる視覚的な問題を見逃す可能性があります。スクリーンショットだけでは、確証バイアスの可能性があるLLMの解釈に依存します。組み合わせることで以下を提供します：
+算出スタイルのチェックだけでは、要素間のインタラクション（重なり、スタッキングコンテキスト）から生じる視覚的な問題を見逃す可能性があります。スクリーンショットだけでは、確証バイアスの可能性がある人間／LLMの解釈に依存します。組み合わせることで以下を提供します：
 
 | アプローチ | 強み | 弱み |
 |----------|------|------|
-| verify-ui | 決定論的、正確な値 | 視覚的な構成を見られない |
-| headless-browser | 完全な視覚的結果を見られる | LLMの解釈にバイアスの可能性 |
-| 両方の組み合わせ | 決定論的 + 視覚的 | 最小限のブラインドスポット |
+| 算出スタイルのアサーション | 決定論的、正確な値 | 視覚的な構成を見られない |
+| スクリーンショットレビュー | 完全な視覚的結果を確認できる | パス/フェイルの信号ではなく解釈に依存する |
+| 両方の組み合わせ | 決定論的な値 + 非公式な視覚的な健全性チェック | canvas／非DOMサーフェスには依然として盲点がある（ブラインドスポット参照） |
 
-## verify-uiの例
+## パート1: 決定論的な算出スタイルのアサーション
+
+対象の要素に対して `verify-styles.mjs` を実行します。ページに遷移し、そのセレクタの算出スタイルとbounding boxを抽出し、結果をJSONとして出力します -- `--check` のようなフラグは存在しません。アサーションのステップは、JSONの値を期待値と比較することです。
 
 ```bash
-# Check computed styles of an element
-verify-ui --url http://localhost:3000 \
-  --selector ".hero-title" \
-  --check "font-size: 48px" \
-  --check "color: rgb(255, 255, 255)" \
-  --check "display: block"
+LOGDIR=$(node $HOME/.claude/scripts/get-logdir.js)
+mkdir -p "$LOGDIR"
+node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
+  "http://localhost:3000" ".hero-title" "$LOGDIR/verify-ui" "1200" "light"
 ```
 
+JSON出力の抜粋：
+
+```json
+{
+  "styles": {
+    "font-size": "48px",
+    "color": "rgb(255, 255, 255)",
+    "display": "block"
+  }
+}
+```
+
+各値を要件と比較します：
+
+```
+[PASS] font-size: 48px (expected: 48px)
+[PASS] color: rgb(255, 255, 255) (expected: rgb(255, 255, 255))
+[PASS] display: block (expected: block)
+```
+
+同じスクリプトは、レベル1/2のテストでは見つけられない表示上の問題も明らかにします -- 詳しくは後述の「このレベルがキャッチする典型的な失敗」を参照してください。
+
+## パート2: 視覚的レビューのためのスクリーンショット撮影
+
+<Note>
+
+これは**非公式な視覚的レビュー**であり、決定論的なピクセル差分チェックではありません。本ガイドの現在のスキルセットにはピクセル差分ツールが存在しません -- スクリーンショットを撮影して読むのは健全性の確認であり、算出スタイルだけでは見抜けない構成上の問題を見つけるのに有用ですが、繰り返し実行できるリグレッションゲートではありません。
+
+</Note>
+
 ```bash
-# Verify visibility
-verify-ui --url http://localhost:3000 \
-  --selector ".notification-banner" \
-  --check "display: block" \
-  --check "opacity: 1" \
-  --check "visibility: visible"
+# Full-page screenshot
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --screenshot full
+
+# Viewport-only screenshot
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --screenshot viewport
+```
+
+`--width`/`--height` のようなフラグは存在しません。特定のデバイスビューポートを指定するには、代わりにstdinのJSONで渡します：
+
+```bash
+echo '{"url":"http://localhost:3000","viewport":{"width":375,"height":812},"captureScreenshot":"viewport"}' \
+  | node $HOME/.claude/skills/headless-browser/scripts/headless-check.js
+```
+
+一度の実行で複数の幅にわたるレスポンシブチェックを行うには、代わりに `verify-styles.mjs` の `WIDTHS` 引数を使用してください -- 算出スタイルのダンプと同時に、幅×カラースキームの組み合わせごとにスクリーンショットを撮影します：
+
+```bash
+node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
+  "http://localhost:3000" ".hero" "$LOGDIR/verify-ui" "375,800,1200" "light,dark"
 ```
 
 ## このレベルがキャッチする典型的な失敗
@@ -53,39 +101,35 @@ verify-ui --url http://localhost:3000 \
 4. しかし親コンテナに `overflow: hidden` と `height: 0` がある
 5. バナーはDOMに存在するが完全に非表示
 
-レベル5ならこれをキャッチします：
+レベル5ならこれをキャッチします。`.notification-container` に対して `verify-styles.mjs` を実行すると、次の結果が返ります：
 
-```bash
-# verify-ui would reveal:
-# .notification-banner parent has height: 0px, overflow: hidden
-verify-ui --url http://localhost:3000 \
-  --selector ".notification-container" \
-  --check "height: auto" \
-  --check "overflow: visible"
+```json
+{
+  "styles": {
+    "height": "0px",
+    "overflow": "hidden"
+  }
+}
 ```
 
-headless-browserのスクリーンショットにより、バナーが表示されていないことを視覚的に確認できます。
+`getComputedStyle` は常に `height` をピクセル値に解決します -- `auto` になることはありません。`height: auto` ではなく、`0px` でないこと（またはレイアウトが要求する具体的なピクセル高さと一致すること）をアサートしてください：
 
-## headless-browserによる視覚的検証
-
-```bash
-# Full-page screenshot
-node headless-check.js --url http://localhost:3000 --screenshot --full-page
-
-# Screenshot of specific viewport
-node headless-check.js --url http://localhost:3000 \
-  --screenshot --width 375 --height 812  # iPhone viewport
 ```
+[FAIL] height: 0px (expected: not 0px)
+[FAIL] overflow: hidden (expected: visible)
+```
+
+`headless-check.js` のスクリーンショットも、視覚的に同じ結論を示します -- バナーはページ上に表示されていません。
 
 ## 統合されたワークフロー
 
 UI/CSSの変更に対する推奨検証ワークフロー：
 
 1. CSS/レイアウトの変更を行う
-2. **verify-ui**を実行して正確な算出値をアサートする
-3. **headless-browser**でスクリーンショットを撮影して視覚的に確認する
-4. verify-uiがパスしてもスクリーンショットが正しくない場合、スタッキング/コンポジションの問題を調査する
-5. スクリーンショットが正しいがverify-uiが失敗する場合、期待値を更新する
+2. `verify-styles.mjs` を実行して正確な算出値を抽出する
+3. `headless-check.js` でスクリーンショットを撮影して非公式に視覚確認する
+4. 算出スタイルはパスするがスクリーンショットが正しくない場合、スタッキング/コンポジションの問題を調査する
+5. スクリーンショットは正しいが算出スタイルの値が失敗する場合、元の要件から期待値を再導出する。期待値を更新するのは要件が変わった場合のみとし、スクリーンショットの印象で失敗チェックを黙らせるために更新してはならない
 
 <Note>
 
@@ -95,12 +139,11 @@ UI/CSSの変更に対する推奨検証ワークフロー：
 
 ## ブラインドスポット
 
-レベル5のブラインドスポットは最小限ですが、いくつか残ります：
-
 - OSごとのフォントレンダリングの違い
 - サブピクセルレンダリングのバリエーション
 - アニメーションのタイミング（フレーム途中の状態）
 - テストブラウザに存在しないブラウザ固有の癖
+- canvasで描画されたコンテンツ、または安定したDOM bounding rectを持たないサーフェス -- 算出スタイルチェックは `<canvas>` の内部には適用できず、アンチエイリアスやズームされたコンテンツに対してはスクリーンショット比較もノイズが多すぎます。[レベル6](./level-6-ai-based-verification.mdx)を参照してください。
 
 ## レベル5を使用するタイミング
 
@@ -111,4 +154,3 @@ UI/CSSの変更に対する推奨検証ワークフロー：
 | レイアウトの間隔が正しくない | はい |
 | 色やfont-sizeが不正確 | はい |
 | レスポンシブブレークポイントの問題 | はい |
-| 下位レベルのテストがパスした後にユーザーが「まだ壊れている」と報告 | はい |

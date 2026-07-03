@@ -32,7 +32,7 @@ import { test, expect } from "@playwright/test";
 
 test("navigates from home to docs", async ({ page }) => {
   await page.goto("/");
-  await page.click('a[href="/docs"]');
+  await page.locator('a[href="/docs"]').click();
   await expect(page).toHaveURL("/docs");
   await expect(page.locator("h1")).toHaveText("Documentation");
 });
@@ -49,14 +49,20 @@ test("no console errors on page load", async ({ page }) => {
 
 ## Example: Headless Browser Quick Check
 
-For rapid verification without a full test suite, use headless-browser to take a screenshot and check for errors:
+For rapid verification without a full test suite, use [`/headless-browser`](../claude-skills/headless-browser/index.mdx) to take a screenshot and check for errors. The real script lives at `$HOME/.claude/skills/headless-browser/scripts/headless-check.js`.
+
+Quick health check with a screenshot (`--screenshot` requires a value, `viewport` or `full` -- the bare flag is silently ignored):
 
 ```bash
-# Quick page health check
-node headless-check.js --url http://localhost:3000 --screenshot
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --screenshot viewport
+```
 
-# Check for console errors
-node headless-check.js --url http://localhost:3000 --console-errors
+Check for console errors. There is no `--console-errors` flag -- the JSON output always includes `hasErrors`, `console`, and `pageErrors`. Resource blocking is on by default, so pass `--no-block-resources` for accurate error detection. Network failures are a separate concern: `hasErrors` only reflects page errors and console errors, so check `networkErrors.totalFailed`/`failedRequests` in the output to catch failed requests:
+
+```bash
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --no-block-resources
 ```
 
 ## Console Error Monitoring
@@ -95,11 +101,11 @@ Level 4 tests interact with real browser rendering but typically assert on **DOM
 - Elements technically visible but visually overlapped
 - Font rendering differences
 - Responsive layout breakpoints
-- Computed style values
+- Systematic computed-style verification -- Playwright *can* assert individual values (`expect(locator).toHaveCSS(...)`), but typical E2E specs assert DOM state, not styles. A systematic multi-viewport/theme style sweep is [Level 5](./level-5-visual-verification.mdx) work.
 
 </Warning>
 
-Level 4 confirms "the element exists and is interactable." For "the element looks correct," escalate to Level 5.
+Level 4 confirms "the element exists and is interactable." For "the element looks correct," escalate to [Level 5](./level-5-visual-verification.mdx).
 
 ## When to Use Level 4
 
@@ -109,5 +115,5 @@ Level 4 confirms "the element exists and is interactable." For "the element look
 | Form submission fails | Yes |
 | Dynamic content not loading | Yes |
 | Console errors on page | Yes |
-| Element positioned wrong | Partial -- Level 5 better |
-| CSS color/spacing wrong | No -- use Level 5 |
+| Element positioned wrong | Partial -- [Level 5](./level-5-visual-verification.mdx) better |
+| CSS color/spacing wrong | No -- use [Level 5](./level-5-visual-verification.mdx) |
