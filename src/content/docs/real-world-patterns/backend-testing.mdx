@@ -39,14 +39,31 @@ export async function createTestEnv() {
   });
   const env = await mf.getBindings();
 
-  // Run SQL migrations
+  // Run SQL migrations. D1's exec() splits its input on newlines (one
+  // statement per line), so a pretty-printed multi-statement migration
+  // file throws D1_EXEC_ERROR -- split on `;`, collapse each statement
+  // to a single line, and exec() one at a time instead.
   const migration = readFileSync("migrations/0001_init.sql", "utf-8");
   const db = env.DB as D1Database;
-  await db.exec(migration);
+  const statements = migration
+    .split(";")
+    .map((statement) => statement.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  for (const statement of statements) {
+    await db.exec(statement);
+  }
 
   return { mf, env, db, bucket: env.BUCKET as R2Bucket };
 }
 ```
+
+<Warning>
+
+**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so passing a multi-line migration file straight through throws `D1_EXEC_ERROR: incomplete input`. Split the file on `;` yourself, collapse each statement's whitespace to a single line, and call `exec()` once per statement -- this is a platform quirk, not something recoverable by reading more of your own code.
+
+The `split(";")` above is a naive line-based splitter: it breaks on migrations with semicolons inside string literals, comments, or trigger bodies. For anything beyond simple `CREATE TABLE`/`CREATE INDEX` statements, use a real SQL statement splitter (for example `@databases/split-sql-query`) instead of a plain string split.
+
+</Warning>
 
 ### Test Data Factories
 
@@ -133,7 +150,13 @@ A Cloudflare binding like `KVNamespace` is just an object with a handful of meth
 
 ```ts
 // test/helpers/mock-kv.ts
-export function createMockKV(): KVNamespace {
+// Extends the real interface with the escape hatch tests use to seed and
+// inspect state directly -- see "The inspectable-mock-store design" below.
+export interface MockKVNamespace extends KVNamespace {
+  _store: Map<string, string>;
+}
+
+export function createMockKV(): MockKVNamespace {
   const store = new Map<string, string>();
 
   return {
@@ -148,7 +171,8 @@ export function createMockKV(): KVNamespace {
       store.delete(key);
       return Promise.resolve();
     },
-  } as unknown as KVNamespace;
+    _store: store,
+  } as unknown as MockKVNamespace;
 }
 ```
 
@@ -385,7 +409,11 @@ describe("ApiClient", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    // vi.restoreAllMocks() does not undo vi.stubGlobal, and it does not
+    // clear fetchMock's queued mockResolvedValueOnce() calls -- both leak
+    // into the next test unless cleared explicitly.
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
   });
 
   it("sends auth header", async () => {
@@ -440,7 +468,7 @@ For Node.js tools that read/write files, use temporary directories for isolation
 ### Temp Directory Pattern
 
 ```ts
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";

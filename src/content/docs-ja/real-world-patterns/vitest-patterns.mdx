@@ -4,42 +4,46 @@ description: Vitest を使ったユニットテスト、コンポーネントテ
 sidebar_position: 2
 ---
 
-## ワークスペースレベルのVitest設定
+## プロジェクトレベルのVitest設定
 
-大規模なプロジェクトでは、異なるテストタイプに異なるVitest設定が必要になることがよくあります。Vitestワークスペースで管理します：
+大規模なプロジェクトでは、異なるテストタイプに異なるVitest設定が必要になることがよくあります。`test.projects` を使って、単一のルート設定の中に複数のプロジェクトを定義します：
 
 ```typescript
-// vitest.workspace.ts
-import { defineWorkspace } from "vitest/config";
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
 
-export default defineWorkspace([
-  {
-    test: {
-      name: "unit",
-      include: ["src/**/*.test.ts"],
-      environment: "node",
-    },
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "component",
+          include: ["src/**/*.test.tsx"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "build",
+          include: ["tests/build/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+    ],
   },
-  {
-    test: {
-      name: "component",
-      include: ["src/**/*.test.tsx"],
-      environment: "jsdom",
-    },
-  },
-  {
-    test: {
-      name: "build",
-      include: ["tests/build/**/*.test.ts"],
-      environment: "node",
-    },
-  },
-]);
+});
 ```
 
 <Tip>
 
-設定を分離することで、高速なユニットテストを低速なコンポーネントテストやビルドテストとは独立して実行できます：`vitest --project unit` vs `vitest --project component`。
+プロジェクトを分離することで、高速なユニットテストを低速なコンポーネントテストやビルドテストとは独立して実行できます：`vitest --project unit` vs `vitest --project component`。
 
 </Tip>
 
@@ -172,15 +176,13 @@ describe("Worker with D1", () => {
       r2Buckets: ["STORAGE"],
     });
 
-    // Run migrations
+    // Run migrations. D1's exec() splits its input on newlines (one
+    // statement per line), so a pretty-printed multi-line CREATE TABLE
+    // throws D1_EXEC_ERROR -- keep the statement on a single line.
     const db = await mf.getD1Database("DB");
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS patterns (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        data TEXT NOT NULL
-      )
-    `);
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS patterns (id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL)",
+    );
   });
 
   it("stores and retrieves a pattern", async () => {
@@ -197,6 +199,12 @@ describe("Worker with D1", () => {
   });
 });
 ```
+
+<Warning>
+
+**D1の`exec()`はセミコロンではなく改行で分割されます。** 入力文字列の各行が個別のステートメントとして実行されるため、複数行にきれいに整形されたSQLステートメントは`D1_EXEC_ERROR: incomplete input`をスローします -- D1はそれぞれの断片を個別に実行しようとするからです。`exec()`を呼ぶ前に各ステートメントを1行に折りたたむか、複数ステートメントのマイグレーションファイルは自分で分割してください（複数ステートメントのケースについては[`createTestEnv`](./backend-testing.mdx#cloudflare-functions-と-miniflare)を参照）。これはプラットフォーム固有のクセであり、自分のコードをいくら読んでも回復できるものではありません。
+
+</Warning>
 
 <Tip>
 
@@ -297,8 +305,11 @@ function enableTransitions(): void {
 }
 enableTransitions();
 
-// Late import after the document is primed.
-import { init, navigate } from "../../client-router/router.js";
+// Dynamic import AFTER the document is primed. A static `import` here
+// would hoist above enableTransitions(), so the router would still see
+// the pre-injection document -- `await import(...)` runs at this exact
+// point in the file instead.
+const { init, navigate } = await import("../../client-router/router.js");
 ```
 
 <Danger>
@@ -309,17 +320,18 @@ import { init, navigate } from "../../client-router/router.js";
 
 ### おまけ：`startViewTransition` をモックして両方の経路をテストする
 
-`document.startViewTransition` はプログレッシブエンハンスメントの API です。happy-dom はこれを実装していないため、View Transition の経路とプレーンなフォールバックの両方をカバーしたくなります。`vi` でその存在・不在をスタブします：
+`document.startViewTransition` はプログレッシブエンハンスメントの API です。happy-dom はこれを実装していないため、View Transition の経路とプレーンなフォールバックの両方をカバーしたくなります。グローバル全体をスタブするのではなく、`document` に直接メソッドを割り当ててください -- `vi.stubGlobal("document", { ...document, ... })` は `document` を素のオブジェクトリテラルへ展開してしまうため、プロトタイプ由来の DOM メソッド（`createElement`、`getElementById` など）がすべて失われ、テストが触れる他の箇所を壊してしまいます：
 
 ```typescript
 // router.test.ts
+afterEach(() => {
+  delete (document as any).startViewTransition;
+});
+
 it("uses the View Transitions path when available", async () => {
-  vi.stubGlobal("document", {
-    ...document,
-    startViewTransition: vi.fn((cb: () => void) => {
-      cb();
-      return { finished: Promise.resolve(), ready: Promise.resolve() };
-    }),
+  (document as any).startViewTransition = vi.fn((cb: () => void) => {
+    cb();
+    return { finished: Promise.resolve(), ready: Promise.resolve() };
   });
   // ...drive navigate() and assert the transition branch ran
 });
