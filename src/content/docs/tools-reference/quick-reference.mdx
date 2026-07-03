@@ -11,9 +11,11 @@ sidebar_position: 1
 | [1](../testing-levels/level-1-unit-tests.mdx) | vitest | `pnpm add -D vitest` | `pnpm vitest run` |
 | [1](../testing-levels/level-1-unit-tests.mdx) | jest | `pnpm add -D jest` | `pnpm jest` |
 | [1](../testing-levels/level-1-unit-tests.mdx) | vitest + Miniflare (backend/Workers) | `pnpm add -D vitest miniflare` | `pnpm vitest run` |
+| [1](../testing-levels/level-1-unit-tests.mdx) | vitest + @cloudflare/vitest-pool-workers (in-worker/Workers) | `pnpm add -D vitest @cloudflare/vitest-pool-workers` | `pnpm vitest run` |
 | [2](../testing-levels/level-2-dom-tests.mdx) | vitest + jsdom | `pnpm add -D vitest jsdom` | `pnpm vitest run` |
 | [2](../testing-levels/level-2-dom-tests.mdx) | vitest + happy-dom | `pnpm add -D vitest happy-dom` | `pnpm vitest run` |
 | [2](../testing-levels/level-2-dom-tests.mdx) | @testing-library/react | `pnpm add -D @testing-library/react` | (used in tests) |
+| [2](../testing-levels/level-2-dom-tests.mdx) | vitest browser mode (@vitest/browser + Playwright) | `pnpm add -D vitest @vitest/browser playwright` | `pnpm vitest run --project browser` |
 | [3](../testing-levels/level-3-build-output.mdx) | vitest (reading built files) | `pnpm add -D vitest` | `pnpm build && pnpm vitest run --project build` |
 | [3](../testing-levels/level-3-build-output.mdx) | cheerio + fs/path | `pnpm add -D cheerio` | (used in tests) |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | Playwright | `pnpm add -D @playwright/test` then `npx playwright install --with-deps` | `npx playwright test` |

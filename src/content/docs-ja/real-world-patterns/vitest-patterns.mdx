@@ -80,6 +80,56 @@ describe("DOM-dependent test", () => {
 });
 ```
 
+## Vitestブラウザモード: 2プロジェクト構成
+
+実際の算出スタイル -- `var()`や`oklch()`の解決、実際のレイアウト値 -- をアサートする必要があるコンポーネントテストは、jsdomの疑似CSSエンジンでは手に負えなくなります。Vitestのブラウザモードは、上と同じ`test.projects`の仕組みを使って、プロジェクトのテストを実際のPlaywright駆動のブラウザ内で実行します。CSSに触れないものはすべて高速なjsdomの`unit`プロジェクトのままにし、CSSに触れるひと握りのテストのために`*.browser.test.ts`という命名規則にスコープされた`browser`プロジェクトを追加します。
+
+```typescript
+// vitest.config.ts -- current Vitest 3.x/4.x browser-mode shape
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "browser",
+          include: ["src/**/*.browser.test.ts"],
+          browser: {
+            enabled: true,
+            provider: "playwright",
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
+    ],
+  },
+});
+```
+
+```bash
+pnpm add -D vitest @vitest/browser playwright
+```
+
+<Tip>
+
+`browser`プロジェクトだけを実行するには`pnpm vitest run --project browser`を使います。`*.browser.test.ts`というサフィックスだけが、ファイルをjsdomではなく実際のChromiumへとルーティングします -- この命名規則は一貫して守ってください。
+
+</Tip>
+
+<Note>
+
+これは[jsdomでは足りないがフルE2Eには重すぎるとき](../testing-levels/level-2-dom-tests.mdx#jsdomでは足りないがフルe2eには重すぎるとき)の設定レベルでの実装です -- 同じレベル2のエルゴノミクス（コンポーネントの分離、vitestのAPI）で、テスト対象のライブラリコードに対してレベル5相当のCSS可観測性を持ちます。
+
+</Note>
+
 ## テストタイプ別の設定分離
 
 mdx-formatterのパターン：ユニットテスト、APIテスト、関数テスト用の別々の設定：

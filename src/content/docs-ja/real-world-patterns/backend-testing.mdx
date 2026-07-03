@@ -254,6 +254,46 @@ describe("session handler (Map-stub)", () => {
 
 </Tip>
 
+## vitest-pool-workersによる実workerdテスト
+
+MiniflareはNode上でWorkersランタイムをエミュレートします。`@cloudflare/vitest-pool-workers`はさらに一歩進みます。Vitestのテストファイルは、Node側のエミュレーション層ではなく`wrangler.toml`経由で結線された実際のD1/KV/R2バインディングを持つ、本物の`workerd`アイソレートの**内側**で実行されます。実例：zudo-file-syncはこの方式でin-workerのスイートを実行しています。
+
+```ts
+// vitest.config.ts
+import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+
+export default defineWorkersConfig({
+  test: {
+    poolOptions: {
+      workers: {
+        wrangler: { configPath: "./wrangler.toml" },
+      },
+    },
+  },
+});
+```
+
+```ts
+// test/worker.test.ts -- runs inside the real workerd isolate
+import { env } from "cloudflare:test";
+import { describe, it, expect } from "vitest";
+
+describe("worker (pool-workers)", () => {
+  it("reads and writes through the real D1 binding", async () => {
+    await env.DB.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)");
+    await env.DB.prepare("INSERT INTO t (id) VALUES (1)").run();
+    const row = await env.DB.prepare("SELECT * FROM t WHERE id = 1").first();
+    expect(row).toMatchObject({ id: 1 });
+  });
+});
+```
+
+<Tip>
+
+**判断基準を3つ目の選択肢へ拡張する。** `Map`スタブ：高速でプラットフォームのセマンティクスを持たない、ハンドラーロジック向け（前述）。Miniflare：Node上でエミュレートされたバインディングの*振る舞い*、SQL/ストレージのセマンティクス向け（前述）。`@cloudflare/vitest-pool-workers`：プラットフォームのセマンティクスそのものがテスト対象であるとき -- 本物のworkerdでしか再現しないD1のクセ、`waitUntil`のタイミング、バインディングの結線、in-workerのエンドツーエンドパスなど -- にのみ手を伸ばしてください。3つの中で最も低速かつ重量級です。テストしたいのがハンドラーではなくMiniflare自身のエミュレーションであるときに使います。
+
+</Tip>
+
 ## 時間バケットロジックのテスト
 
 レートリミッター、スライディングウィンドウ、TTLキャッシュ、JWTの有効期限 -- これらはテストにおいて共通の問題を抱えています。その挙動が現在時刻に依存し、しかも境界（カウンターがリセットされる、あるいはトークンが失効する、まさにその瞬間）こそが最も間違えやすい部分だということです。テスト内でその境界を越えるためにスリープするのは遅く、不安定です。代わりにクロックを凍結しましょう。
