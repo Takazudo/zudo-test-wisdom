@@ -31,7 +31,7 @@ CI-safe test splitting, console error monitoring, image interception, production
 
 ### [Tauri Testing](./tauri-testing.mdx)
 
-WebKit-only rule, core crate pattern, backend bridge mocking, and the full 8-step escalation ladder for desktop apps.
+Dual WebKit-first (local) + Chromium-CI testing strategy, core crate pattern, backend bridge mocking, and the full 8-step escalation ladder for desktop apps.
 
 ### [Backend & Node.js Testing](./backend-testing.mdx)
 
@@ -47,15 +47,36 @@ mdast tree factories for unit tests plus a golden-fixture corpus with `UPDATE_FI
 
 ### [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx)
 
-The five causes of E2E flakiness (timing waits, `networkidle` misuse, animations, shared state, hydration races) and a four-step mechanical recipe for eliminating each one.
+The five causes of E2E flakiness (timing waits, `networkidle` misuse, animations, shared state, hydration races) and a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating each one.
 
 ### [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx)
 
 Operating heavy, platform-bound test lanes on a schedule — the CI re-exam workflow, deduped failure issue filing, on-demand pre-merge dispatch, and the local night exam with agent triage.
 
+### [Browser Verification in Limited Environments](./web-container-browser.mdx)
+
+Running browser-based verification (`/verify-ui`, `/headless-browser`) in sandboxed containers where the Playwright CDN is blocked — pre-installed Chromium fallback, `127.0.0.1` dev-server binding, and the Cloudflare Workers preview-URL path.
+
+### [Migrating a Rust Suite to cargo-nextest](./cargo-nextest-migration.mdx)
+
+Why the retry-budget, per-test-timeout, and flake-telemetry policy this guide requires is unimplementable on plain `cargo test`, and a mechanical checklist for migrating to cargo-nextest instead.
+
 ### [Publishing-Pipeline Verification](./publishing-pipeline.mdx)
 
 Publish-time gates for platform-binary npm packages (esbuild-style meta package + per-platform `optionalDependencies`) — catching silent skips on unpropagated tarballs, stripped executable bits, and the double-PUT publish race that the nightly registry drift net cannot see.
+
+## Start from Your Symptom
+
+Not sure which pattern applies? Start from what you are actually seeing:
+
+| Symptom | Start here |
+|---|---|
+| A flaky E2E test -- passes most of the time, fails without a code change | [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) |
+| A test reports green, but it never actually ran | [Playwright Patterns § Guard against specs that match no project](./playwright-patterns.mdx#guard-against-specs-that-match-no-project) / [the `test.skip` pass-by-skip trap](./playwright-patterns.mdx#test-skip-as-a-precondition-—-the-pass-by-skip-trap) |
+| `EADDRINUSE` on a port nothing in your config claims to use | [Playwright Patterns § The Hidden Auxiliary-Socket Port Race](./playwright-patterns.mdx#the-hidden-auxiliary-socket-port-race) |
+| Not sure whether to test against real D1 or a stub | [Backend & Node.js Testing § Mock the Binding, Not the Runtime](./backend-testing.mdx#mock-the-binding-not-the-runtime) |
+| CI is green, but the published artifact is broken | [Publishing-Pipeline Verification](./publishing-pipeline.mdx) |
+| A build that worked last month fails today with nothing in your own diff | [Scheduled Re-exam & Night Exam § T3 as an External-Dependency Drift Net](./scheduled-re-exam.mdx#t3-as-an-external-dependency-drift-net) |
 
 ## Common Theme
 

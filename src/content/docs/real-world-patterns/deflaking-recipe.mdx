@@ -1,6 +1,6 @@
 ---
 title: Flake Root-Cause Catalog & Deflaking Recipe
-description: The five causes of E2E flakiness and a four-step mechanical recipe for eliminating them.
+description: The five causes of E2E flakiness and a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating them.
 sidebar_position: 9
 ---
 
@@ -187,11 +187,11 @@ For **positive completion waits** (waiting for something to appear or become tru
 1. Keyed to a **documented application constant** (a known debounce value, a polling interval defined in the source).
 2. Annotated with a `// wait-ok: <why>` comment explaining the constant.
 
-See the `// wait-ok:` exception documented in the [Editor Input section of Playwright Patterns](./playwright-patterns.mdx) for the canonical example.
+See the `// wait-ok:` exception documented in the [Editor Input section of Playwright Patterns](./playwright-patterns.mdx#editor-input-in-e2e) for the canonical example.
 
 <Note>
 
-There is a second, distinct legitimate class of `waitForTimeout`: asserting the **absence** of a failure over a time window (e.g., "no console errors fire in the first 2000ms after mount"). Converting that sleep to a condition wait guts the assertion — there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep for absence-window assertions; scope this step to positive completion waits only. See the `POST_MOUNT_LOOP_SETTLE_MS` example in [Playwright Patterns](./playwright-patterns.mdx) for the full pattern.
+There is a second, distinct legitimate class of `waitForTimeout`: asserting the **absence** of a failure over a time window (e.g., "no console errors fire in the first 2000ms after mount"). Converting that sleep to a condition wait guts the assertion — there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep for absence-window assertions; scope this step to positive completion waits only. See the `POST_MOUNT_LOOP_SETTLE_MS` example in [Playwright Patterns](./playwright-patterns.mdx#editor-input-in-e2e) for the full pattern.
 
 </Note>
 
