@@ -24,6 +24,44 @@ sidebar_position: 4
 | **fs/path** | ビルド出力を読むためのNode.jsファイルシステムAPI |
 | **cheerio** | HTML出力のパースとクエリ |
 
+## ビルドを先に実行する
+
+レベル3のテストは`dist/`配下のファイルを読み取るだけで、自らビルドをトリガーすることはありません。スイートを実行する前にビルドを実行してください。そうしないと、テストは古い（あるいは存在しない）出力を読むことになります：
+
+```sh
+pnpm build && pnpm vitest run --project build
+```
+
+`--project build`は、Vitestの設定で名前付きの`build`プロジェクトを定義していれば、それにスコープした実行になります（[Vitestパターン](../real-world-patterns/vitest-patterns.mdx)を参照）。名前付きプロジェクトがない場合は、ビルド後に素の`vitest run`を実行しても同じように機能します。
+
+開発者がビルドステップを覚えていることに頼らないようにするには、`globalSetup`でVitest自体に組み込み、素の`vitest run`が常に最新のビルドに対して実行されるようにします：
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    globalSetup: ["./tests/build-setup.ts"],
+  },
+});
+```
+
+```typescript
+// tests/build-setup.ts
+import { execSync } from "node:child_process";
+
+export default function setup() {
+  execSync("pnpm build", { stdio: "inherit" });
+}
+```
+
+<Warning>
+
+**古い**`dist/`に対してレベル3のスイートがグリーンになっても、それは何も証明しません -- それは昨日の出力に対するアサーションであり、あなたが今変更したコードに対してではありません。結果を信頼する前に、必ず再ビルドする（あるいは`globalSetup`を使う）ようにしてください。
+
+</Warning>
+
 ## 例: SSG出力検証
 
 ```typescript
@@ -49,7 +87,8 @@ describe("build output", () => {
     const pages = ["index.html", "about/index.html", "docs/index.html"];
     for (const page of pages) {
       const content = readFileSync(join(DIST, page), "utf-8");
-      expect(content).toContain("<!DOCTYPE html>");
+      // Case-insensitive: toolchains emit the doctype as lowercase `<!doctype html>`.
+      expect(content.toLowerCase()).toContain("<!doctype html>");
     }
   });
 });
@@ -57,16 +96,18 @@ describe("build output", () => {
 
 ## 例: MDXフォーマッターのコントラクトテスト
 
-mdx-formatterの実例パターン：VitestスイートがRustフォーマッティングエンジンをフィクスチャファイルで実行し、出力を比較するコントラクトテスト：
+mdx-formatterの実例パターン：Vitestスイートがフィクスチャファイルで実行して出力を比較することで、Rustフォーマッティングエンジンをテストします。これがレベル1ではなくレベル3である理由は、`format()`がビルドによって生成されたコンパイル済みのネイティブエンジンを駆動する薄いJSラッパーだからです -- テスト対象はそのビルド成果物であり、手書きのTypeScriptロジックではありません（もしフォーマッターがコンパイル済みバックエンドを持たない純粋なJS/TSであれば、この同じ冪等性チェックはレベル1に属することになります）。
 
 ```typescript
 // tests/format.test.ts
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { format } from "../src/format";
 
 describe("mdx formatting", () => {
   it("is idempotent", () => {
-    const input = readFixture("sample.mdx");
+    const input = readFileSync(join(__dirname, "fixtures/sample.mdx"), "utf-8");
     const first = format(input);
     const second = format(first);
     expect(first).toBe(second);
