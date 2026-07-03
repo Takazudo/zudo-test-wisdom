@@ -47,6 +47,114 @@ export default defineConfig({
 
 </Tip>
 
+### プロジェクトごとのタイムアウト予算
+
+よくあるフレーキーの原因: テストが `spawnSync`/`execSync` で CLI を起動し、*子プロセス*には寛大な `timeout:`（たとえば30秒）を与える一方で、Vitest 自体の per-test タイムアウトはデフォルトで5000msです。ホストの CPU が混み合っていると、より厳しい方の締め切りが勝ちます -- サブプロセスがまだ自分の30秒予算の範囲内で実行中であっても、Vitest は5秒でテストを強制終了します。失敗はハングしているように見えます（「Test timed out in 5000ms」）が、実際には何もハングしていません。サブプロセスは負荷下で単に遅かっただけで、外側のタイムアウトが発火する前に終える機会がなかったのです。
+
+問題のある `it()` ごとに `testTimeout` にパッチを当てても収束しません -- 同じ5秒デフォルトのまま、サブプロセスの重いテストが別のファイルに次々と現れるので、モグラ叩きは終わりません。代わりに設定レベルで直しましょう: `test.projects` を分割し、サブプロセスの重いディレクトリにはプロジェクトレベルの `testTimeout` を最大の子プロセス予算の少なくとも2倍に引き上げて与え、純粋なユニットテストのプロジェクトは厳格な5秒デフォルトを、本当にハングしたテストに対するガードレールとして維持します。
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: { /* root-level aliases */ } },
+  test: {
+    server: { deps: { inline: [/* runtime packages needing the alias pipeline */] } },
+    projects: [
+      {
+        extends: true, // projects don't inherit the root config without this
+        test: {
+          name: "unit",
+          include: ["src/**/__tests__/**/*.test.ts"],
+          // default 5s testTimeout stays as the guardrail
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "scripts",
+          include: ["scripts/**/__tests__/**/*.test.ts"],
+          // subprocess-heavy: budget 2x the largest 30s child timeout
+          testTimeout: 60_000,
+        },
+      },
+    ],
+  },
+});
+```
+
+<Tip>
+
+純粋ユニットのプロジェクトのデフォルト `testTimeout` はここで実際に仕事をしています: サブプロセスのテストに対応するためにプロジェクト全体で引き上げてしまうと、本当にハングしたユニットテストも5秒で速やかに失敗する代わりに60秒間実行され続けてしまいます。
+
+</Tip>
+
+### `extends: true` の指定は必須
+
+Vitest のプロジェクト設定は、デフォルトではルート設定を継承**しません**。`test.projects` に `extends: true` なしでプロジェクトを追加すると、ルートレベルの `resolve.alias` と `test.server.deps.inline` はそのプロジェクトに黙って適用されなくなります -- エラーも警告もなく、テストは未解決の依存関係のまま実行されるだけです。`react` を `preact/compat` にエイリアスしている Preact-compat リポジトリでは、これはプリコンパイル済みの React 風ランタイムを間接的に import するすべてのテストが `Cannot find package 'react'` で失敗する、という形で表面化します。エイリアスが本来リダイレクトするはずだった import が、そのプロジェクトには届かなかったからです。
+
+上の設定にある2つのプロジェクトは、まさにこの理由で両方とも `extends: true` を必要とします。プロジェクトが主役になったら、古いルートレベルの `test.include` も削除してください -- 残したままにすると、プロジェクトとは独立にテストファイルを収集してしまい、スイートが二重に実行されたりスコープを誤ったりしかねません。プロジェクトの `include` 配列だけが収集元であるべきです。
+
+<Danger>
+
+`extends: true` の欠落は静かに失敗します。欠けているキーを指し示すエラーは出ません -- 影響を受けたプロジェクトのテストの中で、依存関係の問題のように見える下流の解決失敗が起きるだけです。
+
+</Danger>
+
+継承の完全なルールについては [Vitest projects configuration docs](https://vitest.dev/guide/projects#configuration) を参照してください。
+
+### モジュール評価のタイムアウトの抜け穴と子プロセスのタイムアウト管理
+
+**モジュール評価時**のサブプロセス呼び出し -- たとえば `describe`/`it` ブロックが実行される前、import 時点で `git worktree list` を解決するようなもの -- は、Vitest の per-test タイムアウトを完全にすり抜けます。なぜなら、それはタイムを計測されたテスト実行中ではなく、収集（collection）フェーズの最中に実行されるからです。その呼び出しがハングしても、5秒（あるいはプロジェクトの60秒）の歯止めはありません -- テストが1つも始まらないまま、収集フェーズ全体がハングするだけです。これはこのページの別の場所にある[モジュール評価タイミングの罠](#happy-dom-の落とし穴-モジュール評価タイミングの罠（核心となる気づき）)と同じ「import 時評価」の危険性ですが、DOM の読み取りではなくサブプロセス呼び出しに対するものです -- ランナーレベルのガードレールはそこには届かないので、明示的に独自の子プロセスレベルの `timeout:` を与えてください。
+
+```typescript
+// setup-doc-skill.test.ts
+import { execSync } from "node:child_process";
+
+// Module-level eval runs before Vitest's per-test timeout applies, so this
+// needs its own explicit child-level timeout.
+const MAIN_WORKTREE_ROOT = execSync("git worktree list | head -1 | awk '{print $1}'", {
+  cwd: PROJECT_ROOT,
+  encoding: "utf-8",
+  timeout: 30_000,
+}).trim();
+```
+
+モジュールスコープに限らず、すべての `it()` の内側でも同じ規律が当てはまります: すべての子プロセス呼び出しに、プロジェクトの `testTimeout` 以下の明示的な `timeout:` を与えてください。そうすればハングしたサブプロセスは予算全体を静かに食いつぶすのではなく、個々のテストを失敗させます。そして、そのサブプロセスが本当に仕事をしているかどうかも確認しましょう -- `mkdir -p` のような些細なシェルアウトは純粋なファイルシステム I/O であり、プロセスをフォークする理由がありません。
+
+```typescript
+// Before: forks a process for a one-line filesystem operation
+import { execFileSync } from "node:child_process";
+execFileSync("mkdir", ["-p", fakeBinDir]);
+
+// After: same effect, in-process, nothing left to time out
+import { mkdirSync } from "node:fs";
+mkdirSync(fakeBinDir, { recursive: true });
+```
+
+<Tip>
+
+些細なサブプロセスをインプロセス呼び出しに変換することは一石二鳥です: 管理すべきタイムアウトが1つ減り、プロセスの起動はそれがラップしているファイルシステム呼び出しよりコストがかかる分、速くもなります。
+
+</Tip>
+
+### 重いローカルゲートでのワーカー並列数の上限
+
+Vitest はデフォルトで、ホストのコア数に合わせたサイズの複数ワーカープロセスにテストファイルを分散して実行します。忙しいノートPC上 -- 他のタブ、他の開発サーバー、隣のワークツリーで動いているもう1つの `pnpm build` -- では、それだけ多くの並列ワーカーがあると、すべてのテストが CPU を奪い合うことになります。そしてそれこそが、一見寛大に見えるタイムアウトをそもそもフレーキーにしてしまう競合そのものです。重い pre-push ゲートで並列数を制限することは、ウォールクロック時間と引き換えに信頼性を得るトレードオフです：
+
+```bash
+# --maxWorkers=4 caps vitest parallelism for reliability under host CPU
+# contention over wall-clock, not speed.
+pnpm test:unit --maxWorkers=4
+```
+
+<Note>
+
+これは重いローカルゲートだけに制限し、どこにでも適用しないでください。開発中の素早いフィードバックのため、対話的な `pnpm test:unit` は無制限のままにし、CI ランナーには手を加えないでください -- 通常すでにコア数が少なく自己制限的なので、そこに明示的な上限を追加しても不要な天井を増やすだけです。
+
+</Note>
+
 ## jsdomとhappy-dom環境
 
 コンポーネントテストに適切なDOM環境を選択します：
