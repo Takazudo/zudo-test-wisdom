@@ -80,6 +80,56 @@ describe("DOM-dependent test", () => {
 });
 ```
 
+## Vitest Browser Mode: Two-Project Split
+
+Component tests that need to assert a *real* computed style -- `var()` and `oklch()` resolution, actual layout values -- outgrow jsdom's synthetic CSS engine. Vitest's browser mode runs a project's tests inside a real Playwright-driven browser instead, using the same `test.projects` mechanism as above: keep the fast jsdom `unit` project for everything that doesn't touch CSS, and add a `browser` project scoped to a `*.browser.test.ts` naming convention for the handful of tests that do.
+
+```typescript
+// vitest.config.ts -- current Vitest 3.x/4.x browser-mode shape
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "browser",
+          include: ["src/**/*.browser.test.ts"],
+          browser: {
+            enabled: true,
+            provider: "playwright",
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
+    ],
+  },
+});
+```
+
+```bash
+pnpm add -D vitest @vitest/browser playwright
+```
+
+<Tip>
+
+Run just the browser project with `pnpm vitest run --project browser`. The `*.browser.test.ts` suffix is the only thing routing a file into real Chromium instead of jsdom -- keep the naming convention consistent.
+
+</Tip>
+
+<Note>
+
+This is the config-level half of [When jsdom Is Not Enough](../testing-levels/level-2-dom-tests.mdx#when-jsdom-is-not-enough-but-full-e2e-is-too-much) -- same Level 2 ergonomics (component isolation, the vitest API), Level 5-grade CSS observability for library code under test.
+
+</Note>
+
 ## Separate Configs for Different Test Types
 
 A pattern from mdx-formatter: separate configurations for unit tests, API tests, and function tests:
