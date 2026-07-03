@@ -1,7 +1,7 @@
 ---
 title: Heavy Test Decision Rule
 description: What to do when an E2E test is too heavy for PR CI — fix, demote, or delete, then classify why it is heavy and assign the right tier.
-sidebar_position: 5
+sidebar_position: 4
 ---
 
 ## The Question This Page Answers
@@ -30,7 +30,11 @@ If what the test actually asserts can be expressed by a component test or a unit
 
 ### (b) Has it never caught a real regression, and is it not a critical user journey?
 
-If both are true, **delete it** — then watch the production bug rate for roughly three months. If nothing surfaces that the test would have caught, it was dead weight. If something does, you have learned exactly which assertion matters, and you can write a better, cheaper test for it.
+Establish "never caught a real regression" with evidence, not a guess: search CI failure history, linked issues, and commit messages that reference the spec by name. A spec less than roughly six months old has not accumulated enough history to answer this question either way — treat that as insufficient evidence, not as a "never caught" verdict.
+
+**Safe default:** when the evidence cannot be established — too young, or no accessible failure history — treat the test as if it *has* caught something, and route it to the **Fix** branch, not deletion. A wrong "keep" costs a bit of CI time; a wrong "delete" costs silently lost coverage.
+
+If both are true — an evidence-backed "never caught" **and** not a critical user journey — **delete it** — then watch the production bug rate for roughly three months. If nothing surfaces that the test would have caught, it was dead weight. If something does, you have learned exactly which assertion matters, and you can write a better, cheaper test for it.
 
 Only survivors of Branch 0 get a tier.
 
@@ -113,10 +117,13 @@ For a *new* test, classification must not require judgment. Apply the first rule
 
 1. Reads pixels or depends on GPU timing → `@gpu`
 2. Needs the OS to deliver real keyboard events → `@interactive`
-3. Runtime over ~60 seconds, or a multi-minute flow → `@heavy`
-4. Otherwise → **untagged**
+3. Trustworthy only on a specific OS or native webview (behavior differs on CI's browser build) → `@macos-only`
+4. Runtime over ~60 seconds, or a multi-minute flow → `@heavy`
+5. Otherwise → **untagged**
 
 The default matters most: **a new e2e test is untagged and CI-safe unless one of these rules forces a tag.** An agent (or a developer) never starts from "which special tier does my test deserve?" — it starts from "my test runs in the PR gate" and tags only when a rule fires.
+
+`@smoke` is the one tag in the taxonomy these rules do not reach. It is assigned manually, after the fact, to curate a critical-journey subset out of the already-untagged pool — not by any mechanical trigger on a new test.
 
 ## The Quarantine Pipeline for `@flaky`
 

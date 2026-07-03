@@ -1,7 +1,7 @@
 ---
 title: テスト時の必須行動
 description: フロントエンドコードをテストする際のAIエージェントの必須行動。
-sidebar_position: 3
+sidebar_position: 5
 ---
 
 ## 5つのコアルール
@@ -43,7 +43,7 @@ Test plan:
 | 何かが視覚的に正しい | レベル5 |
 | canvas／フォトエディタなどでL4が書けず、かつL5でも到達できない | レベル6（最終手段、CIには使わない） |
 
-レベル5の問題にレベル1を使用しないでください。テストはパスしますが、バグは残ります。L4が難しいだけ、L5が扱いにくいだけでレベル6に飛ばないでください — L6は下位の*両方*の階層が真に実行不可能な場合にのみ正当化されます。
+レベル5の問題にレベル1を使用しないでください。テストはパスしますが、バグは残ります。L4が難しいだけ、L5が扱いにくいだけでレベル6に飛ばないでください — L6は下位の*両方のレベル（L4とL5）*が真に実行不可能な場合にのみ正当化されます。
 
 ### ルール3: 下位レベルがパスしても問題が解消しない場合はエスカレーションする
 
@@ -54,7 +54,7 @@ Test plan:
 3. 次のテストレベルにエスカレーション**する**
 4. すでにレベル4の場合、レベル5にエスカレーションする
 5. レベル5の場合、より深く調査する（祖先要素、スタッキングコンテキストなどをチェック）
-6. レベル6（AIベース）には、L4が書けない**かつ**L5がアサーションに届かない場合**のみ**エスカレーションする。L6はレベル5の次のデフォルトのステップでは**ない** — 決定論的なチェックが不可能なcanvas／フォトエディタ系のサーフェスのために確保された階層です。
+6. レベル6（AIベース）には、L4が書けない**かつ**L5がアサーションに届かない場合**のみ**エスカレーションする。L6はレベル5の次のデフォルトのステップでは**ない** — 決定論的なチェックが不可能なcanvas／フォトエディタ系のサーフェスのために確保されています。
 
 <Warning>
 
@@ -170,10 +170,21 @@ expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
 # Wrong — gate-defining file edited to make a gate pass, no fresh-context review
 testMatch: ['**/*.spec.ts', '!**/banner-*.spec.ts'] // silently excludes failing spec
 
-# Right
+# Right (a) — legitimate skip: a real, deliberate skip, not a flake
+// skipped: https://github.com/your-org/your-app/issues/55 — pending backend flag rollout
 test.skip('banner renders correctly', () => { ... })
-// @flaky: issue #55 — animation timing non-deterministic on CI
+
+# Right (b) — quarantine: NOT skipped; the test still runs, allowed-to-fail,
+# with @flaky in the title, exactly matching the quarantine pipeline's convention
+// quarantined: https://github.com/your-org/your-app/issues/55
+test('banner renders correctly @flaky', () => { ... })
 ```
+
+<Note>
+
+この2つは同じことの言い換えではなく、別々の出口です。`test.skip` と `@flaky` を組み合わせるのは、[ヘビーテスト判断ルール](./heavy-test-decision.mdx#flaky-の隔離パイプライン)が禁じる墓場状態そのものです：スキップされたテストは結果を一切収集しないため、「隔離」されているはずのテストが同時にスキップされていると、どこでも実行されず静かに腐っていきます。(a) は、テストを今は一切実行すべきでない、正当な理由がある場合に使います。(b) — 本来の隔離の慣習 — は、テストの実行と報告は続けつつ、ゲートはブロックさせたくない場合に使います。
+
+</Note>
 
 ### ルール9 — スコープを絞った重い検証
 
