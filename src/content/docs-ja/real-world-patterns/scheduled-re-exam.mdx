@@ -298,11 +298,20 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      # No --frozen-lockfile: resolve against the live registry, not the pin
-      - run: pnpm install
+      # GitHub Actions sets CI=true, which flips pnpm's --frozen-lockfile default to true --
+      # override it explicitly so this install doesn't silently become the frozen one
+      - run: pnpm install --no-frozen-lockfile
+      # This is the step that genuinely resolves against the live registry: `pnpm create`
+      # scaffolds a fresh project with no lockfile of its own, unlike the repo install above
       - run: pnpm create my-scaffold ./scaffold-under-test
       - run: pnpm --dir ./scaffold-under-test build
 ```
+
+<Warning>
+
+**`pnpm install`だけでは、生きたレジストリに対する解決は保証されません。** GitHub Actionsはすべてのジョブで`CI=true`を設定し、pnpmの`--frozen-lockfile`のデフォルトは`CI=true`がセットされていると`true`に切り替わります -- そのため、このレーンで裸の`pnpm install`を使うと、生きたレジストリに対する解決ではなく、frozenインストールになってしまいます。`--no-frozen-lockfile`はそのデフォルトを上書きしますが、それでもlockfileが最新であれば、新たに解決すべきものは何もありません。実際にレジストリを運動させるのは上の`pnpm create`ステップです：ゼロからlockfileなしのプロジェクトをスキャフォールドします。
+
+</Warning>
 
 両方のレーンは、後述する「ワークフローごとに1つのトラッキングIssue」パターンにそのまま起票します -- 独自のIssue起票の仕組みを別に持つ必要はありません。
 
@@ -501,8 +510,11 @@ jq -r '
   | "\(.status)\t\($title)"
 ' playwright-report/report.json |
 while IFS=$'\t' read -r STATUS TITLE; do
-  # The tracking-issue URL sits in the mandatory inline comment directly above test()
-  ISSUE_URL="$(grep -B1 -F "\"${TITLE}" e2e/**/*.spec.ts 2>/dev/null \
+  # The tracking-issue URL sits in the mandatory inline comment directly above test().
+  # Recursive `grep -rn --include` matches scripts/guard-flaky-paper-trail.sh's discovery
+  # convention -- bash's e2e/**/*.spec.ts glob silently drops specs at the wrong nesting
+  # depth without `shopt -s globstar`
+  ISSUE_URL="$(grep -rn --include='*.spec.ts' -B1 -F "\"${TITLE}" e2e/ 2>/dev/null \
     | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
   [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
   ISSUE_NUM="${ISSUE_URL##*/}"
@@ -603,7 +615,7 @@ pnpm test:e2e --grep "@flaky" --pass-with-no-tests
 
 <Note>
 
-**ランナーの癖：JSONレポーターのリダイレクト。** Playwright 1.58は、古い例でまだ見かける `--reporter=json:<path>` のコロン構文を拒否します -- レポートを書き出す代わりにエラーになります。上のexamワークフローのスケルトンですでに使われている `PLAYWRIGHT_JSON_OUTPUT_NAME` が、現行Playwrightでサポートされている、JSONレポーターの出力パスのリダイレクト方法です。
+**ランナーの癖：JSONレポーターのリダイレクト。** 古い例でまだ見かける `--reporter=json:<path>` のコロン構文は、そもそもPlaywrightの正式なCLI構文だったことがありません -- `--reporter` は裸のレポーター名かカンマ区切りのリストしか受け付けたことがなく、これは特定バージョンでのリグレッションではありません。上のexamワークフローのスケルトンですでに使われている `PLAYWRIGHT_JSON_OUTPUT_NAME` が、JSONレポーターの出力パスをリダイレクトするサポートされた方法です。
 
 </Note>
 
@@ -623,7 +635,7 @@ export default defineConfig({
 
 <Warning>
 
-**トレースはHTMLレポートのディレクトリではなく、ランナーの `outputDir` に置かれます。** Playwrightのデフォルトの `outputDir` は `test-results/` です -- 失敗・リトライした試行のトレース、スクリーンショット、動画はそこに書き出されます。HTMLレポート（上のexamワークフローで使われている `playwright-report/`）は結果をまとめる別のディレクトリであり、生のトレースファイルを自動的にバンドルしません。`playwright-report/` だけを取得するアーティファクトアップロードのステップは、トレースを静かに全部失います：
+**トレースは `playwright-report/` ではなく、ランナーの `outputDir` に置かれます。** Playwrightのデフォルトの `outputDir` は `test-results/` です -- 失敗・リトライした試行のトレース、スクリーンショット、動画はそこに書き出されます。`playwright-report/` は結果をまとめる別のディレクトリです：上のexamワークフローではJSONレポーターの出力（`report.json`、`PLAYWRIGHT_JSON_OUTPUT_NAME`経由）を保持し、代わりに`html`レポーターを設定していればHTMLレポートを保持します。いずれにせよ、生のトレースファイルを自動的にバンドルすることはありません。`playwright-report/` だけを取得するアーティファクトアップロードのステップは、トレースを静かに全部失います：
 
 ```yaml
 - uses: actions/upload-artifact@v4
