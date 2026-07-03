@@ -47,6 +47,114 @@ Separate projects let you run fast unit tests independently from slower componen
 
 </Tip>
 
+### Per-Project Timeout Budgets
+
+A common flake source: a test spawns a CLI with `spawnSync`/`execSync` and gives the *child process* a generous `timeout:` (say, 30 seconds), while Vitest's own per-test timeout defaults to 5000ms. Under host CPU contention the tighter deadline wins -- Vitest kills the test at 5s while the subprocess is still running well inside its own 30s budget. The failure reads like a hang ("Test timed out in 5000ms"), but nothing actually hung; the subprocess was merely slow under load and never got the chance to finish before the outer timeout fired.
+
+Patching `testTimeout` per offending `it()` doesn't converge -- new subprocess-heavy tests keep landing in other files with the same 5s default, so the whack-a-mole never ends. Fix it at the config level instead: split `test.projects` so the subprocess-heavy directory gets a project-level `testTimeout` raised to at least 2x its largest child budget, while the pure-unit project keeps the strict 5s default as a guardrail against genuinely hung tests.
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: { /* root-level aliases */ } },
+  test: {
+    server: { deps: { inline: [/* runtime packages needing the alias pipeline */] } },
+    projects: [
+      {
+        extends: true, // projects don't inherit the root config without this
+        test: {
+          name: "unit",
+          include: ["src/**/__tests__/**/*.test.ts"],
+          // default 5s testTimeout stays as the guardrail
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "scripts",
+          include: ["scripts/**/__tests__/**/*.test.ts"],
+          // subprocess-heavy: budget 2x the largest 30s child timeout
+          testTimeout: 60_000,
+        },
+      },
+    ],
+  },
+});
+```
+
+<Tip>
+
+The pure-unit project's default `testTimeout` is doing real work here: raising it project-wide to accommodate the subprocess tests would also let a genuinely hung unit test run for 60 seconds instead of failing fast at 5.
+
+</Tip>
+
+### `extends: true` Is Required
+
+Vitest project configs do **not** inherit the root config by default. Add a project to `test.projects` without `extends: true`, and root-level `resolve.alias` and `test.server.deps.inline` silently stop applying to that project -- no error, no warning, the tests just run against unresolved dependencies. In a Preact-compat repo aliasing `react` to `preact/compat`, that surfaces as every test transitively importing a precompiled React-flavored runtime failing with `Cannot find package 'react'`, because the alias that would have redirected the import never reached that project.
+
+Both projects in the config above need `extends: true` for exactly this reason. Also drop the old root-level `test.include` once projects take over -- left in place, it collects test files independently of the projects and can double-run or mis-scope suites, so the project `include` arrays should be the only collectors.
+
+<Danger>
+
+Missing `extends: true` fails silently. There is no error pointing at the missing key -- only a downstream resolution failure inside the affected project's tests, which looks like a dependency problem, not a config problem.
+
+</Danger>
+
+See the [Vitest projects configuration docs](https://vitest.dev/guide/projects#configuration) for the full inheritance rules.
+
+### Module-Eval Timeout Gap and Child-Process Timeout Hygiene
+
+A subprocess call at **module-eval time** -- for example resolving `git worktree list` at import time, before any `describe`/`it` block runs -- escapes Vitest's per-test timeout entirely, because it executes during collection, not during a timed test run. If that call hangs, there is no 5-second (or 60-second project) backstop; it just hangs the whole collection phase before any test gets a chance to start. This is the same import-time-evaluation hazard as [The module-eval timing trap](#happy-dom-gotchas-the-module-eval-timing-trap-the-key-insight) elsewhere on this page, but for subprocess calls instead of DOM reads -- give it its own child-level `timeout:` explicitly, since the runner-level guardrail cannot reach it:
+
+```typescript
+// setup-doc-skill.test.ts
+import { execSync } from "node:child_process";
+
+// Module-level eval runs before Vitest's per-test timeout applies, so this
+// needs its own explicit child-level timeout.
+const MAIN_WORKTREE_ROOT = execSync("git worktree list | head -1 | awk '{print $1}'", {
+  cwd: PROJECT_ROOT,
+  encoding: "utf-8",
+  timeout: 30_000,
+}).trim();
+```
+
+The same discipline applies inside every `it()`, not just at module scope: give every child-process call an explicit `timeout:` at or below the project's `testTimeout`, so a hung subprocess fails the individual test instead of silently eating the whole budget. And check whether the subprocess is doing real work at all -- a trivial shell-out like `mkdir -p` is pure filesystem I/O with no reason to fork a process:
+
+```typescript
+// Before: forks a process for a one-line filesystem operation
+import { execFileSync } from "node:child_process";
+execFileSync("mkdir", ["-p", fakeBinDir]);
+
+// After: same effect, in-process, nothing left to time out
+import { mkdirSync } from "node:fs";
+mkdirSync(fakeBinDir, { recursive: true });
+```
+
+<Tip>
+
+Converting trivial subprocesses to in-process calls does double duty: it removes one more timeout to budget for, and it is faster, since spawning a process costs more than the filesystem call it wraps.
+
+</Tip>
+
+### Cap Worker Parallelism in the Heavy Local Gate
+
+Vitest runs test files across multiple worker processes by default, sized to the host's core count. On a busy laptop -- other tabs, other dev servers, a second `pnpm build` running in a neighboring worktree -- that many concurrent workers means every test is competing for CPU, which is exactly the contention that turns generous-looking timeouts flaky in the first place. Capping parallelism in the heavy pre-push gate trades wall-clock time for reliability:
+
+```bash
+# --maxWorkers=4 caps vitest parallelism for reliability under host CPU
+# contention over wall-clock, not speed.
+pnpm test:unit --maxWorkers=4
+```
+
+<Note>
+
+Cap this only in the heavy local gate, not everywhere. Keep interactive `pnpm test:unit` uncapped for fast feedback during development, and leave CI runners alone -- they are typically low-core already and self-capping, so an explicit cap there just adds a needless ceiling.
+
+</Note>
+
 ## jsdom and happy-dom Environments
 
 Choose the right DOM environment for component tests:
