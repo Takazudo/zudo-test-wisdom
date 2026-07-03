@@ -69,8 +69,106 @@ Step 5 connects this recipe back to the quarantine pipeline in the [Heavy Test D
 
 </Note>
 
+## Executing the Taxonomy
+
+The reason-string taxonomy on [Heavy Test Decision Rule § Same Rules, Rust Syntax](../decision-guide/heavy-test-decision.mdx#same-rules-rust-syntax) classifies *why* a test carries `#[ignore]`. This section covers how nextest turns that classification into an actual execution lane.
+
+### `--run-ignored`: the Quarantine/Exam Lane
+
+```sh
+cargo nextest run --workspace --profile ci                              # T1: the PR gate -- never runs an #[ignore]'d test, whatever its reason
+cargo nextest run --workspace --profile exam --run-ignored ignored-only # T3: the quarantine/exam lane -- runs ONLY the ignored set
+cargo nextest run --workspace --profile exam --run-ignored all          # full-inventory sanity run -- everything, ignored and not; not a gate
+```
+
+`--run-ignored ignored-only` is the nextest analogue of Playwright's `--grep "@flaky"` quarantine lane from [Scheduled Re-exam](../real-world-patterns/scheduled-re-exam.mdx) — except it selects on the *presence* of `#[ignore]`, not on the reason string's content. nextest never parses what is inside the quotes; the string is for humans and grep, not for nextest's own filtering. A workspace whose ignored set mixes `heavy:` and `flaky:` reasons runs both in the same `ignored-only` invocation, which erases a distinction the Playwright side keeps separate via independent `--grep` expressions. Narrow with a name filter when the two need to be judged differently:
+
+```sh
+# separate "expected to always pass, just slow" from "expected to sometimes fail"
+cargo nextest run --profile exam --run-ignored ignored-only -E 'test(/^heavy_/)'
+cargo nextest run --profile exam --run-ignored ignored-only -E 'test(/^flaky_/)'
+```
+
+This generalizes the caveat the [quarantine Note](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky) above already raises for `flaky:` alone: `#[ignore]` is a broader marker than any single reason across the whole taxonomy, not just against `@flaky`.
+
+### Test-Groups: Budget and Serialization Control in the Exam Lane
+
+The Config Sketch above uses a `test-groups` entry (`heavy-serial`) to re-serialize integration binaries that bind ports. The exam lane needs the same mechanism for a different reason: it is allowed to be slow, but not unbounded — a `heavy:`-ignored set that saturates every thread on the runner turns "a few slow tests" into the exam lane becoming its own heavy-suite problem.
+
+Add the new group to the **existing** `[test-groups]` table from the Config Sketch above -- a second `[test-groups]` header in the same file is invalid TOML, since a table cannot be declared twice:
+
+```toml
+# .config/nextest.toml -- inside the [test-groups] table already opened by the Config Sketch
+heavy-serial = { max-threads = 1 } # existing, from the Config Sketch above
+exam-heavy = { max-threads = 2 }   # new: caps concurrency for `heavy:`-ignored tests specifically
+```
+
+The exam profile itself is new, so it gets its own tables:
+
+```toml
+# .config/nextest.toml (new tables, appended after the Config Sketch above)
+[profile.exam]
+retries = 0                        # exam is diagnostic, not gated -- no retry budget to hide a real fail
+
+[profile.exam.junit]
+path = "junit.xml"                 # same machine-readable feed the ci profile uses, for the filing script
+
+[[profile.exam.overrides]]
+filter = 'test(/^heavy_/)'         # name-convention filter narrowing to the `heavy:` reason
+test-group = 'exam-heavy'
+```
+
+A dedicated `[profile.exam]` — not the `ci` profile with `--run-ignored` bolted on — matters because the exam lane's retry and threading defaults are legitimately different from the PR gate's: T1 wants a real retry budget (see [Retry Budgets](../decision-guide/execution-tiers.mdx#retry-budgets)); the exam lane wants zero, so a pass is unambiguous and a fail is real.
+
+### The Allowed-to-Fail Scheduled Exam Job
+
+The scheduled job mirrors the Playwright quarantine lane's exit-code-capture pattern from [Scheduled Re-exam § Flake Telemetry Mechanics](../real-world-patterns/scheduled-re-exam.mdx#flake-telemetry-mechanics) exactly: `continue-on-error: true` paired with `if: failure()` is a dead filing step there for the same reason it would be here — step-level `continue-on-error` rewrites the step's `conclusion` to success, so a downstream `if: failure()` never fires.
+
+```yaml
+# .github/workflows/exam.yml
+name: exam
+
+on:
+  schedule:
+    - cron: "51 3 * * *"  # off-minute on purpose -- see Scheduled Re-exam
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  exam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+
+      - name: Run the quarantine/exam lane (allowed-to-fail BY DESIGN)
+        id: exam
+        run: |
+          set +e
+          cargo nextest run --workspace --profile exam --run-ignored ignored-only
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # Deliberate: this lane is green-by-design. The captured rc -- not the
+          # job status -- drives the filing step below.
+          exit 0
+
+      - name: File or update the tracking issue
+        if: steps.exam.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh
+```
+
+`file-exam-issue.sh` is the same [one-tracking-issue-per-workflow](../real-world-patterns/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run) pattern from Scheduled Re-exam — the dedup-by-label-and-title, comment-vs-create, and close-on-green logic all port unchanged. Only the failure-extraction step differs: parse the `junit.xml` produced by `[profile.exam.junit]` above instead of Playwright's JSON reporter.
+
 ## Where to Go Next
 
-- [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) — how a Rust flake is quarantined with `#[ignore]`, the pipeline this nextest config keeps running in T3
+- [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#same-rules-rust-syntax) — the full `#[ignore]` reason-string taxonomy (`env-gate:`, `heavy:`, `flaky:`, `verification:`, `pending-feature:`) this nextest config executes, and how a Rust flake is quarantined
 - [Execution Tiers](../decision-guide/execution-tiers.mdx) — the retry budget this migration exists to make implementable on a Rust suite
 - [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) — the native-suite flake causes (port races, implicit serialization, shared state) that surface the moment nextest parallelizes across binaries

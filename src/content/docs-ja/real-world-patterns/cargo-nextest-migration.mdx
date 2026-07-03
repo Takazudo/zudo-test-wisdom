@@ -69,8 +69,106 @@ CIステップは `cargo test` を `cargo nextest run` に置き換えます —
 
 </Note>
 
+## タグ分類の実行
+
+[重いテストの判断ルール § 同じルール、Rust構文](../decision-guide/heavy-test-decision.mdx#同じルール、rust構文)の理由文字列タグ分類は、あるテストが*なぜ* `#[ignore]` を持つのかを分類します。このセクションは、nextestがその分類を実際の実行レーンへどう変換するかを扱います。
+
+### `--run-ignored`：隔離／エグザムレーン
+
+```sh
+cargo nextest run --workspace --profile ci                              # T1: the PR gate -- never runs an #[ignore]'d test, whatever its reason
+cargo nextest run --workspace --profile exam --run-ignored ignored-only # T3: the quarantine/exam lane -- runs ONLY the ignored set
+cargo nextest run --workspace --profile exam --run-ignored all          # full-inventory sanity run -- everything, ignored and not; not a gate
+```
+
+`--run-ignored ignored-only` は、[定期再試験](../real-world-patterns/scheduled-re-exam.mdx)にあるPlaywrightの `--grep "@flaky"` 隔離レーンのnextest版です — ただし、こちらは理由文字列の中身ではなく `#[ignore]` の*有無*で選択します。nextestは引用符の中身を一切パースしません。あの文字列は人間とgrepのためのものであり、nextest自身のフィルタリングのためのものではないのです。`heavy:` と `flaky:` の理由が混在するignore済みセットを持つワークスペースは、両方を同じ `ignored-only` の実行にまとめて走らせてしまい、Playwright側が独立した `--grep` 式で保っていた区別を消してしまいます。両者を別々に判断する必要があるときは、名前フィルタで絞り込みます：
+
+```sh
+# separate "expected to always pass, just slow" from "expected to sometimes fail"
+cargo nextest run --profile exam --run-ignored ignored-only -E 'test(/^heavy_/)'
+cargo nextest run --profile exam --run-ignored ignored-only -E 'test(/^flaky_/)'
+```
+
+これは、上の[隔離のNote](../decision-guide/heavy-test-decision.mdx#flaky-の隔離パイプライン)がすでに `flaky:` 単体について挙げている注意点を一般化したものです：`#[ignore]` は `@flaky` に対してだけでなく、分類全体にわたって、どの単一の理由よりも広いマーカーなのです。
+
+### test-groups：エグザムレーン内での予算・直列化コントロール
+
+上のConfig Sketchは、ポートにバインドする統合バイナリを再直列化するために `test-groups` エントリ（`heavy-serial`）を使っています。エグザムレーンにも同じ仕組みが別の理由で必要です：エグザムレーンは遅くてもよいのですが、無制限ではありません — `heavy:` でignoreされたセットがランナーのスレッドを丸ごと飽和させてしまうと、「少数の遅いテスト」がエグザムレーン自身の重量級スイート問題に変わってしまいます。
+
+新しいグループは、上のConfig Sketchが開いた**既存の** `[test-groups]` テーブルに追加します — 同じファイルに2つ目の `[test-groups]` ヘッダーを置くのは無効なTOMLです。テーブルを2回宣言することはできません：
+
+```toml
+# .config/nextest.toml -- inside the [test-groups] table already opened by the Config Sketch
+heavy-serial = { max-threads = 1 } # existing, from the Config Sketch above
+exam-heavy = { max-threads = 2 }   # new: caps concurrency for `heavy:`-ignored tests specifically
+```
+
+exam プロファイル自体は新規なので、独自のテーブルを持ちます：
+
+```toml
+# .config/nextest.toml (new tables, appended after the Config Sketch above)
+[profile.exam]
+retries = 0                        # exam is diagnostic, not gated -- no retry budget to hide a real fail
+
+[profile.exam.junit]
+path = "junit.xml"                 # same machine-readable feed the ci profile uses, for the filing script
+
+[[profile.exam.overrides]]
+filter = 'test(/^heavy_/)'         # name-convention filter narrowing to the `heavy:` reason
+test-group = 'exam-heavy'
+```
+
+専用の `[profile.exam]` が必要なのは — `ci` プロファイルに `--run-ignored` を後付けするのではなく — エグザムレーンのリトライ・スレッド化のデフォルトがPRゲートのそれとは正当に異なるからです：T1は本物のリトライ予算を求めます（[リトライ予算](../decision-guide/execution-tiers.mdx#リトライ予算)を参照）。エグザムレーンが求めるのはゼロです。そうすることでパスは曖昧さがなく、失敗は本物になります。
+
+### 失敗許容のスケジュール実行エグザムジョブ
+
+このスケジュールジョブは、[定期再試験 § flakyテレメトリのメカニズム](../real-world-patterns/scheduled-re-exam.mdx#flakyテレメトリのメカニズム)にあるPlaywright隔離レーンの終了コードキャプチャパターンをそのまま踏襲します：`continue-on-error: true` と `if: failure()` の組み合わせがあちらでフィリングステップを死んだコードにしてしまうのと同じ理由で、こちらでも同じことが起こります — ステップレベルの `continue-on-error` はそのステップの `conclusion` をsuccessに書き換えてしまうため、下流の `if: failure()` は決して発火しません。
+
+```yaml
+# .github/workflows/exam.yml
+name: exam
+
+on:
+  schedule:
+    - cron: "51 3 * * *"  # off-minute on purpose -- see Scheduled Re-exam
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  exam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+
+      - name: Run the quarantine/exam lane (allowed-to-fail BY DESIGN)
+        id: exam
+        run: |
+          set +e
+          cargo nextest run --workspace --profile exam --run-ignored ignored-only
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # Deliberate: this lane is green-by-design. The captured rc -- not the
+          # job status -- drives the filing step below.
+          exit 0
+
+      - name: File or update the tracking issue
+        if: steps.exam.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh
+```
+
+`file-exam-issue.sh` は、定期再試験にある[1ワークフロー1トラッキングissue](../real-world-patterns/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく)パターンと同じものです — ラベルとタイトルによる重複排除、コメントか新規作成かの判定、グリーン時のクローズというロジックはそのまま移植できます。異なるのは失敗抽出のステップだけです：Playwrightの JSON レポーターの代わりに、上の `[profile.exam.junit]` が生成する `junit.xml` をパースします。
+
 ## 次に読むページ
 
-- [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx) — Rustのflakeを `#[ignore]` で隔離する方法。このnextest設定がT3で動かし続けるパイプラインです
+- [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx#同じルール、rust構文) — このnextest設定が実行する `#[ignore]` 理由文字列タグ分類の全体（`env-gate:`、`heavy:`、`flaky:`、`verification:`、`pending-feature:`）と、Rustのflakeがどう隔離されるか
 - [実行ティア](../decision-guide/execution-tiers.mdx) — この移行がRustスイート上で実装可能にするために存在する、リトライ予算
 - [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) — nextestがバイナリをまたいで並列化した瞬間に表面化する、ネイティブスイートのflake原因（ポートレース、暗黙の直列化、共有状態）
