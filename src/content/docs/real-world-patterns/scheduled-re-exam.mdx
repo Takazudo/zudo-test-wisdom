@@ -298,11 +298,20 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      # No --frozen-lockfile: resolve against the live registry, not the pin
-      - run: pnpm install
+      # GitHub Actions sets CI=true, which flips pnpm's --frozen-lockfile default to true --
+      # override it explicitly so this install doesn't silently become the frozen one
+      - run: pnpm install --no-frozen-lockfile
+      # This is the step that genuinely resolves against the live registry: `pnpm create`
+      # scaffolds a fresh project with no lockfile of its own, unlike the repo install above
       - run: pnpm create my-scaffold ./scaffold-under-test
       - run: pnpm --dir ./scaffold-under-test build
 ```
+
+<Warning>
+
+**`pnpm install` alone does not guarantee a live-registry resolve.** GitHub Actions sets `CI=true` for every job, and pnpm's `--frozen-lockfile` default flips to `true` whenever `CI=true` is set -- so a bare `pnpm install` in this lane would be the frozen install, not a resolve against the live registry. `--no-frozen-lockfile` overrides that default, but even then, an up-to-date lockfile leaves nothing new to resolve. The `pnpm create` step above is what actually exercises the registry: it scaffolds a lockfile-free project from scratch.
+
+</Warning>
 
 Both lanes file into the same one-tracking-issue-per-workflow pattern described below -- they do not need a separate issue-filing scheme of their own.
 
@@ -501,8 +510,11 @@ jq -r '
   | "\(.status)\t\($title)"
 ' playwright-report/report.json |
 while IFS=$'\t' read -r STATUS TITLE; do
-  # The tracking-issue URL sits in the mandatory inline comment directly above test()
-  ISSUE_URL="$(grep -B1 -F "\"${TITLE}" e2e/**/*.spec.ts 2>/dev/null \
+  # The tracking-issue URL sits in the mandatory inline comment directly above test().
+  # Recursive `grep -rn --include` matches scripts/guard-flaky-paper-trail.sh's discovery
+  # convention -- bash's e2e/**/*.spec.ts glob silently drops specs at the wrong nesting
+  # depth without `shopt -s globstar`
+  ISSUE_URL="$(grep -rn --include='*.spec.ts' -B1 -F "\"${TITLE}" e2e/ 2>/dev/null \
     | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
   [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
   ISSUE_NUM="${ISSUE_URL##*/}"
@@ -603,7 +615,7 @@ pnpm test:e2e --grep "@flaky" --pass-with-no-tests
 
 <Note>
 
-**Runner quirk: the JSON reporter redirect.** Playwright 1.58 rejects the `--reporter=json:<path>` colon syntax that older examples still show -- it errors instead of writing the report. `PLAYWRIGHT_JSON_OUTPUT_NAME`, already used in the exam workflow skeleton above, is the supported redirect for the JSON reporter's output path on current Playwright.
+**Runner quirk: the JSON reporter redirect.** The `--reporter=json:<path>` colon syntax that older examples sometimes show was never valid Playwright CLI syntax -- `--reporter` has only ever accepted a bare reporter name or a comma-separated list of names, so this is not a version-specific regression. `PLAYWRIGHT_JSON_OUTPUT_NAME`, already used in the exam workflow skeleton above, is the supported redirect for the JSON reporter's output path.
 
 </Note>
 
@@ -623,7 +635,7 @@ export default defineConfig({
 
 <Warning>
 
-**The trace lands in the runner's `outputDir`, not the HTML report directory.** Playwright's default `outputDir` is `test-results/` -- traces, screenshots, and videos from failed and retried attempts are written there. The HTML report (`playwright-report/`, used in the exam workflow above) is a separate directory that summarizes results; it does not bundle the raw trace files. An artifact-upload step that only grabs `playwright-report/` silently drops every trace:
+**The trace lands in the runner's `outputDir`, not `playwright-report/`.** Playwright's default `outputDir` is `test-results/` -- traces, screenshots, and videos from failed and retried attempts are written there. `playwright-report/` is a separate directory that summarizes results: in the exam workflow above it holds the JSON reporter's output (`report.json`, via `PLAYWRIGHT_JSON_OUTPUT_NAME`); with the `html` reporter configured instead, it would hold the HTML report. Either way, it does not bundle the raw trace files. An artifact-upload step that only grabs `playwright-report/` silently drops every trace:
 
 ```yaml
 - uses: actions/upload-artifact@v4
