@@ -1,0 +1,150 @@
+---
+title: Deterministic Visual Regression with Committed Baselines
+description: Playwright toHaveScreenshot() with committed baseline PNGs -- the deterministic pixel-diff gate the Level 5 skill set is missing, plus the determinism and tolerance discipline that keep it honest.
+sidebar_position: 14
+---
+
+[Level 5](../testing-levels/level-5-visual-verification.mdx) pairs deterministic computed-style assertions with an _informal_ screenshot review -- explicitly "not a repeatable regression gate," because the guide's current skill set has no pixel-diff tool. That leaves a real gap: nothing in the taxonomy catches a purely _visual_ regression -- a shifted gradient, a recolored SVG, a canvas frame rendered a pixel off -- as a deterministic pass/fail signal. This page fills it. Playwright's `toHaveScreenshot()` compares a freshly rendered screenshot against a **committed baseline PNG** and fails the run when they diverge beyond a set tolerance. It is the deterministic _screenshot half_ of the Level 5 family: the same "what a test can see" as an informal look, but wired as a gate instead of a sanity glance.
+
+The catch is that a pixel gate is only as trustworthy as its determinism. An un-engineered screenshot test is among the most common sources of false-red flake in a browser suite, and the reflex fix -- loosen the tolerance until it passes -- is exactly the [gate-gaming this guide forbids](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate). Most of this page is about earning the determinism that lets the gate stay strict.
+
+## How `toHaveScreenshot()` Works
+
+The mechanism is a committed reference image. A spec renders a locator and compares it against a PNG stored next to the test:
+
+```typescript
+// e2e/visual/hero.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("hero section matches its baseline", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".hero")).toHaveScreenshot("hero.png", {
+    maxDiffPixels: 100,
+  });
+});
+```
+
+The first run with no baseline writes `hero.png` into the snapshot directory and **fails** -- Playwright treats "no reference to compare against" as a failure, never a silent pass. (This is the same principle the [remark/rehype golden-fixture corpus](./remark-rehype-plugin-testing.mdx) applies to HTML: a run that finds no committed baseline fails hard rather than adopting whatever it just produced.) Every later run re-renders, diffs against the committed PNG, and passes only if the difference stays under the threshold.
+
+There are two tolerance knobs plus a per-pixel sensitivity, and the difference between them matters:
+
+| Option | Meaning | Use when |
+|---|---|---|
+| `maxDiffPixels` | absolute count of differing pixels allowed | a small fixed region where you can reason about an exact pixel budget |
+| `maxDiffPixelRatio` | fraction (0–1) of differing pixels allowed | full-page or responsive shots, where an absolute count scales with the viewport |
+| `threshold` | per-pixel color-distance sensitivity (0–1, default 0.2) | tuning how different a single pixel must be to count as "different" at all |
+
+Set defaults once in the config so every spec inherits the same discipline:
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  expect: {
+    toHaveScreenshot: {
+      maxDiffPixelRatio: 0.01, // ≤1% of pixels may differ
+      threshold: 0.2, // per-pixel color-distance sensitivity (0–1)
+      animations: "disabled", // freeze CSS animations/transitions for the shot
+    },
+  },
+  snapshotPathTemplate:
+    "e2e/visual/__screenshots__/{testFilePath}/{arg}-{projectName}-{platform}{ext}",
+});
+```
+
+The `{projectName}` and `{platform}` tokens are load-bearing. Playwright keys baselines by project and OS by default, because the same page renders differently on `chromium-linux` and `webkit-darwin`. A baseline is only ever compared against a screenshot from the _same_ project and platform -- which is also why CI has to render on the same OS the baseline was captured on.
+
+## Baselines Are Reviewed Like Code
+
+The committed PNGs are artifacts of record, not throwaway cache. They live in the repo, they show up in the PR diff, and a reviewer looks at the rendered before/after exactly as they would read a code change. That single decision -- baselines in version control -- is what turns a screenshot comparison into a regression _gate_ rather than a snapshot that quietly rewrites itself.
+
+Regeneration must therefore be an explicit, reviewable act, never an automatic one. Two disciplines enforce that:
+
+- **Regenerate on demand, never during the normal run.** `npx playwright test --update-snapshots` rewrites baselines locally; a plain run only ever compares. A test that silently rewrites its own baseline on mismatch is not a gate -- it can never fail.
+- **Gate regeneration behind an explicit switch on render-sensitive surfaces.** In pgen -- a GPU pattern generator whose PNG output shifts subtly with driver and antialiasing -- baseline capture runs only under an explicit `PGEN_REGEN_BASELINES` mode, adopted precisely because the render was stable enough to gate but not stable enough to recapture casually. zzmod carries a dedicated visual baseline-capture script for the same reason: capturing is a deliberate command, distinct from running the suite.
+
+A surprising diff in the PR means an unintended regression; an expected diff _is_ the new baseline, and committing it is the reviewer accepting the new visual truth. This is the same review loop the golden-fixture corpus uses for HTML -- a changed reference is a reviewable event, not a silent side effect of running the tests.
+
+<Warning>
+
+"Just re-run with `--update-snapshots`" is the visual-regression equivalent of deleting a failing assertion. It is correct _only_ when you have already looked at the diff and decided the new rendering is right. Regenerating to make red turn green, without inspecting what changed, launders a regression into the baseline -- and every run after that passes against the corrupted reference.
+
+</Warning>
+
+## Engineering Determinism
+
+A pixel gate fails the moment the same input renders two different images, so every non-deterministic source in the render has to be pinned before the first baseline is captured. The usual suspects:
+
+- **Animations and transitions.** A shot taken mid-transition is a coin flip. Set `animations: "disabled"` (Playwright fast-forwards finite CSS animations and transitions to their end state and cancels infinite ones to their initial state) or force `prefers-reduced-motion` -- the same reduced-motion technique the [deflaking recipe](./deflaking-recipe.mdx) uses for its animation-related flakes.
+- **Blinking carets and focus rings.** A text caret blinks; `toHaveScreenshot` hides it by default (`caret: "hide"`), but a custom cursor or a focus ring you draw yourself is not covered -- suppress those via injected CSS (`caret-color: transparent`) or mask the element.
+- **Web-font loading.** A shot taken before the web font loads captures fallback-font metrics -- different glyph widths, different line wraps. Wait for `document.fonts.ready` before asserting.
+- **Dynamic content.** Timestamps, random IDs, live data -- mask them with `toHaveScreenshot`'s `mask` option or stub them, so the only thing under comparison is the layout you actually mean to gate.
+- **Viewport and device pinning.** Screenshot size is a function of viewport; pin `viewport` (and `deviceScaleFactor`) per project, and capture dark and light schemes as separate baselines via `colorScheme`.
+- **GPU and antialiasing variance.** The hard one. Subpixel antialiasing and GPU rendering differ across drivers and runners -- the reason pgen needed a regen mode and a same-hardware capture policy at all. Where you cannot eliminate the variance, absorb _only that much_ of it with a threshold (next section) and pin the render to consistent hardware.
+
+```typescript
+// A determinism-hardened visual spec
+test("card renders identically", async ({ page }) => {
+  await page.goto("/cards/42");
+  await page.evaluate(() => document.fonts.ready); // fonts settled
+  await page.emulateMedia({ reducedMotion: "reduce" }); // no animation mid-frame
+  await expect(page.locator(".card")).toHaveScreenshot("card.png", {
+    mask: [page.locator(".timestamp")], // exclude volatile content
+    maxDiffPixelRatio: 0.005,
+  });
+});
+```
+
+<Tip>
+
+Capture the baseline in the _same environment that will run the gate_. A baseline captured on a developer's macOS machine and compared against a Linux CI render will diff on font hinting and antialiasing alone -- a guaranteed false red that has nothing to do with the product. This is why baselines are keyed by platform and why CI regenerates them on its own runner image.
+
+</Tip>
+
+## Tolerance Absorbs Noise, Never Regressions
+
+A threshold exists for exactly one reason: to absorb rendering noise you have proven you cannot eliminate -- a few antialiased pixels along a GPU-drawn curve, sub-pixel font hinting on a platform you must support. It is a noise floor, not a regression allowance. The test is directional:
+
+- **Legitimate:** you can name the physical noise source, you set the threshold just above it, and a real visual change still exceeds it and fails.
+- **Illegitimate:** a real diff is failing, and you raise the threshold until it passes. That is [Rule 8 -- Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate). The guide names "loosened screenshot tolerance (e.g., raised pixel threshold)" as a specific instance of gaming the gate, on the same list as deleting an assertion or skipping a test.
+
+<Danger>
+
+Loosening `maxDiffPixels` / `maxDiffPixelRatio` / `threshold` to turn a red run green must be treated as suspect by default. Per the required-behavior rule, such an edit needs a linked issue and a **fresh-context review** of the diff -- it may not be applied in the same session that authored the change that caused the mismatch. A widened tolerance is indistinguishable, at the config level, from a real regression being waved through; only the review makes them distinguishable.
+
+</Danger>
+
+The healthy direction of travel is _tightening_: as you engineer more determinism (fonts, animation, hardware pinning), the noise floor drops and the threshold should drop with it. A threshold that only ever grows is a suite slowly going blind.
+
+## Where This Layer Sits
+
+This is a **deterministic Level 5-family gate** -- the same reproducible, no-LLM pass/fail character as computed-style assertions, aimed at the visual output instead of specific property values. It does not replace computed-style checks; the two cover different failure shapes.
+
+| Situation | Reach for |
+|---|---|
+| One property must equal an exact value (`font-size: 48px`, `height` not `0px`) | Computed-style assertion ([Level 5](../testing-levels/level-5-visual-verification.mdx)) |
+| Gradient, shadow, SVG recolor, canvas/GPU output -- visual truth with no single property to name | Committed-baseline pixel diff (this page) |
+| Rich layout interplay too broad to enumerate as properties | Committed-baseline pixel diff |
+| Churny content, heavy cross-platform font variance, text-dominated pages | Computed-style assertions -- a pixel diff will flake |
+| No stable DOM rect, computed styles don't apply, pixel diff too noisy to be deterministic | [Level 6](../testing-levels/level-6-ai-based-verification.mdx) AI verdict -- final resort |
+
+Computed styles answer "is this one value correct?" A baseline pixel diff answers "does the whole rendered region still look like the reference?" -- which is strictly more than any finite list of `toHaveCSS` assertions can express for a gradient or a canvas, and strictly worse for a page whose content legitimately changes every run. On surfaces whose _product_ is the rendered image -- SVG color-mapping panels (zpanels), layout-as-product dashboards (zudome) -- there is no single property standing in for "correct," and the committed-baseline diff is the only regression net that sees what the user sees.
+
+The boundary with [Level 6](../testing-levels/level-6-ai-based-verification.mdx) is determinism. A committed-baseline diff is reproducible and belongs in CI; an L6 AI verdict is non-deterministic, cost-bearing, and explicitly not a CI gate. When the surface is a `<canvas>` with no stable rect _and_ the pixel diff is too noisy to trust -- the two conditions the guide requires together -- that is the narrow case that escalates past this layer to L6, not a reason to loosen a threshold here.
+
+## CI Realities
+
+- **Storage: in-repo vs artifacts.** Committed baselines are the reviewable default -- the diff _is_ the review. The cost is repository weight: PNGs are binary, they grow the pack, and a wide device/scheme/OS matrix multiplies fast. Keep baselines scoped to the surfaces that actually earn a pixel gate; do not baseline every page. Some teams store baselines as CI artifacts or in external storage instead -- you shed repo weight but lose the PR-diff review that makes the gate honest, so prefer in-repo until size forces the trade.
+- **Per-OS baselines.** Because renders differ by platform, each OS you gate needs its own baseline set, captured on that OS. Generate them on the CI runner image, not a developer laptop, so the reference matches the gate's environment.
+- **The update flow.** Locally: `npx playwright test --update-snapshots`, then **review the resulting PNG diff in the PR** before committing. The reviewable event is the changed baseline; a PR that updates baselines with no visual explanation is exactly the smell the [tolerance rule](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate) exists to catch.
+- **GPU-bound baselines belong on a schedule.** When the render needs a real GPU that PR runners lack, the pixel gate cannot judge on every PR -- it is the canonical [heavy-test Case B](../decision-guide/heavy-test-decision.mdx). Run it on capable hardware in a [scheduled re-exam](./scheduled-re-exam.mdx) instead of demoting it to a lower level; the level is right, only the tier moves.
+
+## Where to Go Next
+
+- [Level 5: Deterministic + Visual Verification](../testing-levels/level-5-visual-verification.mdx) -- the computed-style + informal-screenshot layer this deterministic pixel gate completes
+- [Level 6: AI-Based Visual Verification](../testing-levels/level-6-ai-based-verification.mdx) -- the non-deterministic final resort for surfaces even a pixel diff cannot judge
+- [Required Behavior — Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate) -- why loosening a screenshot tolerance to pass is treated as gaming the gate
+- [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) -- the animation and hydration determinism fixes a pixel gate depends on
+- [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) -- when a GPU-bound pixel gate moves to the scheduled tier
+- [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) -- how a GPU visual-regression lane runs on real hardware off the PR path
