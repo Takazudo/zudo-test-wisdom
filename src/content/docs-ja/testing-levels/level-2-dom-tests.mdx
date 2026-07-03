@@ -36,15 +36,29 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom", // or "happy-dom"
+    globals: true, // required for Testing Library auto-cleanup between tests
   },
 });
 ```
 
 <Tip>
 
-**happy-dom** はほとんどのケースで jsdom より高速です。より広いブラウザAPI互換性が必要な場合は jsdom を使用してください。
+**happy-dom** はほとんどのケースで jsdom より高速です。より広いブラウザAPI互換性が必要な場合は jsdom を使用してください。いずれにせよ `jsdom` と `happy-dom` は Vitest 本体とは別の devDependencies です -- 使う方をインストールしないと、最初の実行が module-not-found エラーで失敗します。
 
 </Tip>
+
+<Note>
+
+`globals: true` がないと Testing Library の自動クリーンアップが登録されず、同じファイル内の2つ目の`render()`が前のコンポーネントのDOMを残してしまいます（例えば`getByRole("button")`が2つのボタンにマッチしてしまう）。`globals: true`をプロジェクト全体で有効にしたくない場合は、代わりに明示的にクリーンアップしてください：
+
+```typescript
+import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+
+afterEach(cleanup);
+```
+
+</Note>
 
 ## 例
 
@@ -76,8 +90,9 @@ describe("Toggle", () => {
   });
 
   it("toggles to ON on click", async () => {
+    const user = userEvent.setup();
     render(<Toggle label="Sound" />);
-    await userEvent.click(screen.getByRole("button"));
+    await user.click(screen.getByRole("button"));
     expect(screen.getByText("Sound: ON")).toBeTruthy();
   });
 });
@@ -130,6 +145,20 @@ describe("TableOfContents SSG presence", () => {
 
 重要なギャップ：jsdomのツリーや render-to-string の出力に要素が存在していても（レベル2はパス）、CSSにより画面上では完全に非表示になっている場合があります（レベル5ならこれをキャッチ）。
 
+## jsdomでは足りないがフルE2Eには重すぎるとき
+
+jsdomとhappy-domにはCSSエンジンが存在しないため、上のブラインドスポットに挙げたもの -- 算出スタイル、`var()`や`oklch()`の解決、実際のレイアウト -- はレベル2のテストからは見えないままです。Vitestの**ブラウザモード**は、レベル2から離れることなくこのギャップだけを埋めます。シミュレートされたDOMの代わりに、コンポーネントテストを実際のPlaywright駆動のChromium内で実行するため、実際のブラウザのCSSエンジンが解決を行うので算出スタイルが本当に解決されます。
+
+テストファイル自体はほとんど変わりません -- 同じ`describe`/`it`、同じコンポーネントレンダリングAPIです。変わるのは、既存のjsdomの`unit`プロジェクトに加えて、`*.browser.test.ts`という命名規則にスコープされた2つ目のVitestプロジェクトの裏側の環境です。具体的な設定は[2プロジェクト構成のレシピ](../real-world-patterns/vitest-patterns.mdx#vitestブラウザモード-2プロジェクト構成)を参照してください。
+
+<Note>
+
+実例：zdtpはまさにこの分割を採用しています -- コンポーネントテストの大部分はjsdomで、実際の算出スタイルをアサートする必要があるひと握りのテストは`*.browser.test.ts`を実行する`browser`プロジェクトで行います。
+
+</Note>
+
+これがレベルモデルのどこに位置するか：コンポーネントの分離、vitestのAPI、起動すべきアプリサーバーがないという、依然としてレベル2のエルゴノミクスのままです。しかしレベル5相当のCSS可観測性を、分離された**ライブラリコード**に対して持ちます。これは`/verify-ui`（英語版のスキルドキュメント: [`/verify-ui`](/docs/claude-skills/verify-ui)）の代替にはなりません -- あのスキルは、分離されたコンポーネントではなく実際のページに対するアサーションとなる、フルで動作している**アプリ**を検証するためのツールであり続けます。
+
 ## レベル2を使用するタイミング
 
 | シナリオ | レベル2は適切か？ |
@@ -139,4 +168,5 @@ describe("TableOfContents SSG presence", () => {
 | クリックハンドラーが状態を更新しない | はい |
 | 要素が存在するが表示されない | いいえ -- レベル5を使用 |
 | CSSレイアウトが壊れている | いいえ -- レベル5を使用 |
+| コンポーネントに対する実際の算出スタイルを分離状態でアサートする | はい -- Vitestブラウザモード経由（上記参照） |
 | 複数ページのナビゲーションフロー | いいえ -- レベル4を使用 |

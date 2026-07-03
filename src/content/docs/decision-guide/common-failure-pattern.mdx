@@ -92,13 +92,15 @@ The `overflow: hidden` + `height: 0` pattern is just one variant. Other common c
 
 | CSS Property | Effect | Level 2 Detects? | Level 5 Detects? |
 |-------------|--------|-----------------|-----------------|
-| `display: none` | Element removed from flow | No | Yes |
+| `display: none` | Element removed from flow | Partial* | Yes |
 | `visibility: hidden` | Element invisible but takes space | No | Yes |
 | `opacity: 0` | Element fully transparent | No | Yes |
 | `z-index` stacking | Element behind another | No | Yes |
 | `overflow: hidden` on ancestor | Content clipped | No | Yes |
 | `transform: scale(0)` | Element shrunk to nothing | No | Yes |
 | `position: absolute` + off-screen | Element positioned off viewport | No | Yes |
+
+\* Exception: jest-dom's `toBeVisible()` does catch `display: none` set inline (`style="display: none"`) or via a `hidden` attribute — jsdom resolves these directly, and its CSSOM can even match simple `<style>`-tag selectors when that stylesheet is actually present in the test's DOM. What defeats Level 2 in practice is usually scope: a component test renders the component alone, so an ancestor stylesheet like `.main-content` above is never loaded into that DOM at all. And for geometry-driven hiding — clipping, off-screen positioning, stacking — jsdom has no layout engine, so Level 2 cannot see it regardless of how the CSS was authored.
 
 ## The Hydration Mis-Nesting Variant
 
@@ -120,7 +122,7 @@ test("island children are not double-wrapped after hydration", async ({ page }) 
 
   // Trigger + wait for hydration, not a fixed timeout.
   await page.locator("[data-island]").scrollIntoViewIfNeeded();
-  await page.waitForSelector("[data-island][data-hydrated]");
+  await page.locator("[data-island][data-hydrated]").waitFor();
 
   // Assert STRUCTURE, not just presence: the items must be direct
   // children of the list, and they must stack vertically (a wrong

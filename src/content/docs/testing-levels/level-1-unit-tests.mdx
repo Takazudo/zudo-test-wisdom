@@ -76,7 +76,7 @@ Level 1 tests are **blind to everything visual**. They cannot detect:
 
 </Warning>
 
-Level 1 is the right choice when you are confident the bug is in logic, not in rendering. If there is any doubt about visibility or visual correctness, escalate to Level 4 or 5.
+Level 1 is the right choice when you are confident the bug is in logic, not in rendering. Visibility and CSS doubts always route to Level 5, per [CSS Always Needs Level 5](../decision-guide/quick-decision.mdx#key-principle-css-always-needs-level-5) -- reserve Level 4 for multi-step interaction flows, not visibility questions.
 
 ## When to Use Level 1
 
@@ -85,6 +85,6 @@ Level 1 is the right choice when you are confident the bug is in logic, not in r
 | Function returns wrong value | Yes |
 | Data transform is incorrect | Yes |
 | Validation rejects valid input | Yes |
-| Element not showing on screen | No -- use Level 4/5 |
+| Element not showing on screen | No -- use Level 5 |
 | Layout looks wrong | No -- use Level 5 |
 | Click handler not firing | No -- use Level 2 or 4 |

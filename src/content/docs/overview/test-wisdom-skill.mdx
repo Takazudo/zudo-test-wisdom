@@ -4,23 +4,23 @@ description: A Claude Code skill that indexes frontend testing documentation art
 sidebar_position: 10
 ---
 
-The `test-wisdom` skill is a Claude Code skill that indexes all frontend testing documentation articles in this site. It enables AI coding agents to quickly look up relevant testing patterns and techniques during development.
+The `test-wisdom` skill is a Claude Code skill that gives AI coding agents direct, live access to this site's frontend testing documentation. It enables AI coding agents to quickly look up relevant testing patterns and techniques during development.
 
 ## What It Does
 
-The skill maintains a documentation index that maps testing concepts to their articles. When invoked, it finds and reads the relevant article, then applies the recommended patterns.
+The skill directory symlinks the live `docs/` and `docs-ja/` content directories from this repo, and its `SKILL.md` embeds only the top-level documentation categories -- a directory tree, not a per-article index. Article discovery happens at lookup time: Claude browses the symlinked directories and reads each `.mdx` file's frontmatter (`title`, `description`) to find the right article.
 
-The documentation index is generated from all MDX articles under `src/content/docs/` and `src/content/docs-ja/` (for Japanese). Each `.mdx` file has YAML frontmatter with `title` and `description` fields that help identify the right article to read.
+New articles are available immediately without re-running setup, since they live behind the same symlink. Re-run `pnpm setup:doc-skill` only after adding or renaming a top-level category, so the category list embedded in `SKILL.md` picks it up.
 
 ## Installation
 
-Run the setup script to create the skill and symlink it to your global Claude Code skills directory:
+Run the setup script to generate the skill and symlink every skill under `.claude/skills/` -- the generated `test-wisdom` skill plus tracked skills like `verify-ui` and `headless-browser` -- into your global Claude Code skills directory:
 
 ```bash
 pnpm run setup:doc-skill
 ```
 
-This creates the skill at `.claude/skills/test-wisdom/` and symlinks it to `~/.claude/skills/test-wisdom`.
+This creates the skill at `.claude/skills/test-wisdom/`, then symlinks all of `.claude/skills/*` to `~/.claude/skills/` in one step.
 
 ## Usage
 
@@ -52,6 +52,7 @@ In update mode, the skill guides Claude to:
 3. Create a new `.mdx` file or update an existing one
 4. Update the corresponding Japanese translation under `docs-ja/`
 5. Run `pnpm format:md` to format the new/changed files
+6. Run `pnpm build` to verify the site builds correctly
 
 ## Skill Structure
 

@@ -18,10 +18,10 @@ This is fundamentally different from L5:
 
 | Level | Verdict mechanism | Deterministic? |
 |-------|------------------|----------------|
-| L5 | Computed-style check or screenshot pixel-diff against a threshold | Yes |
+| L5 | Computed-style check (deterministic) + screenshot review (informal visual confirmation) | Partial -- the computed-style half is deterministic, the screenshot-review half is not |
 | L6 | AI subagent looks at screenshots / measurements and judges | **No** |
 
-L6 is for the residual class of problems where capturing "the right thing" for L5 to assert on is itself intractable.
+L6 is for the residual class of problems where capturing "the right thing" for L5 to assert on is itself intractable. The screenshot-review half of L5 also has a deterministic counterpart now -- see [Deterministic Visual Regression with Committed Baselines](../real-world-patterns/visual-regression-baselines.mdx) -- but that pixel-diff gate still needs a stable DOM rect and a tolerable noise floor. L6 remains the answer when neither holds (no stable rect, or the diff is too noisy to trust).
 
 ## When to Escalate to L6
 

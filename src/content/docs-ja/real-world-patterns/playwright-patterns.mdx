@@ -37,16 +37,21 @@ export default defineConfig({
   projects: [
     {
       name: "ci",
-      testMatch: /.*\.spec\.ts/,
-      testIgnore: /.*@interactive.*/,
+      grepInvert: /@interactive/,
     },
     {
       name: "interactive",
-      testMatch: /.*@interactive.*\.spec\.ts/,
+      grep: /@interactive/,
     },
   ],
 });
 ```
+
+<Warning>
+
+`testMatch`/`testIgnore` は**ファイルパス**でフィルタし、`grep`/`grepInvert` は**テストタイトル**でフィルタします。上記の `@interactive` タグはテストタイトル（`test("@interactive Ctrl+S saves document", ...)`）に存在しており、ファイル名 `e2e/keyboard-shortcuts.spec.ts` には含まれていません——パスベースの `testMatch: /.*@interactive.*\.spec\.ts/` はこのファイル名にゼロ件しかマッチしないため、`interactive` プロジェクトは何も収集できず、タグ付きのテストは除外されるどころか `ci` 側にすり抜けてしまいます。上記のようにタイトルで `grep`/`grepInvert` フィルタするか、Playwright 1.42以降であればファーストクラスのタグ機能（`test("Ctrl+S saves document", { tag: "@interactive" }, ...)`）とコマンドラインの `--grep @interactive` を使ってください。このページの `@flaky` 隔離は、すでにタイトルでのフィルタを正しく行っています——それが手本にすべきパターンです。
+
+</Warning>
 
 <Tip>
 
@@ -56,7 +61,7 @@ CIでは `npx playwright test --project=ci` を実行し、フルキーボード
 
 ## いずれのプロジェクトにも一致しないスペックを防ぐ
 
-上記のCI安全 / interactive分割では `ci` プロジェクトに**キャッチオール**の `testMatch: /.*\.spec\.ts/` を使っているため、すべてのスペックが少なくとも1つのプロジェクトに収集されます。このキャッチオールこそが、ここで説明する罠を防いでいるものです。この罠が現れるのは、各プロジェクトがファイル名のプレフィックスで互いに重ならない形に**分割**されたセットアップ（例：フィクスチャやアプリごとに1プロジェクト）に移行したときです：
+上記のCI安全 / interactive分割は `ci` プロジェクトの `testMatch` を**デフォルト**のまま（パス制限なし）にしているため、タイトルにかかわらずすべてのスペックファイルが収集されます——この暗黙のキャッチオールこそが、ここで説明する罠を防いでいるものです。この罠が現れるのは、各プロジェクトがファイル名のプレフィックスで互いに重ならない形に**分割**されたセットアップ（例：フィクスチャやアプリごとに1プロジェクト）に移行したときです：
 
 ```typescript
 // playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
@@ -487,9 +492,13 @@ test("production build serves all pages", async ({ page }) => {
 
 test("production build has no broken links", async ({ page }) => {
   await page.goto("/");
-  const links = await page.locator("a[href^='/']").all();
-  for (const link of links) {
-    const href = await link.getAttribute("href");
+  // Collect hrefs as plain strings before navigating -- .all() locators
+  // re-resolve against whatever page is currently loaded, so navigating away
+  // mid-loop would have iteration 2+ walk hrefs from a random later page.
+  const hrefs = await page.$$eval("a[href^='/']", (els) =>
+    els.map((a) => a.getAttribute("href")),
+  );
+  for (const href of hrefs) {
     if (href) {
       const response = await page.goto(href);
       expect(response?.status()).toBe(200);
@@ -544,19 +553,56 @@ node --inspect=0 ./server.js
 # .github/workflows/e2e.yml
 jobs:
   e2e:
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         shard: [1/4, 2/4, 3/4, 4/4]
     steps:
       - uses: actions/checkout@v4
-      - run: npx playwright install --with-deps
-      - run: npx playwright test --shard=${{ matrix.shard }}
-      - uses: actions/upload-artifact@v4
-        if: failure()
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
-          name: playwright-report-${{ strategy.job-index }}
+          node-version: 20
+      - run: pnpm install
+      - run: npx playwright install --with-deps
+      - run: npx playwright test --shard=${{ matrix.shard }} --reporter=blob
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blob-report-${{ strategy.job-index }}
+          path: blob-report/
+          retention-days: 1
+
+  merge-reports:
+    if: always()
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pnpm install
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+      - run: npx playwright merge-reports --reporter=html ./all-blob-reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
           path: playwright-report/
+          retention-days: 14
 ```
+
+<Note>
+
+各シャードは、デフォルトのHTMLレポートの代わりに `blob` レポートを書き出すようになりました——別々のシャードのHTMLレポートは結合できませんが、blobレポートなら結合できます。失敗したシャードのレポートこそ最も必要になるため、この失敗ケースでは2つの設定が重要です。マトリクスの `fail-fast: false` は、1つのシャードが失敗した瞬間に他のシャードがキャンセルされるのを防ぎます。アップロードステップの `if: always()` は、失敗したシャードのblobレポートがスキップされるのを防ぎます（GitHub Actionsはステップが非ゼロで終了すると、デフォルトで以降のステップをスキップします）。この2つがどちらも無ければ、`merge-reports`（こちらも `if: always()` で実行されます）はパスしたシャードのblobレポートしか目にすることができません。
+
+</Note>
 
 ## フロントエント専用E2Eのためのモックバックエンドアダプター
 

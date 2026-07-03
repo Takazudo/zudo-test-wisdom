@@ -37,16 +37,21 @@ export default defineConfig({
   projects: [
     {
       name: "ci",
-      testMatch: /.*\.spec\.ts/,
-      testIgnore: /.*@interactive.*/,
+      grepInvert: /@interactive/,
     },
     {
       name: "interactive",
-      testMatch: /.*@interactive.*\.spec\.ts/,
+      grep: /@interactive/,
     },
   ],
 });
 ```
+
+<Warning>
+
+`testMatch`/`testIgnore` filter by **file path**; `grep`/`grepInvert` filter by **test title**. The `@interactive` tag above lives in the test title (`test("@interactive Ctrl+S saves document", ...)`), not the filename `e2e/keyboard-shortcuts.spec.ts` — a path-based `testMatch: /.*@interactive.*\.spec\.ts/` matches that filename against zero files, so the `interactive` project would collect nothing and the tagged test would fall through to `ci` instead of being excluded from it. Filter on title with `grep`/`grepInvert` as above, or, on Playwright ≥1.42, use first-class tags (`test("Ctrl+S saves document", { tag: "@interactive" }, ...)`) with `--grep @interactive` on the command line. The `@flaky` quarantine further down this page already filters on title — that's the pattern to copy.
+
+</Warning>
 
 <Tip>
 
@@ -56,7 +61,7 @@ Run `npx playwright test --project=ci` in CI and `npx playwright test --project=
 
 ## Guard against specs that match no project
 
-The CI-safe / interactive split above uses a **catch-all** `testMatch: /.*\.spec\.ts/` on the `ci` project, so every spec is collected by at least one project — the catch-all is exactly what prevents the trap described here. The trap only appears once you move to a **partitioned** setup where each project maps to a disjoint filename prefix (e.g. one project per fixture or app):
+The CI-safe / interactive split above leaves `testMatch` at its **default** (no path restriction) on the `ci` project, so every spec file is collected regardless of title — that implicit catch-all is exactly what prevents the trap described here. The trap only appears once you move to a **partitioned** setup where each project maps to a disjoint filename prefix (e.g. one project per fixture or app):
 
 ```typescript
 // playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
@@ -487,9 +492,13 @@ test("production build serves all pages", async ({ page }) => {
 
 test("production build has no broken links", async ({ page }) => {
   await page.goto("/");
-  const links = await page.locator("a[href^='/']").all();
-  for (const link of links) {
-    const href = await link.getAttribute("href");
+  // Collect hrefs as plain strings before navigating -- .all() locators
+  // re-resolve against whatever page is currently loaded, so navigating away
+  // mid-loop would have iteration 2+ walk hrefs from a random later page.
+  const hrefs = await page.$$eval("a[href^='/']", (els) =>
+    els.map((a) => a.getAttribute("href")),
+  );
+  for (const href of hrefs) {
     if (href) {
       const response = await page.goto(href);
       expect(response?.status()).toBe(200);
@@ -544,19 +553,56 @@ For large test suites, shard across multiple CI runners:
 # .github/workflows/e2e.yml
 jobs:
   e2e:
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         shard: [1/4, 2/4, 3/4, 4/4]
     steps:
       - uses: actions/checkout@v4
-      - run: npx playwright install --with-deps
-      - run: npx playwright test --shard=${{ matrix.shard }}
-      - uses: actions/upload-artifact@v4
-        if: failure()
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
-          name: playwright-report-${{ strategy.job-index }}
+          node-version: 20
+      - run: pnpm install
+      - run: npx playwright install --with-deps
+      - run: npx playwright test --shard=${{ matrix.shard }} --reporter=blob
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blob-report-${{ strategy.job-index }}
+          path: blob-report/
+          retention-days: 1
+
+  merge-reports:
+    if: always()
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pnpm install
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+      - run: npx playwright merge-reports --reporter=html ./all-blob-reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
           path: playwright-report/
+          retention-days: 14
 ```
+
+<Note>
+
+Each shard now writes a `blob` report instead of the default HTML report — HTML reports from separate shards can't be combined, but blob reports can. Two details matter for the failure case, which is exactly when you need the report most: `fail-fast: false` on the matrix stops GitHub Actions from cancelling the other shards the moment one fails, and `if: always()` on the upload step keeps a failed shard's blob report from being skipped (GitHub Actions skips later steps by default once a step exits non-zero). Without both, `merge-reports` — which itself runs `if: always()` — would only ever see the blob reports of shards that passed.
+
+</Note>
 
 ## Mock Backend Adapter for Frontend-Only E2E
 

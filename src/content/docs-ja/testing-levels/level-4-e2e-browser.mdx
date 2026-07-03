@@ -32,7 +32,7 @@ import { test, expect } from "@playwright/test";
 
 test("navigates from home to docs", async ({ page }) => {
   await page.goto("/");
-  await page.click('a[href="/docs"]');
+  await page.locator('a[href="/docs"]').click();
   await expect(page).toHaveURL("/docs");
   await expect(page.locator("h1")).toHaveText("Documentation");
 });
@@ -49,14 +49,20 @@ test("no console errors on page load", async ({ page }) => {
 
 ## 例: ヘッドレスブラウザによるクイックチェック
 
-フルテストスイートを使わない迅速な検証には、headless-browserでスクリーンショットを撮影しエラーをチェックします：
+フルテストスイートを使わない迅速な検証には、`/headless-browser`（英語版のスキルドキュメント: [`/headless-browser`](/docs/claude-skills/headless-browser)）でスクリーンショットを撮影しエラーをチェックします。実体のスクリプトは `$HOME/.claude/skills/headless-browser/scripts/headless-check.js` にあります。
+
+スクリーンショット付きのクイックヘルスチェック（`--screenshot` は値が必須です。`viewport` か `full` を指定します -- 値なしのフラグは無視されます）：
 
 ```bash
-# Quick page health check
-node headless-check.js --url http://localhost:3000 --screenshot
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --screenshot viewport
+```
 
-# Check for console errors
-node headless-check.js --url http://localhost:3000 --console-errors
+コンソールエラーのチェック。`--console-errors` というフラグは存在しません -- JSON出力には常に `hasErrors`、`console`、`pageErrors` が含まれます。リソースのブロックはデフォルトで有効なので、正確なエラー検出には `--no-block-resources` を指定してください。ネットワークエラーは別の関心事です -- `hasErrors` はページエラーとコンソールエラーのみを反映するため、失敗したリクエストを検出するには出力の `networkErrors.totalFailed`／`failedRequests` を確認してください：
+
+```bash
+node $HOME/.claude/skills/headless-browser/scripts/headless-check.js \
+  --url http://localhost:3000 --no-block-resources
 ```
 
 ## コンソールエラーモニタリング
@@ -95,11 +101,11 @@ export const test = base.extend({
 - 技術的には表示されているが視覚的に重なっている要素
 - フォントレンダリングの違い
 - レスポンシブレイアウトのブレークポイント
-- 算出スタイルの値
+- 体系的な算出スタイル検証 -- Playwrightは個々の値をアサートできますが（`expect(locator).toHaveCSS(...)`）、通常のE2Eスペックはスタイルではなく DOM状態をアサートします。複数ビューポート／テーマにまたがる体系的なスタイル検証は[レベル5](./level-5-visual-verification.mdx)の領域です。
 
 </Warning>
 
-レベル4は「要素が存在してインタラクション可能である」ことを確認します。「要素が正しく見える」ことを確認するには、レベル5にエスカレーションしてください。
+レベル4は「要素が存在してインタラクション可能である」ことを確認します。「要素が正しく見える」ことを確認するには、[レベル5](./level-5-visual-verification.mdx)にエスカレーションしてください。
 
 ## レベル4を使用するタイミング
 
@@ -109,5 +115,5 @@ export const test = base.extend({
 | フォーム送信が失敗する | はい |
 | 動的コンテンツが読み込まれない | はい |
 | ページにコンソールエラーがある | はい |
-| 要素の配置が間違っている | 部分的 -- レベル5がより適切 |
-| CSSの色/間隔が間違っている | いいえ -- レベル5を使用 |
+| 要素の配置が間違っている | 部分的 -- [レベル5](./level-5-visual-verification.mdx)がより適切 |
+| CSSの色/間隔が間違っている | いいえ -- [レベル5](./level-5-visual-verification.mdx)を使用 |

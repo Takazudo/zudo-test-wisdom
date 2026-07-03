@@ -4,42 +4,46 @@ description: Unit tests, component tests, and build output tests with Vitest.
 sidebar_position: 2
 ---
 
-## Workspace-Level Vitest Configs
+## Project-Level Vitest Configs
 
-Large projects often need different Vitest configurations for different test types. Use Vitest workspaces to manage this:
+Large projects often need different Vitest configurations for different test types. Define multiple projects inside a single root config with `test.projects`:
 
 ```typescript
-// vitest.workspace.ts
-import { defineWorkspace } from "vitest/config";
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
 
-export default defineWorkspace([
-  {
-    test: {
-      name: "unit",
-      include: ["src/**/*.test.ts"],
-      environment: "node",
-    },
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "component",
+          include: ["src/**/*.test.tsx"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "build",
+          include: ["tests/build/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+    ],
   },
-  {
-    test: {
-      name: "component",
-      include: ["src/**/*.test.tsx"],
-      environment: "jsdom",
-    },
-  },
-  {
-    test: {
-      name: "build",
-      include: ["tests/build/**/*.test.ts"],
-      environment: "node",
-    },
-  },
-]);
+});
 ```
 
 <Tip>
 
-Separate configs let you run fast unit tests independently from slower component or build tests: `vitest --project unit` vs `vitest --project component`.
+Separate projects let you run fast unit tests independently from slower component or build tests: `vitest --project unit` vs `vitest --project component`.
 
 </Tip>
 
@@ -75,6 +79,56 @@ describe("DOM-dependent test", () => {
   });
 });
 ```
+
+## Vitest Browser Mode: Two-Project Split
+
+Component tests that need to assert a *real* computed style -- `var()` and `oklch()` resolution, actual layout values -- outgrow jsdom's synthetic CSS engine. Vitest's browser mode runs a project's tests inside a real Playwright-driven browser instead, using the same `test.projects` mechanism as above: keep the fast jsdom `unit` project for everything that doesn't touch CSS, and add a `browser` project scoped to a `*.browser.test.ts` naming convention for the handful of tests that do.
+
+```typescript
+// vitest.config.ts -- current Vitest 3.x/4.x browser-mode shape
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "browser",
+          include: ["src/**/*.browser.test.ts"],
+          browser: {
+            enabled: true,
+            provider: "playwright",
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
+    ],
+  },
+});
+```
+
+```bash
+pnpm add -D vitest @vitest/browser playwright
+```
+
+<Tip>
+
+Run just the browser project with `pnpm vitest run --project browser`. The `*.browser.test.ts` suffix is the only thing routing a file into real Chromium instead of jsdom -- keep the naming convention consistent.
+
+</Tip>
+
+<Note>
+
+This is the config-level half of [When jsdom Is Not Enough](../testing-levels/level-2-dom-tests.mdx#when-jsdom-is-not-enough-but-full-e2e-is-too-much) -- same Level 2 ergonomics (component isolation, the vitest API), Level 5-grade CSS observability for library code under test.
+
+</Note>
 
 ## Separate Configs for Different Test Types
 
@@ -172,15 +226,13 @@ describe("Worker with D1", () => {
       r2Buckets: ["STORAGE"],
     });
 
-    // Run migrations
+    // Run migrations. D1's exec() splits its input on newlines (one
+    // statement per line), so a pretty-printed multi-line CREATE TABLE
+    // throws D1_EXEC_ERROR -- keep the statement on a single line.
     const db = await mf.getD1Database("DB");
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS patterns (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        data TEXT NOT NULL
-      )
-    `);
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS patterns (id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL)",
+    );
   });
 
   it("stores and retrieves a pattern", async () => {
@@ -197,6 +249,12 @@ describe("Worker with D1", () => {
   });
 });
 ```
+
+<Warning>
+
+**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so a SQL statement pretty-printed across multiple lines throws `D1_EXEC_ERROR: incomplete input` -- D1 tries to run each fragment on its own. Collapse each statement to a single line before calling `exec()`, or split a multi-statement migration file yourself (see [`createTestEnv`](./backend-testing.mdx#cloudflare-functions-with-miniflare) for the multi-statement case). This is a platform quirk, not something recoverable by reading more of your own code.
+
+</Warning>
 
 <Tip>
 
@@ -297,8 +355,11 @@ function enableTransitions(): void {
 }
 enableTransitions();
 
-// Late import after the document is primed.
-import { init, navigate } from "../../client-router/router.js";
+// Dynamic import AFTER the document is primed. A static `import` here
+// would hoist above enableTransitions(), so the router would still see
+// the pre-injection document -- `await import(...)` runs at this exact
+// point in the file instead.
+const { init, navigate } = await import("../../client-router/router.js");
 ```
 
 <Danger>
@@ -309,17 +370,18 @@ If the module under test reads `document` (or any global) at eval time, a top-of
 
 ### Bonus: mock `startViewTransition` to test both paths
 
-`document.startViewTransition` is a progressive-enhancement API. happy-dom does not implement it, and you want to cover both the View-Transition path and the plain fallback. Stub its presence or absence with `vi`:
+`document.startViewTransition` is a progressive-enhancement API. happy-dom does not implement it, and you want to cover both the View-Transition path and the plain fallback. Assign the method directly on `document` rather than stubbing the whole global -- `vi.stubGlobal("document", { ...document, ... })` spreads `document` into a plain object literal, which loses every prototype-based DOM method (`createElement`, `getElementById`, and so on), breaking anything else the test touches:
 
 ```typescript
 // router.test.ts
+afterEach(() => {
+  delete (document as any).startViewTransition;
+});
+
 it("uses the View Transitions path when available", async () => {
-  vi.stubGlobal("document", {
-    ...document,
-    startViewTransition: vi.fn((cb: () => void) => {
-      cb();
-      return { finished: Promise.resolve(), ready: Promise.resolve() };
-    }),
+  (document as any).startViewTransition = vi.fn((cb: () => void) => {
+    cb();
+    return { finished: Promise.resolve(), ready: Promise.resolve() };
   });
   // ...drive navigate() and assert the transition branch ran
 });

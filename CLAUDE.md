@@ -20,7 +20,7 @@ pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 - Japanese: `src/content/docs-ja/` -> `/ja/docs/...`
 - Japanese docs mirror the English directory structure
 
-**Bilingual rule**: When creating or updating any doc page, ALWAYS update both the English (`docs/`) and Japanese (`docs-ja/`) versions in the same PR. Keep code blocks identical between languages -- only translate surrounding prose.
+**Bilingual rule**: When creating or updating any doc page, ALWAYS update both the English (`docs/`) and Japanese (`docs-ja/`) versions in the same PR. Keep code blocks identical between languages -- only translate surrounding prose. Executable code blocks stay byte-identical between EN and JA; display-only text inside diagrams (mermaid node/edge labels, tree-diagram comments) may be translated.
 
 **Exception**: Pages with `generated: true` in frontmatter (e.g., claude-resources auto-generated pages) do not require Japanese translations.
 

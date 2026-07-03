@@ -1,0 +1,163 @@
+---
+title: Built-Site Integrity Gates
+description: Deterministic gates over the built site -- link check, html-validate, full-site crawl smoke, and 404/OGP/image-health sweeps -- the failures no unit or component test can structurally see.
+sidebar_position: 13
+---
+
+A content-heavy site can have a green unit suite, a green component suite, and still ship a homepage that links to a page that no longer exists, an article whose hero image 404s, a sitemap that lists deleted URLs, and a run of pages that fail HTML validation. None of those are logic bugs, so none of them live where a unit or component test can reach. They are properties of the **built site as a whole** -- the actual `dist/` on disk and the actual bytes a browser fetches -- and the only tests that can see them are deterministic gates that run *after* the build, over the built output.
+
+This layer is the most recurring untaught test tier across the author's portfolio: every docs site, manual set, and content platform reinvents it, usually only after a broken link ships to production. This page names it as a first-class tier and collects the concrete gates.
+
+## What Unit and Component Tests Structurally Cannot See
+
+A unit test sees a function. A component test sees one component rendered into jsdom. Neither ever assembles the whole site, so an entire class of failure is invisible to both by construction:
+
+- **Broken internal links.** Page A links to `/guide/setup`; someone renames the file to `/guide/getting-started`. Every component still renders; the link is now a 404. No component test links two pages together, so none can catch it.
+- **Invalid HTML.** A component emits a `<ul>` with a stray `<div>` child, or nests a block element inside a `<p>`. jsdom is forgiving; a real validator over the built markup is not.
+- **Missing pages.** A route that should have emitted a file didn't -- a data source returned empty, a filter dropped an entry. The build is green because nothing errored; the page is simply absent from `dist/`.
+- **Dead images.** An `<img src>` points at an asset that was moved or never copied into the build. The component renders the tag; the browser gets a 404.
+- **Stale sitemaps and canonicals.** The sitemap still lists a deleted URL; a canonical tag points at a page that no longer exists. These are generated artifacts, and nothing that tests components looks at them.
+
+This is why the tier is an **L3/L4 hybrid**. The file-level checks -- link resolution and HTML validation over `dist/**/*.html` -- are [Level 3: Build Output Verification](../testing-levels/level-3-build-output.mdx): they read the emitted files directly, no browser needed. The crawl-level checks -- walking a served build and asserting each page responds -- are [Level 4: E2E Browser Tests](../testing-levels/level-4-e2e-browser.mdx) in spirit, even when implemented with a plain HTTP fetch loop rather than a full browser.
+
+<Note>
+
+For content-heavy sites the dominant failure mode is not a component bug at all -- it is **data integrity**: a broken link, a dead image, a stale canonical, a missing page. A downstream content platform's audit lane (`zzmod`) confirmed this directly: its canonical/sitemap/link/OGP checks and its 404 sweep catch far more real regressions than its component tests do. The gates below exist because the site's actual failures live in the built output, not in any single unit of code.
+
+</Note>
+
+## Internal Link Checking: Strict-Broken with an Allowlist
+
+The first gate resolves every internal link in the built HTML against the files actually present in `dist/`. This repo's own `pnpm check:links` is a live example:
+
+```json
+// package.json
+"check:links": "node scripts/check-links.js --strict-broken --allowlist=.check-links-allowlist"
+```
+
+Two design choices make it a gate rather than a report:
+
+**Strict-broken mode.** By default the checker prints its findings and exits `0` -- useful while iterating, useless as a gate. `--strict-broken` flips broken internal links to a non-zero exit, so CI actually fails on a real 404. Keeping the strict knobs *separable* (broken vs absolute-path vs trailing-slash) means a deploy can hard-fail on genuine 404s without being blocked by a warn-only category.
+
+**An allowlist file for known, unfixable exceptions.** Not every reported link is a regression. A JA page may legitimately reference an EN-only sibling that has no translation; a generated page may emit a link to a runtime route with no source file. The allowlist records each such case as a `<file>:<line>:<href>` line, filtered out *after* the full report is printed but *before* the strict-mode count -- so the report shows the whole picture and the gate counts only real regressions.
+
+<Warning>
+
+**An allowlist entry is a debt, not a dismissal.** Each entry must match the printed report verbatim and carry a comment explaining *why* it cannot be fixed at the source. The moment the exception stops being one -- someone writes the missing JA mirror -- the entry must be deleted, or the strict gate silently stops catching real regressions in that same category. An allowlist nobody prunes decays into a blind spot.
+
+</Warning>
+
+This pairing -- a strict link check plus an html-validate pass -- is a first-class CI gate on multiple sibling projects (a sibling docs site, `zudosg`, runs both on every PR), and `zudo-doc` classifies link-check + html-validate + preview-smoke together as its **Level 3 build-output gate**.
+
+## HTML Validation Over the Built Output
+
+The second file-level gate runs `html-validate` over the emitted HTML. This repo wires it as:
+
+```json
+// package.json
+"check:html": "html-validate \"dist/**/*.html\""
+```
+
+with a minimal ruleset that catches the errors that actually break rendering:
+
+```json
+// .htmlvalidate.json
+{
+  "rules": {
+    "element-permitted-content": "error"
+  }
+}
+```
+
+`element-permitted-content` alone catches the most common structural bug a component library produces: an element nested where the HTML spec forbids it -- a block element inside a `<p>`, an interactive element inside another, a `<div>` as a direct child of `<ul>`. These pass jsdom and pass a component test's `getByRole` query, then produce subtly broken layout in a real browser because the browser silently reparents the malformed tree. Validating the *built* markup is the only place this surfaces.
+
+<Tip>
+
+Start the ruleset small and add rules as real bugs teach you which ones matter. A maximal ruleset on day one drowns the signal in stylistic noise (missing `alt` heuristics, attribute-order preferences) and trains everyone to ignore the gate. One or two error-level rules that have each caught a real regression are worth more than fifty warnings nobody reads.
+
+</Tip>
+
+## Full-Site Crawl Smoke Against a Served Build
+
+File-level checks read `dist/` statically. The crawl gate goes one level further: it **serves** the built site (`pnpm preview`) and walks every URL, asserting each responds and renders. This catches failures that only appear once the site is actually served -- a routing config that maps a URL to nothing, a page that builds but throws on hydration, a redirect loop.
+
+Two implementations, same job, different cost:
+
+- **A Playwright crawl-all-pages spec** navigates every route in a real browser and asserts on rendered structure -- catches hydration errors and client-side failures a fetch cannot see. A manuals site, `zmanuals`, keeps exactly this as its crawl-all-pages spec.
+- **A fast smoke crawler script** issues a plain HTTP request to every URL (from the sitemap or by following links) and asserts the status code -- no browser, so it runs in seconds instead of minutes. `zmanuals` keeps this *alongside* the Playwright spec as the fast lane; a product-catalog site, `zmod`, runs the same shape as `all-articles`, `all-brands`, and `all-categories` crawls, one per content collection.
+
+The split is deliberate: the fast fetch crawler is cheap enough to run per-PR against the built output; the full browser crawl is reserved for the tiers where its cost is justified.
+
+<Note>
+
+The crawl needs a real served build, not the dev server. The dev server can mask failures the production build exposes (different asset resolution, on-demand compilation hiding a missing route). Crawl the output of `pnpm build` served by `pnpm preview` -- the artifact that actually ships -- so the smoke test's verdict matches production.
+
+</Note>
+
+## The Same Family: 404, OGP, Image-Health, and Data Sweeps
+
+Link check, html-validate, and crawl smoke are the well-known members. The same tier holds a wider family of deterministic sweeps over the built output, and on content-heavy sites these catch the most:
+
+- **404 sweep.** Assert that every URL that *should* exist does, and optionally that known-bad URLs correctly 404. `zzmod` keeps a dedicated 404 sweep as a scheduled lane.
+- **OGP sweep.** Every page must carry a complete, non-empty Open Graph block -- `og:title`, `og:description`, `og:image` -- because a missing tag only surfaces when the page is shared, far from any test. `zmod` and `zzmod` both audit OGP as a built-output gate.
+- **Image-health sweep.** Every `<img src>` in the built HTML must resolve to a file that exists and is non-empty. `zmod` runs exactly this as an image-health script.
+- **Canonical and sitemap audits.** Cross-check the sitemap against the pages actually emitted, and every canonical tag against a page that exists. `zzmod` audits canonical/sitemap/link/OGP together.
+- **Data-pipeline consistency.** When the site is generated from a data source, validate the *data's* invariants over the output. `zmanuals` runs `pdf:verify` / `pdf:validate` to assert page-number consistency between the manual's data and its rendered PDF -- a data-integrity check dressed as a build-output check.
+
+The unifying idea: these are all **assertions about the whole built artifact that no single component owns**. They belong together because they share a trigger (a completed build) and a failure signature (green code, broken site).
+
+## Tier Assignment: What Runs Where
+
+Not every gate belongs on every PR. Map each to an [execution tier](../decision-guide/execution-tiers.mdx) by cost, using the T0--T4 vocabulary:
+
+| Gate | Tier | When |
+| ---- | ---- | ---- |
+| Link check (`--strict-broken`) | T1 (PR gate) | every PR -- cheap, reads `dist/` statically |
+| html-validate over `dist/**` | T1 (PR gate) | every PR -- cheap, no server needed |
+| Fast fetch crawl smoke | T1 (PR gate) | every PR -- serves the build, still seconds |
+| Full Playwright crawl-all-pages | T2 / on main | when the fetch crawl is not enough, or the browser cost overflows the PR budget |
+| OGP / image-health / 404 sweep | T1 or main | cheap ones per-PR; the exhaustive versions on main |
+| External-link rot check | T3 (scheduled) | on a schedule -- external URLs go dead on their own timeline, and per-PR failure on someone else's outage is noise |
+
+The load-bearing distinction is **internal vs external**. An internal broken link is *your* regression: it is deterministic, it is your fault, and it belongs on the PR gate that blocks the merge. An external link going dead is *someone else's* outage on *their* timeline: failing a PR on it is a false red, so it belongs in the [scheduled re-exam](./scheduled-re-exam.mdx) tier where a dead-link report files a deduped issue instead of blocking a merge. Putting external-link checks on the PR gate is the single most common mistake in this tier -- it trains people to ignore red.
+
+## A Minimal Recipe: Link Check + html-validate in b4push and PR CI
+
+The smallest useful version of this tier for a static site is two gates -- link check and html-validate -- wired into both the local pre-push pass and the PR gate. First the scripts:
+
+```json
+// package.json
+"scripts": {
+  "build": "<your build command>",
+  "check:html": "html-validate \"dist/**/*.html\"",
+  "check:links": "node scripts/check-links.js --strict-broken --allowlist=.check-links-allowlist"
+}
+```
+
+Both gates run *after* build, over `dist/`, so the local pre-push script orders them last (cheap checks first, build, then the built-output gates):
+
+```bash
+# scripts/run-b4push.sh (excerpt) -- built-output gates run last, after build
+pnpm build          # emit dist/
+pnpm check:html     # validate the built HTML
+pnpm check:links    # resolve every internal link against dist/
+```
+
+The same two gates become required PR checks -- one build, then both checks against its output:
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+- run: pnpm build
+- name: HTML validation
+  run: pnpm check:html
+- name: Internal link check (strict)
+  run: pnpm check:links
+```
+
+<Info>
+
+The build is the shared prerequisite: both gates read `dist/`, so run build once and point both at its output rather than rebuilding per check. Wiring the *same* commands into `b4push` and CI is what keeps the two surfaces from drifting -- the local gate and the PR gate check identical things because they call the identical scripts. That parity is worth enforcing mechanically; see the guard-manifest pattern in [Scheduled Re-exam](./scheduled-re-exam.mdx#guard-manifest-parity-between-b4push-and-ci) for treating "wired into both surfaces" as a checkable invariant.
+
+</Info>
+
+Start here -- link check plus html-validate on every PR -- and add crawl smoke, OGP, and image-health sweeps as the site grows and real failures teach you which ones earn their place. The tier's value is that it catches, deterministically and before deploy, exactly the failures a green unit suite is structurally blind to.

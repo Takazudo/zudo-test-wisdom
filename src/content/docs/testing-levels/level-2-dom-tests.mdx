@@ -36,15 +36,29 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom", // or "happy-dom"
+    globals: true, // required for Testing Library auto-cleanup between tests
   },
 });
 ```
 
 <Tip>
 
-**happy-dom** is faster than jsdom for most use cases. Use jsdom when you need broader browser API compatibility.
+**happy-dom** is faster than jsdom for most use cases. Use jsdom when you need broader browser API compatibility. Either way, `jsdom` and `happy-dom` are separate devDependencies from Vitest itself -- install whichever one you reference, or the first run fails with a module-not-found error.
 
 </Tip>
+
+<Note>
+
+Without `globals: true`, Testing Library's auto-cleanup never registers, so a second `render()` in the same file leaves the previous component's DOM behind (e.g. two buttons match `getByRole("button")`). If you would rather not enable `globals: true` project-wide, clean up explicitly instead:
+
+```typescript
+import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+
+afterEach(cleanup);
+```
+
+</Note>
 
 ## Example
 
@@ -76,8 +90,9 @@ describe("Toggle", () => {
   });
 
   it("toggles to ON on click", async () => {
+    const user = userEvent.setup();
     render(<Toggle label="Sound" />);
-    await userEvent.click(screen.getByRole("button"));
+    await user.click(screen.getByRole("button"));
     expect(screen.getByText("Sound: ON")).toBeTruthy();
   });
 });
@@ -130,6 +145,20 @@ Level 2 tests run **outside a real browser** -- whether against a simulated DOM 
 
 The critical gap: an element can be present in the jsdom tree or the render-to-string output (Level 2 passes) while being completely invisible on screen due to CSS (Level 5 would catch this).
 
+## When jsdom Is Not Enough (But Full E2E Is Too Much)
+
+jsdom and happy-dom have no CSS engine, so everything in the Blind Spots list above -- computed styles, `var()` and `oklch()` resolution, real layout -- stays invisible to a Level 2 test. Vitest's **browser mode** closes that specific gap without leaving Level 2: it runs component tests inside a real Playwright-driven Chromium instead of a simulated DOM, so computed styles resolve for real because an actual browser's CSS engine is doing the resolving.
+
+The test file itself barely changes -- same `describe`/`it`, same component-render API. What changes is the environment underneath a second Vitest project scoped to a `*.browser.test.ts` naming convention, alongside the existing jsdom `unit` project. See [the two-project recipe](../real-world-patterns/vitest-patterns.mdx#vitest-browser-mode-two-project-split) for the concrete config.
+
+<Note>
+
+Live practice: zdtp runs exactly this split -- jsdom for the bulk of component tests, and a `browser` project running `*.browser.test.ts` for the handful that need to assert a real computed style.
+
+</Note>
+
+Where this sits in the level model: still Level 2 ergonomics -- component isolation, the vitest API, no app server to boot -- but with Level 5-grade CSS observability, for **library code** exercised in isolation. It does not replace [`/verify-ui`](../claude-skills/verify-ui/index.mdx): that skill remains the tool for verifying a full running **app**, where the assertion is about the real page rather than an isolated component.
+
 ## When to Use Level 2
 
 | Scenario | Level 2 Appropriate? |
@@ -139,4 +168,5 @@ The critical gap: an element can be present in the jsdom tree or the render-to-s
 | Click handler not updating state | Yes |
 | Element present but not visible | No -- use Level 5 |
 | CSS layout broken | No -- use Level 5 |
+| Assert a real computed style for a component in isolation | Yes -- via Vitest browser mode (see above) |
 | Multi-page navigation flow | No -- use Level 4 |

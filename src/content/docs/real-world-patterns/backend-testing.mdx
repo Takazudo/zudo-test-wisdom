@@ -39,14 +39,31 @@ export async function createTestEnv() {
   });
   const env = await mf.getBindings();
 
-  // Run SQL migrations
+  // Run SQL migrations. D1's exec() splits its input on newlines (one
+  // statement per line), so a pretty-printed multi-statement migration
+  // file throws D1_EXEC_ERROR -- split on `;`, collapse each statement
+  // to a single line, and exec() one at a time instead.
   const migration = readFileSync("migrations/0001_init.sql", "utf-8");
   const db = env.DB as D1Database;
-  await db.exec(migration);
+  const statements = migration
+    .split(";")
+    .map((statement) => statement.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  for (const statement of statements) {
+    await db.exec(statement);
+  }
 
   return { mf, env, db, bucket: env.BUCKET as R2Bucket };
 }
 ```
+
+<Warning>
+
+**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so passing a multi-line migration file straight through throws `D1_EXEC_ERROR: incomplete input`. Split the file on `;` yourself, collapse each statement's whitespace to a single line, and call `exec()` once per statement -- this is a platform quirk, not something recoverable by reading more of your own code.
+
+The `split(";")` above is a naive line-based splitter: it breaks on migrations with semicolons inside string literals, comments, or trigger bodies. For anything beyond simple `CREATE TABLE`/`CREATE INDEX` statements, use a real SQL statement splitter (for example `@databases/split-sql-query`) instead of a plain string split.
+
+</Warning>
 
 ### Test Data Factories
 
@@ -133,7 +150,13 @@ A Cloudflare binding like `KVNamespace` is just an object with a handful of meth
 
 ```ts
 // test/helpers/mock-kv.ts
-export function createMockKV(): KVNamespace {
+// Extends the real interface with the escape hatch tests use to seed and
+// inspect state directly -- see "The inspectable-mock-store design" below.
+export interface MockKVNamespace extends KVNamespace {
+  _store: Map<string, string>;
+}
+
+export function createMockKV(): MockKVNamespace {
   const store = new Map<string, string>();
 
   return {
@@ -148,7 +171,8 @@ export function createMockKV(): KVNamespace {
       store.delete(key);
       return Promise.resolve();
     },
-  } as unknown as KVNamespace;
+    _store: store,
+  } as unknown as MockKVNamespace;
 }
 ```
 
@@ -227,6 +251,46 @@ describe("session handler (Map-stub)", () => {
 <Tip>
 
 **The decision rule -- this is the gap.** Use **Miniflare** when you are testing SQL or storage semantics (does this query return the right rows, does this R2 multipart upload reassemble correctly). Use a **`Map`-stub** when you are testing your handler's branching and threading (does this route read the binding it should, does it return 401 when the session is missing). The load-bearing principle: **test YOUR logic, not the platform's storage engine.** Map-stubs are faster, need no `wrangler.toml`, run in plain Node, and let you pre-seed exact state.
+
+</Tip>
+
+## Real workerd Testing with vitest-pool-workers
+
+Miniflare emulates the Workers runtime in Node. `@cloudflare/vitest-pool-workers` goes one step further: Vitest test files run **inside** an actual `workerd` isolate, with real D1/KV/R2 bindings wired through `wrangler.toml` rather than a Node-side emulation layer. Live practice: zudo-file-sync runs its in-worker suites this way.
+
+```ts
+// vitest.config.ts
+import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+
+export default defineWorkersConfig({
+  test: {
+    poolOptions: {
+      workers: {
+        wrangler: { configPath: "./wrangler.toml" },
+      },
+    },
+  },
+});
+```
+
+```ts
+// test/worker.test.ts -- runs inside the real workerd isolate
+import { env } from "cloudflare:test";
+import { describe, it, expect } from "vitest";
+
+describe("worker (pool-workers)", () => {
+  it("reads and writes through the real D1 binding", async () => {
+    await env.DB.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)");
+    await env.DB.prepare("INSERT INTO t (id) VALUES (1)").run();
+    const row = await env.DB.prepare("SELECT * FROM t WHERE id = 1").first();
+    expect(row).toMatchObject({ id: 1 });
+  });
+});
+```
+
+<Tip>
+
+**The decision rule, extended to a third option.** `Map`-stub: fast, no platform semantics, for handler logic (above). Miniflare: binding *behavior* emulated in Node, for SQL/storage semantics (above). `@cloudflare/vitest-pool-workers`: reach for this only when the platform semantics themselves are under test -- D1 quirks that only reproduce in real workerd, `waitUntil` timing, bindings wiring, or an in-worker end-to-end path. It is the slowest and heaviest of the three; use it when Miniflare's own emulation is the thing in question, not your handler.
 
 </Tip>
 
@@ -385,7 +449,11 @@ describe("ApiClient", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    // vi.restoreAllMocks() does not undo vi.stubGlobal, and it does not
+    // clear fetchMock's queued mockResolvedValueOnce() calls -- both leak
+    // into the next test unless cleared explicitly.
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
   });
 
   it("sends auth header", async () => {
@@ -440,7 +508,7 @@ For Node.js tools that read/write files, use temporary directories for isolation
 ### Temp Directory Pattern
 
 ```ts
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";

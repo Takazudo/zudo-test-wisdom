@@ -101,15 +101,54 @@ it("hashes a string and its ArrayBuffer identically", async () => {
 
 JWTは署名されたデータなので、同じ規律が認証コードにそのまま転用できます。**署名ベクター**の観点からです。
 
-HMAC-SHA256（`HS256`アルゴリズム）は決定的です。固定されたシークレットと固定されたペイロードからは、ちょうど1つの署名が生成されます。つまりJWTの署名も、他の既知の答えのベクターと同じように扱えます。生成されたトークン（またはその署名部分）を、独立したJWTツールで生成した値に固定しておけば、署名処理のリグレッションは大きな声で失敗してくれます。
+HMAC-SHA256（`HS256`アルゴリズム）は決定的です。固定されたシークレットと固定されたペイロードからは、ちょうど1つの署名が生成されます。つまりJWTの署名も、他の既知の答えのベクターと同じように扱えます。生成されたトークンの署名部分を、独立したツールで生成した値に固定しておけば、署名処理のリグレッションは大きな声で失敗してくれます。
+
+`createToken`を呼び出し、その結果をそのまま`verifyToken`に渡すだけのラウンドトリップテストは、既知の答えのテストではありません -- このページの冒頭にある「同じ入力なら同じ出力」の罠が、JWTの衣装をまとっているだけです。両方の関数が同じライブラリ由来であるため、共有されたバグ（誤った署名アルゴリズム、誤ったヘッダーエンコーディング）は自分自身と一致してしまい、テストはそれでもパスします。修正方法は上のハッシュと同じです -- 署名を`../utils/jwt.js`の**外部**で計算した値に固定します。
+
+```ts
+import { describe, it, expect } from "vitest";
+import { createToken } from "../utils/jwt.js";
+
+const TEST_SECRET = "test-secret-key-that-is-long-enough-for-hs256";
+
+describe("JWT signing -- known-answer vector", () => {
+  it("matches an independently-computed HS256 signature", async () => {
+    // { noTimestamp: true } mirrors the `jsonwebtoken` npm package's own sign()
+    // option -- it skips the auto-added `iat` claim so the payload is exactly
+    // {"sub":"user-123"} and the token is byte-for-byte reproducible.
+    const token = await createToken({ sub: "user-123" }, TEST_SECRET, {
+      noTimestamp: true,
+    });
+    const [, , signature] = token.split(".");
+
+    // Vector computed with Node's own `crypto` module, independent of
+    // ../utils/jwt.js, for header {"alg":"HS256","typ":"JWT"} and payload
+    // {"sub":"user-123"}:
+    //   node -e 'const c=require("crypto");
+    //     const b64url=b=>b.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+    //     const h=b64url(Buffer.from(JSON.stringify({alg:"HS256",typ:"JWT"})));
+    //     const p=b64url(Buffer.from(JSON.stringify({sub:"user-123"})));
+    //     console.log(b64url(c.createHmac("sha256","test-secret-key-that-is-long-enough-for-hs256").update(h+"."+p).digest()))'
+    expect(signature).toBe("6D3L8TEGC89wuRUpJ9f976l53ULJfJ4guB4DExb4Xrs");
+  });
+});
+```
+
+この定数は`node:crypto`のHMAC実装から得たものであり、`../utils/jwt.js`からではありません -- 上の`hashContent`に対するSHA-256ベクターと同じ独立性です。エンコーディングの変更、ヘッダーフィールドの順序変更、あるいは誤ったアルゴリズムへの切り替えは、自分自身と一致するのではなく、いまやこのテストを失敗させます。
+
+<Tip>
+
+このベクターは、独立したHMAC-SHA256実装であれば何からでも再生成できます -- `jwt.io`のデバッガ、`jose` CLI、あるいは別言語の標準ライブラリなど、テスト対象のコードを一切importしないものであれば構いません。
+
+</Tip>
+
+署名そのものが固定されたら、ラウンドトリップと否定的なケースは有用な**補完**になります -- これらはピン留めされたベクターが触れない`verifyToken`を運動させます：
 
 ```ts
 import { describe, it, expect } from "vitest";
 import { createToken, verifyToken } from "../utils/jwt.js";
 
-const TEST_SECRET = "test-secret-key-that-is-long-enough-for-hs256";
-
-describe("JWT signing", () => {
+describe("JWT signing -- round-trip supplements", () => {
   it("verifies a token signed with the same secret", async () => {
     const token = await createToken({ sub: "user-123" }, TEST_SECRET, "1h");
 
@@ -127,7 +166,7 @@ describe("JWT signing", () => {
 });
 ```
 
-正常系は有効な署名がラウンドトリップすることを確認し、異常系は誤ったシークレットが黙って受理されるのではなく拒否されることを確認します。どちらも署名ベクターのアサーションであり、検証の振る舞いをシークレットとペイロードの暗号学的な関係に固定しています。
+ラウンドトリップは`createToken`が署名したものを`verifyToken`が受理することを確認し、否定的なケースは誤ったシークレットが黙って受理されるのではなく拒否されることを確認します。どちらもピン留めされたベクターの代わりにはなりません -- どちらもこのコードベース自身の関数だけを使っているため、共有された署名バグがあれば、このページ冒頭の「同じ入力なら同じ出力」のハッシュテストとまったく同じくらい簡単にパスしてしまうからです。
 
 <Note>
 
@@ -141,4 +180,4 @@ describe("JWT signing", () => {
 2. **外部の定数に固定する。** 期待されるダイジェストは、あなたのコードのエンコードロジックを共有しないツールから得る必要があります。そうすればバグが自分自身と一致してしまうことはありません。
 3. **参照バイトに注意する。** `echo -n`か`echo`か、UTF-8かUTF-16か、末尾の改行があるか -- 参照値は、ハッシュしようとしているまさにそのバイトから生成して初めて役に立ちます。
 4. **入力型をまたいだ等価性をアサートする。** 受け付けるすべての入力形状（`string`、`ArrayBuffer`、`Buffer`）が同じダイジェストを生成しなければなりません。
-5. **署名もベクターとして扱う。** 決定的なHMAC署名（JWTの`HS256`）には、同じ既知の答えの扱いを適用します。正常系を固定し、誤ったシークレットの系を拒否させます。
+5. **署名もベクターとして扱う。** 決定的なHMAC署名（JWTの`HS256`）には、同じ既知の答えの扱いを適用します。署名を独立したツールで計算した値に固定し、そのうえで同一ライブラリのラウンドトリップと誤ったシークレットの拒否を補完として加えます。

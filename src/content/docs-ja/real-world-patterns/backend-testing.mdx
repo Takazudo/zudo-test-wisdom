@@ -39,14 +39,31 @@ export async function createTestEnv() {
   });
   const env = await mf.getBindings();
 
-  // Run SQL migrations
+  // Run SQL migrations. D1's exec() splits its input on newlines (one
+  // statement per line), so a pretty-printed multi-statement migration
+  // file throws D1_EXEC_ERROR -- split on `;`, collapse each statement
+  // to a single line, and exec() one at a time instead.
   const migration = readFileSync("migrations/0001_init.sql", "utf-8");
   const db = env.DB as D1Database;
-  await db.exec(migration);
+  const statements = migration
+    .split(";")
+    .map((statement) => statement.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  for (const statement of statements) {
+    await db.exec(statement);
+  }
 
   return { mf, env, db, bucket: env.BUCKET as R2Bucket };
 }
 ```
+
+<Warning>
+
+**D1の`exec()`はセミコロンではなく改行で分割されます。** 入力文字列の各行が個別のステートメントとして実行されるため、複数行のマイグレーションファイルをそのまま渡すと`D1_EXEC_ERROR: incomplete input`をスローします。ファイルを自分で`;`で分割し、各ステートメントの空白を1行に折りたたんでから、ステートメントごとに`exec()`を呼び出してください -- これはプラットフォーム固有のクセであり、自分のコードをいくら読んでも回復できるものではありません。
+
+上記の`split(";")`は単純な行ベースの分割にすぎません -- 文字列リテラル、コメント、トリガー本体の中にセミコロンが含まれるマイグレーションでは壊れます。単純な`CREATE TABLE`/`CREATE INDEX`ステートメントを超える場合は、素の文字列分割ではなく実際のSQLステートメント分割ライブラリ（例：`@databases/split-sql-query`）を使用してください。
+
+</Warning>
 
 ### テストデータファクトリ
 
@@ -133,7 +150,13 @@ export default defineConfig({
 
 ```ts
 // test/helpers/mock-kv.ts
-export function createMockKV(): KVNamespace {
+// Extends the real interface with the escape hatch tests use to seed and
+// inspect state directly -- see "The inspectable-mock-store design" below.
+export interface MockKVNamespace extends KVNamespace {
+  _store: Map<string, string>;
+}
+
+export function createMockKV(): MockKVNamespace {
   const store = new Map<string, string>();
 
   return {
@@ -148,7 +171,8 @@ export function createMockKV(): KVNamespace {
       store.delete(key);
       return Promise.resolve();
     },
-  } as unknown as KVNamespace;
+    _store: store,
+  } as unknown as MockKVNamespace;
 }
 ```
 
@@ -227,6 +251,46 @@ describe("session handler (Map-stub)", () => {
 <Tip>
 
 **判断基準 -- ここがギャップです。** SQLやストレージのセマンティクスをテストするとき（このクエリは正しい行を返すか、このR2マルチパートアップロードは正しく再結合されるか）には**Miniflare**を使います。ハンドラーの分岐と受け渡しをテストするとき（このルートは読むべきバインディングを読んでいるか、セッションが無いとき401を返すか）には**`Map`スタブ**を使います。要となる原則はこうです -- **テストすべきはあなたのロジックであって、プラットフォームのストレージエンジンではない。** Mapスタブは高速で、`wrangler.toml`を必要とせず、素のNodeで動き、状態を厳密にプリシードできます。
+
+</Tip>
+
+## vitest-pool-workersによる実workerdテスト
+
+MiniflareはNode上でWorkersランタイムをエミュレートします。`@cloudflare/vitest-pool-workers`はさらに一歩進みます。Vitestのテストファイルは、Node側のエミュレーション層ではなく`wrangler.toml`経由で結線された実際のD1/KV/R2バインディングを持つ、本物の`workerd`アイソレートの**内側**で実行されます。実例：zudo-file-syncはこの方式でin-workerのスイートを実行しています。
+
+```ts
+// vitest.config.ts
+import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+
+export default defineWorkersConfig({
+  test: {
+    poolOptions: {
+      workers: {
+        wrangler: { configPath: "./wrangler.toml" },
+      },
+    },
+  },
+});
+```
+
+```ts
+// test/worker.test.ts -- runs inside the real workerd isolate
+import { env } from "cloudflare:test";
+import { describe, it, expect } from "vitest";
+
+describe("worker (pool-workers)", () => {
+  it("reads and writes through the real D1 binding", async () => {
+    await env.DB.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)");
+    await env.DB.prepare("INSERT INTO t (id) VALUES (1)").run();
+    const row = await env.DB.prepare("SELECT * FROM t WHERE id = 1").first();
+    expect(row).toMatchObject({ id: 1 });
+  });
+});
+```
+
+<Tip>
+
+**判断基準を3つ目の選択肢へ拡張する。** `Map`スタブ：高速でプラットフォームのセマンティクスを持たない、ハンドラーロジック向け（前述）。Miniflare：Node上でエミュレートされたバインディングの*振る舞い*、SQL/ストレージのセマンティクス向け（前述）。`@cloudflare/vitest-pool-workers`：プラットフォームのセマンティクスそのものがテスト対象であるとき -- 本物のworkerdでしか再現しないD1のクセ、`waitUntil`のタイミング、バインディングの結線、in-workerのエンドツーエンドパスなど -- にのみ手を伸ばしてください。3つの中で最も低速かつ重量級です。テストしたいのがハンドラーではなくMiniflare自身のエミュレーションであるときに使います。
 
 </Tip>
 
@@ -385,7 +449,11 @@ describe("ApiClient", () => {
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    // vi.restoreAllMocks() does not undo vi.stubGlobal, and it does not
+    // clear fetchMock's queued mockResolvedValueOnce() calls -- both leak
+    // into the next test unless cleared explicitly.
+    vi.unstubAllGlobals();
+    fetchMock.mockReset();
   });
 
   it("sends auth header", async () => {
@@ -440,7 +508,7 @@ it("retries with refreshed token on 401", async () => {
 ### 一時ディレクトリパターン
 
 ```ts
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";

@@ -1,7 +1,7 @@
 ---
 title: Required Testing Behavior
 description: Mandatory behaviors for AI agents when testing frontend code.
-sidebar_position: 3
+sidebar_position: 5
 ---
 
 ## The Five Core Rules
@@ -43,7 +43,7 @@ The test level must match what you are actually verifying:
 | Something is visually correct | Level 5 |
 | A canvas / photo-editor surface where L4 is intractable AND L5 cannot reach | Level 6 (final resort, not for CI) |
 
-Do not use Level 1 for a Level 5 problem. The test will pass, but the bug will remain. Do not jump to Level 6 just because L4 is hard or L5 is awkward — L6 requires that *both* lower tiers are genuinely intractable.
+Do not use Level 1 for a Level 5 problem. The test will pass, but the bug will remain. Do not jump to Level 6 just because L4 is hard or L5 is awkward — L6 requires that *both* lower levels (L4 and L5) are genuinely intractable.
 
 ### Rule 3: Escalate When Lower Levels Pass But Problem Persists
 
@@ -170,10 +170,21 @@ expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
 # Wrong — gate-defining file edited to make a gate pass, no fresh-context review
 testMatch: ['**/*.spec.ts', '!**/banner-*.spec.ts'] // silently excludes failing spec
 
-# Right
+# Right (a) — legitimate skip: a real, deliberate skip, not a flake
+// skipped: https://github.com/your-org/your-app/issues/55 — pending backend flag rollout
 test.skip('banner renders correctly', () => { ... })
-// @flaky: issue #55 — animation timing non-deterministic on CI
+
+# Right (b) — quarantine: NOT skipped; the test still runs, allowed-to-fail,
+# with @flaky in the title, exactly matching the quarantine pipeline's convention
+// quarantined: https://github.com/your-org/your-app/issues/55
+test('banner renders correctly @flaky', () => { ... })
 ```
+
+<Note>
+
+These are two different exits, not interchangeable spellings of the same thing. `test.skip` + `@flaky` together is the graveyard state [Heavy Test Decision Rule](./heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky) forbids: a skipped test collects no results, so a "quarantined" test that is also skipped runs nowhere and silently rots. Use (a) when the test should not run at all right now (with a real reason). Use (b) — the actual quarantine convention — when the test should keep running and reporting, just not block the gate.
+
+</Note>
 
 ### Rule 9 — Scoped Heavy Verification
 

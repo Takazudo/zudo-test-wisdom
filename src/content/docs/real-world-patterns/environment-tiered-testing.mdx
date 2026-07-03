@@ -1,0 +1,188 @@
+---
+title: Environment-Tiered Testing Against Deployed Targets
+description: One contract suite pointed at local, a preview deploy, and production -- what belongs in each tier, how to reach gated previews, and why a prod failure is an incident, not a test run.
+sidebar_position: 15
+---
+
+Most of this guide tests code before it ships: unit suites, build-output reads, a browser driven against a local dev server. A separate layer tests the thing that actually shipped -- the **same suite pointed at a deployed URL**. Three portfolio repos run this as a first-class lane: zmod and zzmod fire their preorder-API contract suite at a local dev server, at a preview deploy, and at production; takazudo-auth drives logged-in flows against the same tiers. This page is about running one suite across many environments without forking your test command three ways -- and without ever mutating production.
+
+## One Suite, Three Targets
+
+The knob is a single environment variable. The suite resolves its base URL from `API_BASE_URL`, falling back to the local dev server, and a separate `TEST_TIER` label decides only whether destructive fixtures are allowed to run -- never what the read-path assertions check.
+
+```ts
+// test/contract/env.ts -- one contract suite, three deploy targets
+export const API_BASE_URL =
+  process.env.API_BASE_URL ?? "http://localhost:9999"; // dev server default
+
+// The tier label gates mutation; it never changes what the assertions check,
+// only whether the suite is allowed to write.
+export const TIER = (process.env.TEST_TIER ?? "local") as
+  | "local"
+  | "preview"
+  | "production";
+
+export const MUTATION_ALLOWED = TIER === "local";
+```
+
+The contract tests import that base URL and hit the real endpoint. Read-path assertions run against every tier; write fixtures are fenced behind `MUTATION_ALLOWED` so the identical file is safe to point at production.
+
+```ts
+// test/contract/preorder.contract.test.ts
+import { describe, it, expect } from "vitest";
+import { API_BASE_URL, MUTATION_ALLOWED } from "./env.js";
+
+describe(`preorder API @ ${API_BASE_URL}`, () => {
+  // read-path contract: runs against every tier, mutates nothing
+  it("rejects an unknown SKU with a 404 and a typed error body", async () => {
+    const res = await fetch(`${API_BASE_URL}/api/preorders/does-not-exist`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "not_found" });
+  });
+
+  // destructive fixture: local only -- never touches a deployed target
+  it.runIf(MUTATION_ALLOWED)("creates then cancels a preorder", async () => {
+    const created = await fetch(`${API_BASE_URL}/api/preorders`, {
+      method: "POST",
+      body: JSON.stringify({ sku: "TEST-SKU", qty: 1 }),
+    });
+    expect(created.status).toBe(201);
+    const { id } = await created.json();
+    const cancelled = await fetch(`${API_BASE_URL}/api/preorders/${id}`, {
+      method: "DELETE",
+    });
+    expect(cancelled.status).toBe(204);
+  });
+});
+```
+
+Wiring the tiers is three scripts over one suite. The preview URL is not hardcoded -- CI injects the deploy URL it just built (`$DEPLOY_PRIME_URL` on Netlify, the preview URL from `wrangler deploy` output on Cloudflare), so the suite always points at the deploy under test.
+
+```json
+{
+  "scripts": {
+    "test:contract:local": "API_BASE_URL=http://localhost:9999 TEST_TIER=local vitest run test/contract",
+    "test:contract:preview": "API_BASE_URL=$DEPLOY_PRIME_URL TEST_TIER=preview vitest run test/contract",
+    "test:contract:prod": "API_BASE_URL=https://api.zzmod.example TEST_TIER=production vitest run test/contract"
+  }
+}
+```
+
+<Note>
+
+The assertions are byte-identical across tiers; only the base URL and the mutation gate change. If a preview needs a *different* read-path assertion than local, that gap is exactly the config drift you want the suite to catch -- resist the urge to special-case it away with a per-tier branch.
+
+</Note>
+
+## What Belongs in Each Tier
+
+Each environment earns a different slice of the suite. The rule is a one-way ratchet: the further from your laptop, the less you are allowed to mutate.
+
+| Tier | What runs | May mutate? |
+|---|---|---|
+| **Local** | Full CRUD, destructive fixtures, seed-and-teardown, error-injection | Yes -- it is your machine's data |
+| **Preview** | Contract shape + read-path assertions; auth handshake; no writes to shared state | Read-only against shared state |
+| **Production** | Strictly read-only smoke -- health, a known-good read, a signed-in `GET` | **Never** |
+
+Local is where the expensive, stateful, destructive work lives -- it owns its own database, so it can create a preorder, cancel it, corrupt a row on purpose, and reset. Preview verifies the *contract* survived the deploy: the routes resolve, the shapes match, auth still hands back a token. Production runs the thinnest possible read-only pass, because production data belongs to real users.
+
+<Danger>
+
+**Never mutate production from a test.** A `POST`/`PUT`/`DELETE` fixture that is harmless locally becomes a live order, a real charge, or a deleted account when `API_BASE_URL` points at prod. The `MUTATION_ALLOWED` gate above is not a convenience -- it is the one line standing between your suite and a money-touching side effect. For a money API like preorders, treat any prod-tier write as a production incident in code review, the same as a stray `DROP TABLE`.
+
+</Danger>
+
+## Reaching a Gated Preview
+
+Preview deploys are usually behind a password wall (Netlify password protection, Cloudflare Access). The whole deploy sits behind one gate cookie, so an automated run has to unlock it before it can see a single route. Trade the gate password -- a CI secret, never a literal -- for that cookie once, then replay the cookie on every request. zzmod documents this specifically so **AI-agent runs** can reach a protected preview the same way CI does.
+
+```bash
+# A password-protected preview puts the WHOLE deploy behind one gate cookie.
+# Trade the gate password (a CI secret) for that cookie once, then replay it --
+# automated runs never render the HTML password wall.
+# Cookie name is provider-specific (Netlify: nf_jwt; CF Access: CF_Authorization).
+COOKIE=$(curl -sS -i -X POST "$PREVIEW_URL/" \
+  --data-urlencode "password=$PREVIEW_GATE_PASSWORD" \
+  | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p')
+
+curl -sS -H "Cookie: $COOKIE" "$PREVIEW_URL/api/health"   # now reaches the app
+```
+
+For a Playwright run against the same gated preview, the cookie goes on the browser context instead of a header -- inject it once in global setup and every page in the run inherits it, which is the same mechanism used for logged-in flows below.
+
+## Logged-In Flows Without Leaking Secrets
+
+Passing the deploy gate only gets you to the login screen. Flows that need an authenticated *user* -- takazudo-auth's whole surface is session-gated -- log in once, persist the session with Playwright's `storageState`, and reuse it across the run. The credentials come from the environment; they never appear in a spec.
+
+```ts
+// e2e/auth.setup.ts -- log in once, persist the session, keep creds out of specs
+import { test as setup, expect } from "@playwright/test";
+
+const authFile = "e2e/.auth/user.json"; // gitignored -- holds a live session
+
+setup("authenticate", async ({ page }) => {
+  const email = process.env.E2E_USER_EMAIL; // from CI secrets, never inline
+  const password = process.env.E2E_USER_PASSWORD;
+  if (!email || !password) throw new Error("E2E auth creds not set");
+
+  await page.goto("/login");
+  await page.fill("[name=email]", email);
+  await page.fill("[name=password]", password);
+  await page.click("button[type=submit]");
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+
+  await page.context().storageState({ path: authFile });
+});
+```
+
+The config runs that setup as a dependency, then feeds its saved state into the real project so every test starts already signed in:
+
+```ts
+// playwright.config.ts (excerpt)
+export default defineConfig({
+  projects: [
+    { name: "setup", testMatch: /auth\.setup\.ts/ },
+    {
+      name: "authenticated",
+      dependencies: ["setup"],
+      use: { storageState: "e2e/.auth/user.json" },
+    },
+  ],
+});
+```
+
+The saved state file is a live bearer credential, so it is treated like one -- gitignored, regenerated per run, and scoped to a throwaway test account, never a real user's:
+
+```gitignore
+# .gitignore -- the session file is a live credential, never commit it
+e2e/.auth/
+```
+
+<Warning>
+
+`storageState` is a bearer of a real session -- anyone with the file is logged in. Keep it out of git, out of artifacts, and out of any spec as a literal. This weight is also *why* logged-in E2E is the classic "too environment-heavy for PR CI" case: it needs live creds and a reachable deploy, so it runs post-deploy or [on a schedule](../decision-guide/execution-tiers.mdx), not on every PR.
+
+</Warning>
+
+## Post-Deploy Smoke as the Final Tier
+
+The last tier is a cheap, fast, alarm-only pass that runs the moment a deploy goes live: hit a handful of real endpoints, assert they answer, page a human if they do not. It is deliberately read-only and shallow -- it catches misconfigured secrets, missing migrations, and binding errors that no pre-deploy test can see, not logic bugs. The mechanics (a self-cleaning shell script, the `trap EXIT` cleanup, the local-first / remote-after wiring) are already covered in [Backend & Node.js Testing § Post-Deploy Smoke Testing](./backend-testing.mdx#post-deploy-smoke-testing-with-shell-scripts); the environment-tiered view just adds where it sits -- production, read-only, alarm on red.
+
+## Failure Semantics per Environment
+
+The same red X means something different at each tier, and that difference decides who gets woken up. Route the lanes accordingly using the [execution-tiers](../decision-guide/execution-tiers.mdx) vocabulary.
+
+| Environment | A failure means | Runs at | Tier |
+|---|---|---|---|
+| **Local** | Your bug -- the code under the current diff is wrong | Inner loop + PR gate | T0 / T1 |
+| **Preview** | Integration or config drift -- the code is fine, the wiring around it is not | Post-deploy on the preview URL | T1 (post-deploy) / T3 |
+| **Production** | An incident -- real users are affected right now | Post-deploy smoke + schedule | T3 |
+
+A local contract failure just fails your PR; you fix it before merge and nobody else notices. A preview failure means the code merged clean but the deployed wiring -- an env var, a secret, a binding, a CORS rule -- drifted, so the fix is in configuration, not the diff. A production failure is not a failing test at all: it is an alert that something users depend on is down, and it belongs to whoever is on call, not to the person who last touched the suite. Same assertions, three blast radii -- which is the whole reason to keep them on separate lanes with separate alerting rather than one `vitest run` that treats prod like a bigger localhost.
+
+## Where to Go Next
+
+- [Backend & Node.js Testing](./backend-testing.mdx) -- the HTTP-API base-URL switch, destructive-test guards, and the post-deploy smoke script this page builds on
+- [Execution Tiers](../decision-guide/execution-tiers.mdx) -- the T0-T4 vocabulary that decides where each environment lane runs
+- [Playwright Patterns](./playwright-patterns.mdx) -- CI-safe vs environment-heavy test splitting, the mock-backend adapter, and console-error monitoring for these live runs
+- [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) -- running the heaviest environment-bound lanes on a schedule with deduped failure issue filing
