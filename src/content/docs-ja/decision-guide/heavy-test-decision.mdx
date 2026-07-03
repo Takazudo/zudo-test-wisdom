@@ -125,6 +125,67 @@ flowchart TD
 
 `@smoke` は、この分類に含まれるタグのうち唯一これらのルールでは到達できないタグです。新しいテストに対する機械的なトリガーではなく、すでにタグなしのプールからクリティカルジャーニーのサブセットを後から手作業で選び出して割り当てます。
 
+## 同じルール、Rust構文
+
+上のタグ分類はPlaywrightのタイトル部分文字列という慣習です。Rust/cargoプロジェクトには部分文字列マッチできるテストタイトルがありませんが、`#[ignore = "..."]` の理由文字列が同じ情報を運びます — テスト名ではなくテスト自体に付与される、機械的でgrepできる分類です。上のテーブルと行ごとに対応します：
+
+| Playwrightタグ | Rustの `#[ignore = "..."]` 理由 | 意味 | ティア |
+|---|---|---|---|
+| （タグなし） | （`#[ignore]` なし） | CIセーフ。デフォルト | T1/T2 |
+| `@heavy` | `heavy: <理由>` | 遅いがCIで実行可能。予算超過 | T2/T3 |
+| `@gpu` ／ `@interactive` | `env-gate: <理由>` | 環境変数・認証情報・サービスがPRランナーにない | T3 + ローカルヘビーレーン |
+| `@macos-only` | `#[cfg(target_os = "macos")]` | 特定のOS上でのみ信頼できる | T3（macOS） |
+| `@flaky` | `flaky: <issue-url>` | 隔離中。それでもエグザムレーンで失敗許容として実行される | T3 失敗許容 |
+| `@verification` | `verification: <理由>` | 一回限りの証明アーティファクト | ゲートなし |
+| （Playwrightタグなし） | `pending-feature: <理由>` | まだ存在しない機能を先取りして書かれたもの | 機能が実装されるまでゲートなし |
+
+```rust
+#[test]
+#[ignore = "env-gate: needs STRIPE_TEST_KEY, unavailable on PR runners"]
+fn charges_a_test_card() { /* ... */ }
+
+#[test]
+#[ignore = "heavy: full fixture-corpus regen, ~4 min"]
+fn regenerates_the_entire_fixture_corpus() { /* ... */ }
+
+#[test]
+#[ignore = "pending-feature: waiting on the export-to-pdf command"]
+fn exports_the_document_as_pdf() { /* ... */ }
+```
+
+`env-gate:` は `@gpu` ／ `@interactive` をハードウェアを超えて一般化したものです：Rustの統合テストがGPUを必要とするより、シークレットやライブの外部サービスを必要とすることの方がはるかに多いのです。`pending-feature:` は上のテーブルにPlaywright側の対応物を持ちません — これはRust側の答えです：アサートしている機能がまだ存在しない段階でテストを書き、`main` を一度もレッドにすることなくスイート内に意図を記録しておくためのものです。
+
+`#[ignore]` がスキップするのは実行であってコンパイルではありません — `pending-feature:` でignoreされたテストも、今日の時点でコンパイルは通らなければなりません。アサーションがまだ存在しないシンボルやAPIを必要とする場合、ignoreされているかどうかにかかわらずクレートのビルドは失敗します。今日の時点でコンパイルが通り、機能が出荷されるまでは実行時にのみ失敗するブラックボックスチェック（CLI呼び出し、HTTP呼び出し、ファイル出力）として書いてください。
+
+### 同じ分類ルール
+
+最初にマッチしたルールを適用します — 上の[新しいテストの機械的分類ルール](#新しいテストの機械的分類ルール)と同じ順序です：
+
+1. 環境変数・認証情報・外部サービスがPRランナーでは用意できない → `env-gate:`
+2. 特定のOSまたはネイティブツールチェーン上でのみ信頼できる → `#[cfg(target_os = "...")]`。`#[ignore]` ではない（下記参照）
+3. 実行時間が予算超過 → `heavy:`
+4. ランダムに失敗する。ただし下の隔離のStep 0を確認済みであること → `flaky:<issue-url>`
+5. 一回限りの証明であり、恒久的なリグレッションゲートではない → `verification:`
+6. コードベースにまだ存在しない機能をアサートしている → `pending-feature:`
+7. それ以外 → `#[ignore]` なし。テストはすべての `cargo nextest run` で実行される
+
+### 同じ墓場の警告
+
+ある `#[ignore = "..."]` 理由文字列がレーンの名前を挙げているのに、それを実際に実行するジョブがない状態は、上で `@flaky` について警告したのと同じ墓場です。6つの理由のうち2つは、`@flaky` にはない形で墓場になりやすい性質を持ちます：`env-gate:` と `pending-feature:` には自然な再トリガーがありません — スケジュール実行が `flaky:` に対して発火し続けるのとは違い、「PRランナーがこれを用意できない」状態や「機能が出荷された」状態が終わったときに発火する仕組みが何もないのです。どちらも `flaky:` と同じようにトラッキングissueを必要とします。さもなければ、ignore理由が説明していた状況が終わった後も、静かに存在し続けてしまいます。
+
+### プラットフォーム依存性はここではコンパイル時の決定であり、実行時の決定ではない
+
+`@macos-only` ルールは「実macOS上でのみ信頼できる。T3で実行する」と言っています。Rustの対応物は別の `#[ignore]` 理由文字列ではなく `#[cfg(target_os = "macos")]` であり — こちらの方が強い境界線です。`#[ignore]` はどのバイナリにもテストをコンパイルし込んだままにし、実行時にスキップするだけなので、理由文字列によるフィルタが緩い、あるいは存在しない場合、広範な `--run-ignored` の実行は間違ったプラットフォームでもそのテストをスケジュールしてしまい得ます。`#[cfg(target_os = "macos")]` はコンパイル時にmacOS以外のバイナリからテストを取り除きます — 間違ってすら、間違ったプラットフォームで実行されることはありません。macOS専用のテストが別の何かにもゲートされている場合は、両方を組み合わせます：
+
+```rust
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "env-gate: needs the macOS Keychain, unavailable on hosted Linux/Windows runners"]
+fn reads_the_saved_credential_from_keychain() { /* ... */ }
+```
+
+上の各理由文字列が実際のnextest実行レーンにどう変換されるかは、[Rustスイートをcargoからnextestへ移行する](../real-world-patterns/cargo-nextest-migration.mdx#タグ分類の実行)を参照してください。
+
 ## `@flaky` の隔離パイプライン
 
 隔離（quarantine）は出口のあるパイプラインであり、駐車場ではありません：

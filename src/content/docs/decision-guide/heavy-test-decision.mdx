@@ -125,6 +125,67 @@ The default matters most: **a new e2e test is untagged and CI-safe unless one of
 
 `@smoke` is the one tag in the taxonomy these rules do not reach. It is assigned manually, after the fact, to curate a critical-journey subset out of the already-untagged pool — not by any mechanical trigger on a new test.
 
+## Same Rules, Rust Syntax
+
+The tag taxonomy above is Playwright's title-substring convention. A Rust/cargo project has no test titles to substring-match, but `#[ignore = "..."]` reason strings carry the same information, attached to the test itself instead of its name — a mechanical, greppable classification that mirrors the table above row by row:
+
+| Playwright tag | Rust `#[ignore = "..."]` reason | Meaning | Tier |
+|---|---|---|---|
+| (untagged) | (no `#[ignore]`) | CI-safe; the default | T1/T2 |
+| `@heavy` | `heavy: <why>` | slow but CI-capable, budget-exceeding | T2/T3 |
+| `@gpu` / `@interactive` | `env-gate: <why>` | needs an env var, credential, or service the PR runner does not have | T3 + local heavy |
+| `@macos-only` | `#[cfg(target_os = "macos")]` | trustworthy only on a specific OS | T3 (macOS) |
+| `@flaky` | `flaky: <issue-url>` | quarantined; still runs allowed-to-fail in the exam lane | T3 allowed-to-fail |
+| `@verification` | `verification: <why>` | one-time proof artifact | no gate |
+| *(no Playwright tag)* | `pending-feature: <why>` | written ahead of a feature that does not exist yet | no gate until the feature ships |
+
+```rust
+#[test]
+#[ignore = "env-gate: needs STRIPE_TEST_KEY, unavailable on PR runners"]
+fn charges_a_test_card() { /* ... */ }
+
+#[test]
+#[ignore = "heavy: full fixture-corpus regen, ~4 min"]
+fn regenerates_the_entire_fixture_corpus() { /* ... */ }
+
+#[test]
+#[ignore = "pending-feature: waiting on the export-to-pdf command"]
+fn exports_the_document_as_pdf() { /* ... */ }
+```
+
+`env-gate:` generalizes `@gpu` / `@interactive` beyond hardware: a Rust integration test far more often needs a secret or a live external service than a GPU. `pending-feature:` has no Playwright counterpart above — it is the Rust-side answer to writing a test before the feature it asserts exists, so intent gets documented in the suite without ever going red on `main`.
+
+`#[ignore]` skips execution, not compilation — a `pending-feature:`-ignored test still has to compile today. If the assertion needs a symbol or API that does not exist yet, the crate fails to build whether the test is ignored or not; write it as a black-box check (CLI invocation, HTTP call, file output) that compiles now and only fails at runtime until the feature ships.
+
+### Same Classification Rules
+
+Apply the first rule that matches — same sequencing as [Classifying a New Test: Mechanical Rules](#classifying-a-new-test-mechanical-rules) above:
+
+1. Needs an env var, credential, or external service the PR runner cannot provide → `env-gate:`
+2. Trustworthy only on a specific OS or native toolchain → `#[cfg(target_os = "...")]`, not `#[ignore]` (see below)
+3. Runtime over budget → `heavy:`
+4. Fails randomly, after confirming Step 0 of quarantine (below) → `flaky:<issue-url>`
+5. One-time proof, not a permanent regression gate → `verification:`
+6. Asserts a feature that does not exist in the codebase yet → `pending-feature:`
+7. Otherwise → no `#[ignore]`; the test runs on every `cargo nextest run`
+
+### Same Graveyard Warning
+
+An `#[ignore = "..."]` reason string that names a lane but has no job that actually runs it is the same graveyard warned about for `@flaky` above. Two of the six reasons are graveyard-prone in a way `@flaky` is not: `env-gate:` and `pending-feature:` have no natural re-trigger — nothing fires when "the PR runner cannot provide this" or "the feature shipped" stops being true, the way a scheduled run keeps firing for `flaky:`. Both need a tracking issue exactly like `flaky:` does, or the ignore reason quietly outlives the condition it described.
+
+### Platform-Boundness Is a Compile-Time Decision Here, Not a Runtime One
+
+The `@macos-only` rule says "trustworthy only on real macOS, run in T3." Rust's mirror is `#[cfg(target_os = "macos")]`, not another `#[ignore]` reason string — and it is a stronger boundary. `#[ignore]` still compiles the test into every binary and only skips it at runtime, so a broad `--run-ignored` invocation can still schedule it on the wrong platform if a reason-string filter is loose or missing. `#[cfg(target_os = "macos")]` removes the test from non-macOS binaries at compile time — it cannot run on the wrong platform even by mistake. Combine both when a macOS-only test is also gated on something else:
+
+```rust
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "env-gate: needs the macOS Keychain, unavailable on hosted Linux/Windows runners"]
+fn reads_the_saved_credential_from_keychain() { /* ... */ }
+```
+
+See [Migrating a Rust Suite to cargo-nextest](../real-world-patterns/cargo-nextest-migration.mdx#executing-the-taxonomy) for how each reason string above turns into an actual nextest execution lane.
+
 ## The Quarantine Pipeline for `@flaky`
 
 Quarantine is a pipeline with an exit, not a parking lot:
