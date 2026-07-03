@@ -178,16 +178,26 @@ fi
 
 echo "  Generated SKILL.md"
 
-# Symlink into global skills directory.
-# Point at the main-worktree path so the global link survives worktree removal.
+# Symlink ALL skills in .claude/skills/ (the just-generated one plus every
+# tracked skill, e.g. verify-ui, headless-browser) into the global skills
+# directory, pointed at the main-worktree path so links survive worktree removal.
 mkdir -p "$GLOBAL_SKILLS_DIR"
-ensure_symlink "$GLOBAL_SKILLS_DIR/$SKILL_NAME" "$REPO_ROOT/.claude/skills/$SKILL_NAME"
+SKILLS_ROOT="$ROOT_DIR/.claude/skills"
 
 echo ""
-echo "Done! Skill '$SKILL_NAME' is ready."
+echo "Symlinking all skills to global directory..."
+for skill_dir in "$SKILLS_ROOT"/*/; do
+  [ -d "$skill_dir" ] || continue
+  skill_basename="$(basename "$skill_dir")"
+  ensure_symlink "$GLOBAL_SKILLS_DIR/$skill_basename" "$REPO_ROOT/.claude/skills/$skill_basename"
+  echo "  $skill_basename -> $GLOBAL_SKILLS_DIR/$skill_basename"
+done
+
 echo ""
-echo "  Project skill: $SKILL_DIR"
-echo "  Global symlink: $GLOBAL_SKILLS_DIR/$SKILL_NAME"
+echo "Done! All skills are ready."
+echo ""
+echo "  Skills directory: $SKILLS_ROOT"
+echo "  Global symlinks: $GLOBAL_SKILLS_DIR"
 echo ""
 echo "You can now use it in Claude Code with: /$SKILL_NAME <topic>"
 echo ""
