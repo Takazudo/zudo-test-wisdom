@@ -1,7 +1,7 @@
 ---
 title: Execution Tiers
 description: Where and when a test runs -- the second axis, orthogonal to testing levels.
-sidebar_position: 4
+sidebar_position: 3
 ---
 
 ## The Second Axis
@@ -188,7 +188,7 @@ When developing: `FIXTURE=site-a pnpm test` — one build, one server, only site
 
 Even with a single fixture scoped, the build step still runs on every inner-loop invocation. A freshness hash eliminates redundant rebuilds.
 
-**How to derive the hash:** compute it over the fixture's own content files **plus all shared build inputs** (config, tooling, shared source). Derive the shared-input set from git-tracked files' working-tree content -- this ensures that a change to shared config or a dependency correctly busts the hash even when only a shared file changed.
+**How to derive the hash:** compute it over the fixture's own content files, **plus all shared build inputs** (config, tooling, shared source), **plus the lockfile and the runner config** (`pnpm-lock.yaml`, `playwright.config.ts`) -- the two files that make dependency and runner-behavior changes visible in the working tree. Derive the shared-input set from git-tracked files' working-tree content. Lockfile-visible dependency changes DO bust the hash: `pnpm-lock.yaml` changes whenever an installed dependency's version changes, and the lockfile is itself one of the hashed inputs.
 
 **The loop:**
 
@@ -198,7 +198,10 @@ FIXTURE_DIR="fixtures/$FIXTURE"
 HASH_FILE=".build-cache/$FIXTURE.hash"
 
 # hash fixture content + all shared inputs (git-tracked, working-tree content)
-NEW_HASH=$(git ls-files --error-unmatch -- "$FIXTURE_DIR" shared/ | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+# -z / xargs -0 keep filenames with spaces intact and avoid deleted-file breakage
+NEW_HASH=$(git ls-files -z -- "$FIXTURE_DIR" shared/ pnpm-lock.yaml playwright.config.ts | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+
+mkdir -p "$(dirname "$HASH_FILE")"
 
 if [ "$FORCE_REBUILD" = "1" ] || [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$NEW_HASH" ]; then
   pnpm build:fixture "$FIXTURE"

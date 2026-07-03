@@ -1,7 +1,7 @@
 ---
 title: 実行ティア
 description: テストが「どこで・いつ」実行されるか -- テストレベルと直交するもう1つの軸。
-sidebar_position: 4
+sidebar_position: 3
 ---
 
 ## 第2の軸
@@ -188,7 +188,7 @@ export default defineConfig({
 
 フィクスチャが1つに絞られていても、インナーループの呼び出しのたびにビルドステップが実行されます。フレッシュネスハッシュにより、不要なリビルドを排除できます。
 
-**ハッシュの算出方法：** フィクスチャ自身のコンテンツファイル**と共有ビルド入力（設定ファイル、ツール類、共有ソースコード）**をすべて含めて算出します。共有入力のセットはgitで追跡されているファイルのワーキングツリーの内容から導出します -- これにより、共有の設定ファイルや依存関係が変わった場合でも、ハッシュが正しくバストされます。
+**ハッシュの算出方法：** フィクスチャ自身のコンテンツファイル、**共有ビルド入力（設定ファイル、ツール類、共有ソースコード）**、そして**lockfileとランナー設定**（`pnpm-lock.yaml`、`playwright.config.ts` -- 依存関係とランナーの挙動の変化をワーキングツリー上で可視化する2つのファイル）をすべて含めて算出します。共有入力のセットはgitで追跡されているファイルのワーキングツリーの内容から導出します。lockfileに現れる依存関係の変更は、確実にハッシュをバストします：`pnpm-lock.yaml` はインストール済み依存関係のバージョンが変わるたびに変化し、そのlockfile自体がハッシュ対象の入力のひとつだからです。
 
 **処理の流れ：**
 
@@ -198,7 +198,10 @@ FIXTURE_DIR="fixtures/$FIXTURE"
 HASH_FILE=".build-cache/$FIXTURE.hash"
 
 # hash fixture content + all shared inputs (git-tracked, working-tree content)
-NEW_HASH=$(git ls-files --error-unmatch -- "$FIXTURE_DIR" shared/ | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+# -z / xargs -0 keep filenames with spaces intact and avoid deleted-file breakage
+NEW_HASH=$(git ls-files -z -- "$FIXTURE_DIR" shared/ pnpm-lock.yaml playwright.config.ts | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+
+mkdir -p "$(dirname "$HASH_FILE")"
 
 if [ "$FORCE_REBUILD" = "1" ] || [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$NEW_HASH" ]; then
   pnpm build:fixture "$FIXTURE"
