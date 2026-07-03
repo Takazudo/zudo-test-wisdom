@@ -65,6 +65,18 @@ Why the retry-budget, per-test-timeout, and flake-telemetry policy this guide re
 
 Publish-time gates for platform-binary npm packages (esbuild-style meta package + per-platform `optionalDependencies`) — catching silent skips on unpropagated tarballs, stripped executable bits, and the double-PUT publish race that the nightly registry drift net cannot see.
 
+### [Built-Site Integrity Gates](./site-integrity-checks.mdx)
+
+Deterministic gates over the built site -- link check, html-validate, full-site crawl smoke, and 404/OGP/image-health sweeps -- for failures no unit or component test can structurally see.
+
+### [Deterministic Visual Regression with Committed Baselines](./visual-regression-baselines.mdx)
+
+Playwright `toHaveScreenshot()` with committed baseline PNGs -- the deterministic pixel-diff gate that completes Level 5's informal screenshot review, plus the determinism and tolerance discipline that keep it honest.
+
+### [Environment-Tiered Testing Against Deployed Targets](./environment-tiered-testing.mdx)
+
+One contract suite pointed at local, a preview deploy, and production -- what belongs in each tier, how to reach gated previews, and why a production failure is an incident, not a test run.
+
 ## Start from Your Symptom
 
 Not sure which pattern applies? Start from what you are actually seeing:
@@ -77,6 +89,9 @@ Not sure which pattern applies? Start from what you are actually seeing:
 | Not sure whether to test against real D1 or a stub | [Backend & Node.js Testing § Mock the Binding, Not the Runtime](./backend-testing.mdx#mock-the-binding-not-the-runtime) |
 | CI is green, but the published artifact is broken | [Publishing-Pipeline Verification](./publishing-pipeline.mdx) |
 | A build that worked last month fails today with nothing in your own diff | [Scheduled Re-exam & Night Exam § T3 as an External-Dependency Drift Net](./scheduled-re-exam.mdx#t3-as-an-external-dependency-drift-net) |
+| A broken link, missing page, dead image, or stale sitemap entry in the built site | [Built-Site Integrity Gates](./site-integrity-checks.mdx) |
+| A visual diff regression across a refactor -- nothing catches it until someone eyeballs a screenshot | [Deterministic Visual Regression with Committed Baselines](./visual-regression-baselines.mdx) |
+| It works on your machine but breaks on preview or production | [Environment-Tiered Testing Against Deployed Targets](./environment-tiered-testing.mdx) |
 
 ## Common Theme
 

@@ -17,6 +17,8 @@ Use this table to determine the minimum testing level for your current task:
 | "It's not showing" | Level 5 | Visibility is a visual property |
 | "It's still broken" (after test passed) | Next level up | Current level has blind spot for this bug |
 | Canvas / photo-editor / zoom-resize surface where L4 is intractable AND L5 cannot reach | Level 6 (final resort) | Neither E2E nor mechanical visual can express the assertion |
+| Broken link / missing page / stale sitemap | [Site-integrity gates](../real-world-patterns/site-integrity-checks.mdx) (L3/L4 hybrid) | Structurally invisible to unit and component tests -- only a built-output/crawl check sees it |
+| Visual regression risk across a refactor | [Committed-baseline visual regression](../real-world-patterns/visual-regression-baselines.mdx) | Deterministic pixel-diff gate -- catches shifted/recolored visuals an informal screenshot look would miss |
 
 <Warning>
 

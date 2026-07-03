@@ -18,10 +18,12 @@ sidebar_position: 1
 | [2](../testing-levels/level-2-dom-tests.mdx) | vitest browser mode (@vitest/browser + Playwright) | `pnpm add -D vitest @vitest/browser playwright` | `pnpm vitest run --project browser` |
 | [3](../testing-levels/level-3-build-output.mdx) | vitest (reading built files) | `pnpm add -D vitest` | `pnpm build && pnpm vitest run --project build` |
 | [3](../testing-levels/level-3-build-output.mdx) | cheerio + fs/path | `pnpm add -D cheerio` | (used in tests) |
+| [3](../testing-levels/level-3-build-output.mdx) / [4](../testing-levels/level-4-e2e-browser.mdx) | link check + html-validate ([site-integrity gates](../real-world-patterns/site-integrity-checks.mdx)) | `pnpm add -D html-validate` | `pnpm build && pnpm check:html && pnpm check:links` |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | Playwright | `pnpm add -D @playwright/test` then `npx playwright install --with-deps` | `npx playwright test` |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | headless-browser | (Claude Code skill) | `/headless-browser` |
 | [5](../testing-levels/level-5-visual-verification.mdx) | verify-ui | (Claude Code skill) | `/verify-ui` |
 | [5](../testing-levels/level-5-visual-verification.mdx) | headless-browser | (Claude Code skill) | `/headless-browser` |
+| [5](../testing-levels/level-5-visual-verification.mdx) | Playwright `toHaveScreenshot()` ([visual regression baselines](../real-world-patterns/visual-regression-baselines.mdx)) | `pnpm add -D @playwright/test` | `npx playwright test --update-snapshots` (baseline) / `npx playwright test` (verify) |
 | [6](../testing-levels/level-6-ai-based-verification.mdx) | verify-ui-ai (final resort, **not for CI**) | (Claude Code skill) | `/verify-ui-ai` |
 
 Bare `vitest` starts watch mode and never exits -- use `vitest run` for one-shot/CI/agent runs. The `@playwright/test` package alone does not include browser binaries; `playwright install --with-deps` downloads them plus their OS-level dependencies.

@@ -18,10 +18,12 @@ sidebar_position: 1
 | [2](../testing-levels/level-2-dom-tests.mdx) | vitestブラウザモード（@vitest/browser + Playwright） | `pnpm add -D vitest @vitest/browser playwright` | `pnpm vitest run --project browser` |
 | [3](../testing-levels/level-3-build-output.mdx) | vitest（ビルドファイル読み取り） | `pnpm add -D vitest` | `pnpm build && pnpm vitest run --project build` |
 | [3](../testing-levels/level-3-build-output.mdx) | cheerio + fs/path | `pnpm add -D cheerio` | （テスト内で使用） |
+| [3](../testing-levels/level-3-build-output.mdx) / [4](../testing-levels/level-4-e2e-browser.mdx) | リンクチェック + html-validate（[サイト整合性ゲート](../real-world-patterns/site-integrity-checks.mdx)） | `pnpm add -D html-validate` | `pnpm build && pnpm check:html && pnpm check:links` |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | Playwright | `pnpm add -D @playwright/test` の後に `npx playwright install --with-deps` | `npx playwright test` |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | headless-browser | （Claude Codeスキル） | `/headless-browser` |
 | [5](../testing-levels/level-5-visual-verification.mdx) | verify-ui | （Claude Codeスキル） | `/verify-ui` |
 | [5](../testing-levels/level-5-visual-verification.mdx) | headless-browser | （Claude Codeスキル） | `/headless-browser` |
+| [5](../testing-levels/level-5-visual-verification.mdx) | Playwright `toHaveScreenshot()`（[ビジュアルリグレッションのベースライン](../real-world-patterns/visual-regression-baselines.mdx)） | `pnpm add -D @playwright/test` | `npx playwright test --update-snapshots`（ベースライン作成）/ `npx playwright test`（検証） |
 | [6](../testing-levels/level-6-ai-based-verification.mdx) | verify-ui-ai（最終手段、**CI不可**） | （Claude Codeスキル） | `/verify-ui-ai` |
 
 素の `vitest` はウォッチモードで起動し、終了しない -- ワンショット/CI/エージェント実行では `vitest run` を使うこと。`@playwright/test` パッケージだけではブラウザバイナリは含まれない。`playwright install --with-deps` がブラウザ本体とOSレベルの依存関係をまとめてダウンロードする。
