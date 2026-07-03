@@ -44,6 +44,7 @@ The CI step swaps `cargo test` for `cargo nextest run` — but nextest does **no
 
 ```yaml
 # CI
+- uses: taiki-e/install-action@nextest   # cargo nextest is not part of the default toolchain — install it first
 - run: cargo nextest run --workspace --profile ci
 - run: cargo test --doc --workspace   # nextest does not run doctests — drop this step and doctest coverage silently disappears
 ```

@@ -51,6 +51,11 @@ import { describe, it, expect } from "vitest";
 import { remarkResolveMarkdownLinks } from "../remark-resolve-markdown-links";
 import { createTempProject, touch, cleanupTempProject } from "./test-helpers";
 
+/** Options shared by every test in this suite -- only `contentRoot` varies per test, via the `rootDir` created in `beforeEach` below. */
+function baseOptions() {
+  return { contentRoot: rootDir, docsBasePath: "/docs" };
+}
+
 it("resolves a relative .mdx link to a URL", () => {
   touch(rootDir, "src/content/docs/guides/getting-started.mdx");
   touch(rootDir, "src/content/docs/guides/other-doc.mdx");
@@ -179,8 +184,15 @@ describe("md-plugins fixture corpus", () => {
       const src = readFileSync(resolve(fixturesDir, file), "utf8");
       const html = String(await buildProcessor().process(src));
 
-      if (updateMode || !existsSync(expectedPath)) {
+      if (updateMode) {
         writeFileSync(expectedPath, html, "utf8");
+      } else if (!existsSync(expectedPath)) {
+        // A missing expected file must fail loudly, not auto-write against its
+        // own output -- that would make a brand-new fixture green in CI on its
+        // very first run, with nothing to compare against.
+        throw new Error(
+          `Missing expected file for ${file}. Run UPDATE_FIXTURES=1 locally and commit the diff.`,
+        );
       }
 
       const expected = readFileSync(expectedPath, "utf8");
@@ -198,7 +210,7 @@ describe("md-plugins fixture corpus", () => {
 UPDATE_FIXTURES=1 pnpm vitest run fixtures
 ```
 
-そのうえで、`expected-html/*.html`ファイルに生じた差分を、他のあらゆる変更と同じようにレビューします。意外な差分は意図しないリグレッションであり、想定どおりの差分が新しいベースラインです。このフラグはファイルが初めて存在しないときにも自動で書き込むため、フィクスチャの追加は新しい`.mdx`を置くだけで済みます。
+そのうえで、`expected-html/*.html`ファイルに生じた差分を、他のあらゆる変更と同じようにレビューします。意外な差分は意図しないリグレッションであり、想定どおりの差分が新しいベースラインです。新しいフィクスチャを追加するときも同じ手順です：`.mdx`ファイルを置き、一度`UPDATE_FIXTURES=1`で実行して期待値ファイルを生成します。通常の実行では、期待値ファイルの欠落を静かに書き込むのではなく、ハードな失敗として扱います -- そうしないと、コミット済みのベースラインを持たないフィクスチャが、自分自身の出力以外の何とも比較されないまま、追加された瞬間にCIでパスしてしまいます。
 
 <Warning>
 

@@ -27,7 +27,7 @@ Decide based on where you are running and whether you can serve the site locally
 |---|---|
 | Mac / local Linux | Normal local server (`pnpm dev` / `pnpm preview`) + `/verify-ui` or `/headless-browser` against `http://localhost:4321`. No fallback needed. |
 | Limited env (web / WSL), can serve locally | Bind the dev server to `127.0.0.1`; the **seeing-eye fallback** wires the pre-installed Chromium into Playwright automatically. |
-| Limited env, cannot serve locally | Use the **PR-preview-URL path** — verify against the live Cloudflare Pages preview deploy instead of a local server. |
+| Limited env, cannot serve locally | Use the **PR-preview-URL path** — verify against the live Cloudflare Workers preview deploy (preview-alias URL) instead of a local server. |
 
 ## Seeing-Eye Fallback: Pre-installed Chromium
 
@@ -90,7 +90,7 @@ Then point `/verify-ui` or `/headless-browser` at `http://127.0.0.1:4321/...` ra
 
 ## PR-Preview-URL Verification Path
 
-When a local build-and-serve is not possible at all — e.g. a web IDE or a WSL box with no forwarded port — verify against the live Cloudflare Pages preview deploy for the PR instead.
+When a local build-and-serve is not possible at all — e.g. a web IDE or a WSL box with no forwarded port — verify against the live Cloudflare Workers preview deploy (preview-alias URL) for the PR instead.
 
 `verify-ui-ai/scripts/resolve-preview-url.sh` resolves, verifies, and prints the live preview URL:
 
@@ -105,7 +105,7 @@ When a local build-and-serve is not possible at all — e.g. a web IDE or a WSL 
 What it does:
 
 1. Reads the PR's comments and picks the latest one carrying the `<!-- cf-preview-pr -->` marker (posted by the preview-deploy workflow).
-2. Extracts the `*.pages.dev` URL from that comment.
+2. Extracts the `*.workers.dev` preview-alias URL (older comments may carry `*.pages.dev`; the script accepts both).
 3. **Stale-deploy guard:** the branch preview URL persists across commits, so a bare `200` can be an old build. The script parses the `Built from commit:` SHA in the comment and checks it against the PR's commit list. It **warns** (but proceeds) when the comment carries no SHA, and **fails** on a SHA mismatch.
 4. Polls the served base path (`/`) with exponential backoff until it returns `200`, then prints the verified URL.
 
