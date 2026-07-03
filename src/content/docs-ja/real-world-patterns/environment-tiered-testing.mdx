@@ -1,0 +1,188 @@
+---
+title: デプロイ済みターゲットに対する環境ティア別テスト
+description: 単一のコントラクトスイートをローカル・プレビューデプロイ・本番に向ける -- 各ティアに何を割り当てるか、ゲート付きプレビューへの到達方法、そしてなぜ本番の失敗はテストの失敗ではなくインシデントなのか。
+sidebar_position: 15
+---
+
+このガイドのほとんどは、出荷される前のコードをテストする。ユニットスイート、ビルド成果物の読み取り、ローカル開発サーバーに対して駆動するブラウザだ。それとは別のレイヤーとして、実際に出荷されたものをテストする -- **同じスイートをデプロイ済みの URL に向ける**。ポートフォリオの 3 つのリポジトリがこれを第一級のレーンとして運用している。zmod と zzmod は preorder-API のコントラクトスイートを、ローカル開発サーバー・プレビューデプロイ・本番に向けて発射する。takazudo-auth は同じティア群に対してログイン済みフローを駆動する。このページのテーマは、テストコマンドを 3 つに分岐させることなく、そして本番を決して変更することなく、単一のスイートを複数の環境にまたがって実行することだ。
+
+## 1 つのスイート、3 つのターゲット
+
+つまみは単一の環境変数だ。スイートはベース URL を `API_BASE_URL` から解決し、なければローカル開発サーバーにフォールバックする。そして別の `TEST_TIER` ラベルは、破壊的なフィクスチャの実行を許可するかどうかだけを決める -- read-path のアサーションが何を検証するかは決して変えない。
+
+```ts
+// test/contract/env.ts -- one contract suite, three deploy targets
+export const API_BASE_URL =
+  process.env.API_BASE_URL ?? "http://localhost:9999"; // dev server default
+
+// The tier label gates mutation; it never changes what the assertions check,
+// only whether the suite is allowed to write.
+export const TIER = (process.env.TEST_TIER ?? "local") as
+  | "local"
+  | "preview"
+  | "production";
+
+export const MUTATION_ALLOWED = TIER === "local";
+```
+
+コントラクトテストはそのベース URL をインポートし、実際のエンドポイントを叩く。read-path のアサーションはすべてのティアに対して実行され、write のフィクスチャは `MUTATION_ALLOWED` の背後にフェンスで囲われる。だから同一のファイルを本番に向けても安全なのだ。
+
+```ts
+// test/contract/preorder.contract.test.ts
+import { describe, it, expect } from "vitest";
+import { API_BASE_URL, MUTATION_ALLOWED } from "./env.js";
+
+describe(`preorder API @ ${API_BASE_URL}`, () => {
+  // read-path contract: runs against every tier, mutates nothing
+  it("rejects an unknown SKU with a 404 and a typed error body", async () => {
+    const res = await fetch(`${API_BASE_URL}/api/preorders/does-not-exist`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "not_found" });
+  });
+
+  // destructive fixture: local only -- never touches a deployed target
+  it.runIf(MUTATION_ALLOWED)("creates then cancels a preorder", async () => {
+    const created = await fetch(`${API_BASE_URL}/api/preorders`, {
+      method: "POST",
+      body: JSON.stringify({ sku: "TEST-SKU", qty: 1 }),
+    });
+    expect(created.status).toBe(201);
+    const { id } = await created.json();
+    const cancelled = await fetch(`${API_BASE_URL}/api/preorders/${id}`, {
+      method: "DELETE",
+    });
+    expect(cancelled.status).toBe(204);
+  });
+});
+```
+
+ティアの配線は、1 つのスイートに対する 3 つのスクリプトだ。プレビュー URL はハードコードしない -- CI がたった今ビルドしたデプロイ URL を注入する（Netlify なら `$DEPLOY_PRIME_URL`、Cloudflare なら `wrangler deploy` の出力からのプレビュー URL）。だからスイートは常にテスト対象のデプロイを指す。
+
+```json
+{
+  "scripts": {
+    "test:contract:local": "API_BASE_URL=http://localhost:9999 TEST_TIER=local vitest run test/contract",
+    "test:contract:preview": "API_BASE_URL=$DEPLOY_PRIME_URL TEST_TIER=preview vitest run test/contract",
+    "test:contract:prod": "API_BASE_URL=https://api.zzmod.example TEST_TIER=production vitest run test/contract"
+  }
+}
+```
+
+<Note>
+
+アサーションはティアをまたいでバイト単位で同一だ。変わるのはベース URL と mutation のゲートだけ。もしプレビューがローカルとは*異なる* read-path アサーションを必要とするなら、そのギャップこそがスイートに捕まえてほしい config ドリフトそのものだ -- ティアごとの分岐で特別扱いして握りつぶしたくなる衝動に抗おう。
+
+</Note>
+
+## 各ティアに何を割り当てるか
+
+環境ごとにスイートの異なるスライスを担う。ルールは一方向のラチェットだ。自分のラップトップから遠ざかるほど、変更を許される範囲は狭まる。
+
+| ティア | 実行するもの | 変更してよいか？ |
+|---|---|---|
+| **ローカル** | フル CRUD、破壊的フィクスチャ、seed-and-teardown、エラー注入 | 可 -- 自分のマシンのデータだ |
+| **プレビュー** | コントラクトの形状 + read-path アサーション、認証ハンドシェイク、共有状態への write なし | 共有状態に対しては read-only |
+| **本番** | 厳密に read-only なスモーク -- ヘルス、既知の正常な read、サインイン済みの `GET` | **決して不可** |
+
+ローカルは、高コストでステートフルで破壊的な作業が住む場所だ -- 自前のデータベースを所有するので、preorder を作り、キャンセルし、わざと行を壊し、リセットできる。プレビューは*コントラクト*がデプロイを生き延びたかを検証する。ルートが解決し、形状が一致し、認証が今もトークンを返すか。本番は可能な限り薄い read-only のパスを実行する。本番データは実在するユーザーのものだからだ。
+
+<Danger>
+
+**テストから本番を決して変更しないこと。** ローカルでは無害な `POST`/`PUT`/`DELETE` のフィクスチャは、`API_BASE_URL` が本番を指した瞬間に、実際の注文・実際の課金・削除されたアカウントに化ける。上記の `MUTATION_ALLOWED` ゲートは便宜のためではない -- スイートと、お金に触れる副作用との間に立つ、たった 1 本の線だ。preorder のようなお金の API では、prod ティアでの write はコードレビューにおいて本番インシデントとして扱うこと。迷い込んだ `DROP TABLE` と同じ重さだ。
+
+</Danger>
+
+## ゲート付きプレビューへの到達
+
+プレビューデプロイは通常パスワードの壁の背後にある（Netlify のパスワード保護、Cloudflare Access）。デプロイ全体が 1 つのゲートクッキーの背後に置かれるので、自動化された実行はルートを 1 つでも見る前にそれを解錠しなければならない。ゲートパスワード -- リテラルではなく CI シークレット -- を一度そのクッキーと交換し、以降はすべてのリクエストでそのクッキーを再送する。zzmod はこれを、**AI エージェントの実行**が CI と同じ方法で保護されたプレビューに到達できるよう、明示的にドキュメント化している。
+
+```bash
+# A password-protected preview puts the WHOLE deploy behind one gate cookie.
+# Trade the gate password (a CI secret) for that cookie once, then replay it --
+# automated runs never render the HTML password wall.
+# Cookie name is provider-specific (Netlify: nf_jwt; CF Access: CF_Authorization).
+COOKIE=$(curl -sS -i -X POST "$PREVIEW_URL/" \
+  --data-urlencode "password=$PREVIEW_GATE_PASSWORD" \
+  | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p')
+
+curl -sS -H "Cookie: $COOKIE" "$PREVIEW_URL/api/health"   # now reaches the app
+```
+
+同じゲート付きプレビューに対する Playwright の実行では、クッキーはヘッダーではなくブラウザコンテキストに載せる -- グローバルセットアップで一度注入すれば、実行中のすべてのページがそれを引き継ぐ。これは下記のログイン済みフローで使うのと同じ仕組みだ。
+
+## シークレットを漏らさないログイン済みフロー
+
+デプロイのゲートを通過しても、たどり着くのはログイン画面までだ。認証済みの*ユーザー*を必要とするフロー -- takazudo-auth の全面がセッションでゲートされている -- は、一度ログインし、Playwright の `storageState` でセッションを永続化し、実行全体でそれを再利用する。認証情報は環境から来る。スペックには決して現れない。
+
+```ts
+// e2e/auth.setup.ts -- log in once, persist the session, keep creds out of specs
+import { test as setup, expect } from "@playwright/test";
+
+const authFile = "e2e/.auth/user.json"; // gitignored -- holds a live session
+
+setup("authenticate", async ({ page }) => {
+  const email = process.env.E2E_USER_EMAIL; // from CI secrets, never inline
+  const password = process.env.E2E_USER_PASSWORD;
+  if (!email || !password) throw new Error("E2E auth creds not set");
+
+  await page.goto("/login");
+  await page.fill("[name=email]", email);
+  await page.fill("[name=password]", password);
+  await page.click("button[type=submit]");
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+
+  await page.context().storageState({ path: authFile });
+});
+```
+
+config はそのセットアップを依存関係として実行し、保存された状態を本来のプロジェクトに食わせる。こうして、すべてのテストは最初からサインイン済みで始まる。
+
+```ts
+// playwright.config.ts (excerpt)
+export default defineConfig({
+  projects: [
+    { name: "setup", testMatch: /auth\.setup\.ts/ },
+    {
+      name: "authenticated",
+      dependencies: ["setup"],
+      use: { storageState: "e2e/.auth/user.json" },
+    },
+  ],
+});
+```
+
+保存された状態ファイルは生きたベアラー認証情報なので、そのように扱う -- gitignore し、実行ごとに再生成し、実在ユーザーではなく使い捨てのテストアカウントにスコープする。
+
+```gitignore
+# .gitignore -- the session file is a live credential, never commit it
+e2e/.auth/
+```
+
+<Warning>
+
+`storageState` は実在のセッションのベアラーだ -- そのファイルを持つ者は誰でもログイン済みになる。git の外、アーティファクトの外、そしてどのスペックからもリテラルとして排除し続けること。この重さこそが、ログイン済み E2E が典型的な「PR CI には環境依存が重すぎる」ケースである*理由*でもある。生きた認証情報と到達可能なデプロイを必要とするので、毎 PR ではなくデプロイ後や[スケジュール上](../decision-guide/execution-tiers.mdx)で実行する。
+
+</Warning>
+
+## 最終ティアとしてのデプロイ後スモーク
+
+最後のティアは、デプロイが公開された瞬間に走る、安価で高速なアラーム専用のパスだ。実在するエンドポイントをいくつか叩き、応答することをアサートし、応答しなければ人を呼び出す。意図的に read-only で浅い -- どんなデプロイ前テストにも見えない、設定ミスのシークレット・欠落したマイグレーション・バインディングエラーを捕まえるためのものであって、ロジックのバグのためではない。その仕組み（自己クリーンアップするシェルスクリプト、`trap EXIT` のクリーンアップ、ローカル先行・リモート後追いの配線）は [Backend & Node.js Testing § Post-Deploy Smoke Testing](./backend-testing.mdx#post-deploy-smoke-testing-with-shell-scripts) で既に扱っている。環境ティアの視点が加えるのはその居場所だけだ -- 本番、read-only、赤ならアラーム。
+
+## 環境ごとの失敗のセマンティクス
+
+同じ赤い X が、各ティアで異なる意味を持つ。そしてその違いが、誰が叩き起こされるかを決める。[execution-tiers](../decision-guide/execution-tiers.mdx) の語彙を使って、レーンをそれに応じてルーティングしよう。
+
+| 環境 | 失敗が意味するもの | どこで走るか | ティア |
+|---|---|---|---|
+| **ローカル** | あなたのバグ -- 今の diff のコードが間違っている | インナーループ + PR ゲート | T0 / T1 |
+| **プレビュー** | 統合または config のドリフト -- コードは正しく、周りの配線が正しくない | プレビュー URL に対するデプロイ後 | T1（デプロイ後）/ T3 |
+| **本番** | インシデント -- 実在ユーザーが今まさに影響を受けている | デプロイ後スモーク + スケジュール | T3 |
+
+ローカルのコントラクト失敗は、単にあなたの PR を落とすだけだ。マージ前に直せば、他の誰も気づかない。プレビューの失敗は、コードはきれいにマージされたが、デプロイされた配線 -- 環境変数、シークレット、バインディング、CORS ルール -- がドリフトしたことを意味する。だから修正は diff ではなく設定にある。本番の失敗はそもそもテストの失敗ではない。ユーザーが依存する何かが落ちているというアラートであり、最後にスイートを触った人ではなく、オンコールの担当者に属する。同じアサーション、3 つの爆発半径 -- これこそが、本番をより大きな localhost のように扱う 1 つの `vitest run` にまとめるのではなく、別々のレーンと別々のアラート設定に保つ理由そのものだ。
+
+## 次に読むべきもの
+
+- [Backend & Node.js Testing](./backend-testing.mdx) -- このページが土台にする HTTP-API のベース URL 切り替え、破壊的テストのガード、デプロイ後スモークスクリプト
+- [Execution Tiers](../decision-guide/execution-tiers.mdx) -- 各環境レーンがどこで走るかを決める T0-T4 の語彙
+- [Playwright Patterns](./playwright-patterns.mdx) -- CI セーフ対環境依存の重いテストの分割、mock-backend アダプター、これらライブ実行のためのコンソールエラー監視
+- [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) -- 最も重い環境依存のレーンを、重複排除された失敗イシュー起票つきでスケジュール実行する
