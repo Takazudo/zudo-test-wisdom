@@ -29,7 +29,7 @@ sidebar_position: 4
 レベル3のテストは`dist/`配下のファイルを読み取るだけで、自らビルドをトリガーすることはありません。スイートを実行する前にビルドを実行してください。そうしないと、テストは古い（あるいは存在しない）出力を読むことになります：
 
 ```sh
-pnpm build && vitest run --project build
+pnpm build && pnpm vitest run --project build
 ```
 
 `--project build`は、Vitestの設定で名前付きの`build`プロジェクトを定義していれば、それにスコープした実行になります（[Vitestパターン](../real-world-patterns/vitest-patterns.mdx)を参照）。名前付きプロジェクトがない場合は、ビルド後に素の`vitest run`を実行しても同じように機能します。

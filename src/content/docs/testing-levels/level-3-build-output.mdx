@@ -29,7 +29,7 @@ Typical targets:
 Level 3 tests read files under `dist/` -- they never trigger a build themselves. Run the build before running the suite, or the tests read stale (or missing) output:
 
 ```sh
-pnpm build && vitest run --project build
+pnpm build && pnpm vitest run --project build
 ```
 
 `--project build` scopes the run to a named `build` project if your Vitest config defines one (see [Vitest Patterns](../real-world-patterns/vitest-patterns.mdx)); without a named project, a plain `vitest run` after the build works the same way.
