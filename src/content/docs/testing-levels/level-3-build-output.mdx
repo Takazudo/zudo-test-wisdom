@@ -24,6 +24,44 @@ Typical targets:
 | **fs/path** | Node.js file system APIs to read build output |
 | **cheerio** | Parse and query HTML output |
 
+## Run the Build First
+
+Level 3 tests read files under `dist/` -- they never trigger a build themselves. Run the build before running the suite, or the tests read stale (or missing) output:
+
+```sh
+pnpm build && vitest run --project build
+```
+
+`--project build` scopes the run to a named `build` project if your Vitest config defines one (see [Vitest Patterns](../real-world-patterns/vitest-patterns.mdx)); without a named project, a plain `vitest run` after the build works the same way.
+
+To avoid relying on the developer remembering the build step, wire it into Vitest itself with `globalSetup` so a bare `vitest run` always exercises a fresh build:
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    globalSetup: ["./tests/build-setup.ts"],
+  },
+});
+```
+
+```typescript
+// tests/build-setup.ts
+import { execSync } from "node:child_process";
+
+export default function setup() {
+  execSync("pnpm build", { stdio: "inherit" });
+}
+```
+
+<Warning>
+
+A green Level 3 suite against a **stale** `dist/` proves nothing -- it asserts on yesterday's output, not the code you just changed. Always rebuild (or use `globalSetup`) before trusting the result.
+
+</Warning>
+
 ## Example: SSG Output Verification
 
 ```typescript
@@ -49,7 +87,8 @@ describe("build output", () => {
     const pages = ["index.html", "about/index.html", "docs/index.html"];
     for (const page of pages) {
       const content = readFileSync(join(DIST, page), "utf-8");
-      expect(content).toContain("<!DOCTYPE html>");
+      // Case-insensitive: toolchains emit the doctype as lowercase `<!doctype html>`.
+      expect(content.toLowerCase()).toContain("<!doctype html>");
     }
   });
 });
@@ -57,16 +96,18 @@ describe("build output", () => {
 
 ## Example: MDX Formatter Contract Testing
 
-A real-world pattern from mdx-formatter: the Vitest suite tests the Rust formatting engine by running it on fixture files and comparing output:
+A real-world pattern from mdx-formatter: the Vitest suite tests the Rust formatting engine by running it on fixture files and comparing output. This is Level 3, not Level 1, because `format()` is a thin JS wrapper that drives a compiled native engine produced by the build -- the object under test is that build artifact, not hand-written TypeScript logic. (If your formatter were pure JS/TS with no compiled backend, this same idempotency check would belong at Level 1 instead.)
 
 ```typescript
 // tests/format.test.ts
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { format } from "../src/format";
 
 describe("mdx formatting", () => {
   it("is idempotent", () => {
-    const input = readFixture("sample.mdx");
+    const input = readFileSync(join(__dirname, "fixtures/sample.mdx"), "utf-8");
     const first = format(input);
     const second = format(first);
     expect(first).toBe(second);
