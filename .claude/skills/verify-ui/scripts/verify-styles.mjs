@@ -1,28 +1,110 @@
 #!/usr/bin/env node
 
 // Extracts computed styles, bounding box, and captures screenshots for a target element.
-// Usage: node verify-styles.mjs <URL> <SELECTOR> [SCREENSHOT_DIR] [WIDTHS] [SCHEMES]
+// Usage: node verify-styles.mjs <URL> <SELECTOR> [SCREENSHOT_DIR] [WIDTHS] [SCHEMES] [WAIT_UNTIL]
 //
 // Examples:
 //   node verify-styles.mjs "http://localhost:4321/" "dialog"
 //   node verify-styles.mjs "http://localhost:4321/" ".card" "./screenshots" "400,800,1200" "light,dark"
+//   node verify-styles.mjs "http://localhost:4321/" ".card" "./screenshots" "400,800,1200" "light" "load"
+//
+// WAIT_UNTIL (default "networkidle", matches headless-check.js's --wait-until):
+// some dev servers (e.g. Vite/zfb-style HMR) hold a WebSocket open forever, so
+// "networkidle" never fires and every page.goto times out. Pass "load" for
+// those. This script does NOT auto-detect that case — same as headless-check.js,
+// the caller has to know to pass it.
 //
 // Playwright must be importable. The script tries common locations.
 
+// Revisions actually present in the local Playwright browser cache(s), keyed
+// by revision number string (e.g. "1217"). Used to pick a playwright-core
+// install whose OWN required browser build is actually downloaded, instead of
+// picking "the first one found" and crashing at launch time. pnpm hoists
+// multiple playwright-core versions side by side in node_modules/.pnpm, and
+// each version pins its own exact chromium-headless-shell revision — the
+// cache commonly has some revisions but not others.
+async function cachedChromiumRevisions() {
+  const { existsSync, readdirSync } = await import("node:fs");
+  const dirs = [
+    `${process.env.HOME}/Library/Caches/ms-playwright`,
+    `${process.env.HOME}/.cache/ms-playwright`,
+  ];
+  const revs = new Set();
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      const m = entry.match(/^chromium(?:_headless_shell)?-(\d+)$/);
+      if (m) revs.add(m[1]);
+    }
+  }
+  return revs;
+}
+
+async function requiredHeadlessShellRevision(playwrightCoreDir) {
+  const { readFileSync } = await import("node:fs");
+  try {
+    const browsers = JSON.parse(
+      readFileSync(`${playwrightCoreDir}/browsers.json`, "utf-8")
+    ).browsers;
+    return browsers.find((b) => b.name === "chromium-headless-shell")?.revision ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function findPlaywright() {
-  // Try project node_modules first (pnpm stores in .pnpm/)
   const { execSync } = await import("node:child_process");
+  const { existsSync } = await import("node:fs");
+  const cachedRevs = await cachedChromiumRevisions();
+
+  // Candidate 1: every playwright-core under the project's node_modules/.pnpm
+  // (there can be several, hoisted by different sub-dependencies) — use the
+  // first whose pinned browser revision is actually cached, not just the
+  // first one `find` happens to list.
+  try {
+    const dirs = execSync(
+      'find node_modules/.pnpm -name "playwright-core" -type d -maxdepth 4 2>/dev/null',
+      { encoding: "utf-8" }
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    for (const dir of dirs) {
+      const rev = await requiredHeadlessShellRevision(`${process.cwd()}/${dir}`);
+      if (rev && cachedRevs.has(rev)) {
+        return await import(`${process.cwd()}/${dir}/index.mjs`);
+      }
+    }
+  } catch {}
+
+  // Candidate 2: the headless-browser skill's own bundled Playwright install.
+  // It pins a single version that this skill's setup keeps installed and
+  // cached, so it works even when the target project's node_modules has
+  // zero, multiple, or mismatched playwright-core versions.
+  try {
+    const skillIndex = new URL(
+      "../../headless-browser/node_modules/playwright/index.mjs",
+      import.meta.url
+    );
+    if (existsSync(skillIndex)) {
+      return await import(skillIndex.href);
+    }
+  } catch {}
+
+  // Candidate 3: whatever playwright-core the project has, even if we
+  // couldn't confirm its browser revision is cached — better to attempt the
+  // launch (Playwright's own error names the exact install command) than to
+  // give up here.
   try {
     const result = execSync(
       'find node_modules/.pnpm -name "playwright-core" -type d -maxdepth 4 2>/dev/null | head -1',
       { encoding: "utf-8" }
     ).trim();
     if (result) {
-      const mod = await import(`${process.cwd()}/${result}/index.mjs`);
-      return mod;
+      return await import(`${process.cwd()}/${result}/index.mjs`);
     }
   } catch {}
-  // Try direct import
+  // Candidate 4/5: plain global-style imports.
   try {
     return await import("playwright-core");
   } catch {}
@@ -30,7 +112,9 @@ async function findPlaywright() {
     return await import("playwright");
   } catch {}
   console.error(
-    "Error: playwright-core not found. Install it in the project or globally."
+    "Error: no working Playwright installation found (checked the project's " +
+      "node_modules, the headless-browser skill's bundled install, and global " +
+      "packages). Run `npx playwright install chromium-headless-shell` in the project."
   );
   process.exit(1);
 }
@@ -71,9 +155,12 @@ const widths = (process.argv[5] || "400,800,1200")
   .split(",")
   .map((w) => parseInt(w.trim(), 10));
 const schemes = (process.argv[6] || "light,dark").split(",").map((s) => s.trim());
+const waitUntil = process.argv[7] || "networkidle";
 
 if (!url || !selector) {
-  console.error("Usage: node verify-styles.mjs <URL> <SELECTOR> [SS_DIR] [WIDTHS] [SCHEMES]");
+  console.error(
+    "Usage: node verify-styles.mjs <URL> <SELECTOR> [SS_DIR] [WIDTHS] [SCHEMES] [WAIT_UNTIL]"
+  );
   process.exit(1);
 }
 
@@ -151,7 +238,7 @@ const stylePage = await browser.newPage({
   viewport: { width: widths[0], height: 800 },
   colorScheme: schemes[0],
 });
-await stylePage.goto(url, { waitUntil: "networkidle" });
+await stylePage.goto(url, { waitUntil });
 
 report.styles = await stylePage.evaluate(
   ({ sel, props }) => {
@@ -185,7 +272,7 @@ for (const scheme of schemes) {
       viewport: { width, height: 800 },
       colorScheme: scheme,
     });
-    await page.goto(url, { waitUntil: "networkidle" });
+    await page.goto(url, { waitUntil });
     const filename = `${scheme}-${width}w.png`;
     const filepath = path.join(ssDir, filename);
     await page.screenshot({ path: filepath });
