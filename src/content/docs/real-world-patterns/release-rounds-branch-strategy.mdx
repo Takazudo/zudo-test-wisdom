@@ -158,9 +158,10 @@ When the same workflow file hosts other jobs that should run on every PR, move t
 ```yaml
 jobs:
   heavy:
-    # Only round PRs (base main) and the nightly schedule reach this job;
-    # every develop-targeting PR skips it.
-    if: github.event_name == 'schedule' || github.base_ref == 'main'
+    # Round PRs (base main), the nightly schedule, and manual dispatch reach
+    # this job; every develop-targeting PR skips it. The negated pull_request
+    # check keeps schedule AND workflow_dispatch runs from being filtered out.
+    if: github.base_ref == 'main' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # ...
 ```
@@ -184,14 +185,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # need the head commit to read its message
+          fetch-depth: 2 # merge-ref checkout: also fetches the PR head commit
 
       # Production-safety invariant: a PR whose BASE is main ALWAYS runs the gate.
       # Only non-main targets (develop, base/*) may honor a [skip test] marker.
       - name: Decide whether to run
         id: gate
         run: |
-          msg="$(git log -1 --pretty=%B)"
+          # On a pull_request run the checkout is the merge ref, so HEAD is the
+          # synthetic merge commit -- read the marker from the PR head commit.
+          msg="$(git log -1 --pretty=%B ${{ github.event.pull_request.head.sha }})"
           if [ "${{ github.base_ref }}" = "main" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"   # never skippable into main
           elif printf '%s' "$msg" | grep -q '\[skip test\]'; then
