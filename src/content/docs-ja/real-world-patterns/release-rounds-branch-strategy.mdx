@@ -1,0 +1,242 @@
+---
+title: "リリースラウンド: develop→main ブランチ戦略"
+description: コストと安定性のレバーとしてのブランチトポロジー -- 恒久的な develop ブランチ、自動デプロイされる main への短命なリリースラウンド、そしてベースブランチでゲートされた重い CI。
+sidebar_position: 16
+---
+
+このガイドの他のページはどれも、あるティアで*何を*実行するかに答えている。どのアサーションをユニットレベルに置くか、どの重いレーンが実物のハードウェアを必要とするか、いつ定期再試験がランナー分のコストに見合うか。だがそれらのどれもが、それらすべての土台にある問いには答えていない。**高価なティアが発火するとき、当該コミットはどのブランチに乗っているのか。そして、どのブランチがグリーンになると本番が変わるのか。**それがブランチトポロジーであり、このページが追加するレバーだ。
+
+このサイトではこれまで「ステージング」は 1 つの意味しか持っていなかった。[環境ティア別テスト](./environment-tiered-testing.mdx)における、プレビューデプロイに向けられた環境ティア別のコントラクトスイートだ。それは*デプロイターゲット*としての意味でのステージング -- 1 つのスイート、3 つの URL である。このページが導入するのは*ブランチ*としての意味でのステージングだ。重い CI がいつ走るか、そしてそもそも本番がいつ変わるかを決めるトポロジーである。どちらもコストと安定性のレバーだが、同じレバーではない。そしてエージェント駆動のソロプロジェクトは両方を必要とする。
+
+ここで扱うパターンは 2026-07-05 に zudo-pattern-gen での採用を検討して評価されたもので、別プロジェクトのリリースフローですでに実証済みだ。これは、このパターンが真価を発揮する特定の形状に向けて書かれている。すなわち、自動デプロイされる `main` ブランチへ出荷する、大量かつエージェント主体のワークフローである。
+
+## 問題: すべてのエージェントのマージが本番デプロイになる
+
+このパターンが想定するワークフローを思い描いてほしい。コーディングエージェントが継続的にプルリクエストを開いてはマージし、その規模は**月に 200 件以上のマージ済み PR** に及ぶ。マージ先は、プッシュのたびに自動デプロイするよう配線された `main` ブランチだ。その配線は低ボリュームなら問題ない。だがエージェント規模になると 3 つの別個の問題を生み、それらは複合する。
+
+- **「エージェントが完了した」と「本番が変わった」が同じイベントになる。**すべての自律的なマージが本番デプロイである。デプロイパイプラインがデータベースマイグレーションも自動適用する場合、各マージは実データを抱えた本番データベースのスキーマを変更しうる -- エージェントが勝利を宣言してから、そのマイグレーションが本番に対して走るまでの間に、人間が一人も介在しないまま。混乱した 1 体のエージェントが及ぼす影響範囲は、稼働中のスキーマ変更そのものだ。
+- **PR あたりの重い CI コストが PR ボリューム分だけ倍増する。**すべての PR に付ける重いレーン -- 長い end-to-end スイート、[ビジュアルリグレッション](./visual-regression-baselines.mdx)、Mac や GPU のランナー -- は、その変更がカバー対象に触れた可能性があるか否かに関わらず、月に 200 回以上走る。フィーチャー作業ではなく重いレーンが、CI 請求書の支配的な項目になる。
+- **プレリリースの単一ユーザーアプリに継続的デリバリーは不要だ。**継続的デプロイは、すべての修正を待っているユーザーがいるときには機能だ。プレリリースまたは単一ユーザーのプロジェクトでは、誰も待っていない。実際に価値を持つのはデプロイ頻度ではなく**本番データの安定性**である。たった 1 人の聴衆のために継続的デリバリーのフルコストを払うのは、間違ったトレードだ。
+
+解決策は、エージェントを減速させることでも、すべてのマージを人間のゲートの背後に置くことでもない。ブランチトポロジーを変えて、「エージェントが何かをマージした」と「本番が変わった」が同じイベントであることをやめさせること -- そして重いレーンを、すべての PR ではなく重要な境界で走らせることだ。
+
+## モデル: 1 つの恒久ブランチ、短命なラウンド
+
+戦略全体は 2 つのブランチと、繰り返される 4 ステップの儀式だ。
+
+```text
+   day-to-day work; epic base/* branches target develop
+                         |
+                         v
+   develop  o--o--o--o--o--o--o        permanent accumulation branch
+                               \
+              cut release/dev-round-YYYYMMDD from origin/main,
+              merge origin/develop into it, run the full gate
+                               \
+                                v   PR -> main (heavy lane always runs)
+   main     o------------------o       auto-deploys production
+                               |
+              sync-forward: merge origin/main back into develop
+                               v
+   develop stays even with production; release branch deleted
+```
+
+### develop は恒久、main は本番
+
+`develop` は**恒久的な蓄積ブランチ**だ。すべての日常作業がここに着地する -- エージェント PR、人間の PR、`main` ではなく `develop` をターゲットにするエピックのベースブランチ（`base/*`）。削除されず、リベースされず、フォースプッシュされることもない。リリースとリリースの間、プロジェクトが実際に生きているブランチだ。
+
+`main` は本番であり、それ以外の何物でもない。リリースラウンドがマージされるときだけ変わる。自動デプロイは依然として `main` に配線されているため、デプロイはラウンドと正確に同じ頻度で -- オンデマンドで -- 起きるようになる。すべてのマージごとにではなく。
+
+<Note>
+
+`develop` を（サイクルごとに作り直される使い捨ての統合ブランチではなく）恒久的にする狙いは、後述の sync-forward ステップがクリーンで fast-merge 可能な操作であるために、履歴が連続していなければならないからだ。ラウンドごとに削除・再作成されるブランチは前方マージできない。差分を取って cherry-pick することしかできず、それはまさにこのモデルが取り除く脆い手作業だ。
+
+</Note>
+
+### ラウンドの出荷
+
+「ラウンド」とは、蓄積された `develop` の作業を**短命なリリースブランチ**を通じて本番に昇格させる 1 バッチだ。儀式は毎回こうなる。
+
+```bash
+# Cut the round from the current production tip -- NOT from develop
+git fetch origin
+git switch -c release/dev-round-20260705 origin/main
+
+# Regular-merge develop in -- never squash, so main keeps every commit's history
+git merge --no-ff origin/develop
+
+# Run the full quality gate on the round; fix any failures on THIS branch,
+# not on develop -- release-check fixes are committed here and ride into main
+pnpm exam
+
+# Open the round PR into main; the full heavy lane runs because the base is main
+git push -u origin release/dev-round-20260705
+gh pr create --base main --head release/dev-round-20260705 \
+  --title "Release round 20260705" --fill
+```
+
+このシーケンスの中で 3 つのディテールが要となる。
+
+- **`develop` ではなく `origin/main` からカットする。**リリースブランチは現在の本番の先端から始まり、`develop` をそこ*へ*マージする。これにより PR の差分が「前回のラウンド以降のすべて」として読めるようになり、`main` の第一親系譜がクリーンに保たれる。
+- **`--no-ff` の通常マージ、決して squash しない。**ラウンドを squash すると 1 か月分の履歴が 1 コミットに潰れ、重い失敗のトリアージが依存する変更単位の二分探索を破壊する。すべてのコミットを保存すること。
+- **リリースチェックの修正はリリースブランチに着地する。**ゲートがレッドになったら、`release/dev-round-*` 上で修正してそこにコミットする。ラウンドがマージされる前にその修正を `develop` へプッシュ**しない**こと -- 後述の sync-forward ステップが自動的にそれを戻すし、`develop` へラウンド途中でプッシュすることは、リリースのために凍結しようとしているまさにそのブランチと競合する。
+
+### develop の前方同期
+
+ラウンド PR が `main` にマージされた後、`develop` はラウンドのマージコミットとリリースチェック修正の分だけ本番から正確に遅れている。そのギャップを直ちに閉じ、`develop` がドリフトしないようにする。
+
+```bash
+# After the round PR merges: pull main's new tip back into develop
+# so develop never drifts behind production. ~4 commands, fully scriptable.
+git fetch origin
+git switch develop
+git merge --no-ff origin/main
+git push origin develop
+```
+
+そしてリリースブランチを削除する。`develop` は決して削除されない。リリースブランチは常に削除される。`develop` はこれで `main` と揃い、次のラウンドはまっさらな状態から始まる。
+
+<Tip>
+
+4 つの sync-forward コマンドを `scripts/sync-develop.sh`（またはプロジェクトのエージェントスキル）に包んで、このステップを 4 つの記憶すべきコマンドではなく 1 回の呼び出しにする。このモデルのラウンドあたりのオーバーヘッド全体は、その 4 コマンドとラウンド PR そのものだ -- それだけ安く保てば、誰もこれをスキップして `develop` を `main` の背後で腐らせようとは思わない。
+
+</Tip>
+
+### 命名とケイデンス
+
+- **同日の再実行には `-HHMM` サフィックスを付ける。**同じ日の 2 回目のラウンドは `release/dev-round-20260705-1430` になる。ブランチ名を決して再利用しない -- ラウンドごとに新しい名前にすることで履歴と PR リストが曖昧でなくなり、使い回されたブランチの stale-ref の混乱を避けられる。
+- **ケイデンスはカレンダーではなくオンデマンド。**週次のリリーストレインはない。今日本番に入れたいものを今日仕上げたら、今日ラウンドをカットする。トポロジーはデプロイ頻度をマージ頻度から切り離すが、それ自体のスケジュールを課すことはない -- ラウンドは昇格する価値があるときにちょうど起きる。
+
+## 重い CI をベースブランチでゲートする
+
+ブランチトポロジーはペイオフの半分でしかない。もう半分は、それと対になる CI ルールだ。**重いレーンは PR のベースが `main` のときだけ走る。**ラウンド PR はベース `main` の PR のほぼ全数を占める（稀な例外は本番への直接ホットフィックス）ので、このルールは高価なレーンをラウンド境界と後述の夜間スケジュールに限定する -- 月の 200 件以上の PR すべてにではなく。
+
+ヘッドブランチ名ではなく**ベースブランチ**でフィルタする。
+
+```yaml
+# .github/workflows/heavy.yml -- heavy lanes run only for PRs whose BASE is main
+name: heavy
+
+on:
+  # Round PRs (and rare direct hotfixes) target main -- filter by BASE branch.
+  # This is more robust than pattern-matching release/* head names.
+  pull_request:
+    branches: [main]
+  # Nightly heavy lane aimed at develop so regressions surface mid-round,
+  # not only at round boundaries (see below).
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # PR runs check out the merge ref by default; the nightly run must be
+      # pointed at develop explicitly -- the fast-moving branch is the target.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:heavy # long e2e, visreg, Mac/GPU -- the expensive lane
+```
+
+<Note>
+
+**ベース ref によるフィルタリングはヘッド名マッチングに勝る。**`release/dev-round-*` という命名規約はブランチと PR のリストをスキャンする*人間*のために存在する -- CI ルールがキーにするものではない。`github.base_ref == 'main'`（または上記の `on.pull_request.branches: [main]` トリガーフィルタ）でゲートすることは、あらゆるヘッドブランチ名に対して堅牢だ。`fix/urgent` という名前のホットフィックスブランチ、ラウンドブランチ、たまたま `main` をターゲットにするエージェントブランチ -- すべてが正しくフルレーンを得るし、安全であるために `release/*` の命名に従うことを何も覚えておく必要がない。ヘッドブランチのパターンをマッチさせるのは、同じ意図の脆いバージョンだ。
+
+</Note>
+
+同じワークフローファイルが、すべての PR で走るべき他のジョブもホストしている場合は、フィルタをトリガーではなくジョブレベルに移す。
+
+```yaml
+jobs:
+  heavy:
+    # Only round PRs (base main) and the nightly schedule reach this job;
+    # every develop-targeting PR skips it.
+    if: github.event_name == 'schedule' || github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    # ...
+```
+
+### 本番安全の不変条件
+
+ベース ref ゲートが決して曲げてはならないルールが 1 つある。**`main` への PR は常にフルレーンを走らせる。**高速なイテレーションのために他のブランチで honor する `[skip test]` 系のマーカーが何であれ、それらは `main` に対しては無効だ。本番行きの変更こそ、ゲートをスキップさせる余裕が最もない変更なので、ベースが `main` のときスキップ経路は構造的に到達不能でなければならない -- 単に「普段は使わない」ではなく。
+
+オプションのスキップマーカーは*非 main* の品質ゲートにのみ適用され、そこでは `develop` や `base/*` ブランチでの高速イテレーションを買う。
+
+```yaml
+# .github/workflows/quality.yml -- the fast per-PR gate that runs on every PR
+name: quality
+
+on:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # need the head commit to read its message
+
+      # Production-safety invariant: a PR whose BASE is main ALWAYS runs the gate.
+      # Only non-main targets (develop, base/*) may honor a [skip test] marker.
+      - name: Decide whether to run
+        id: gate
+        run: |
+          msg="$(git log -1 --pretty=%B)"
+          if [ "${{ github.base_ref }}" = "main" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"   # never skippable into main
+          elif printf '%s' "$msg" | grep -q '\[skip test\]'; then
+            echo "run=false" >> "$GITHUB_OUTPUT"  # opt-out allowed on non-main only
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.gate.outputs.run == 'true'
+        run: pnpm test:ci
+```
+
+<Danger>
+
+**スキップマーカーをベース `main` の PR に決して到達させない。**`[skip test]` のオプトアウトは、著者が `develop` ターゲットのブランチで、プッシュのたびにフルゲートを待つことなく高速にイテレーションできるように存在する。もし同じマーカーがラウンド PR でゲートを抑制できてしまえば、1 つの迷子のコミットメッセージが未テストのコードを本番デプロイへ直行させる。`base_ref == 'main'` のチェックは、上記のとおり*最初に*無条件で評価されなければならない -- 不変条件は、いかなるマーカー・ラベル・規約も、本番を変えるブランチでゲートをバイパスできないことだ。
+
+</Danger>
+
+### develop に向けた夜間の重いレーン
+
+重いレーンをラウンド境界にゲートすることには明白な欠点がある。ラウンド途中で持ち込まれた重いリグレッションは、ラウンドがカットされるまで -- 場合によっては数週間後まで -- 見えない。上記の `heavy.yml` スケルトンの `schedule` トリガーは、**夜間実行を `main` ではなく `develop`** -- 動きの速いブランチ -- に向けることで、そのギャップを閉じる。重いリグレッションはそれが着地した夜に、ラウンド途中で表面化するようになる。境界でだけではなく。
+
+これは[定期再試験 & 夜間試験](./scheduled-re-exam.mdx)パターンと直接組み合わさる。あちらのページはスケジュールされた重いレーンの*メカニクス* -- オフミニッツの cron、ワークフローごとに 1 つに重複排除された失敗 Issue 起票、リトライパスのテレメトリ、オンデマンドディスパッチ -- を所有する。このページが追加するのは*どのブランチをターゲットにすべきか*だけだ。リリースラウンドのトポロジーでは、夜間を `develop` に向ける。ラウンドとラウンドの間、変更が実際にあるのはそこだからだ。`main` はラウンド間ほとんど動かないので、`main` に向けた夜間は次のラウンドが着地するまで同じ本番の先端を毎晩再テストし、新しいことを何も学ばない。
+
+## トレードオフ、正直に述べる
+
+このモデルはタダではない。そのコストは率直に名指しする価値がある。
+
+- **ラウンド時の二分探索が悪化する。**ラウンド PR のフルレーンが捕らえた重い失敗は、まるまる 1 ラウンド分の変更 -- 場合によっては数週間分のマージ -- を背後に抱えて到着する。だから「どのコミットが壊したか」は、PR あたりの重い CI の場合よりも広い探索になる。緩和策は、ラウンド境界の*前に*走る 2 つの早期シグナルレーンだ。上記の**夜間 `develop` スケジュール**は、任意の重いリグレッションを一晩分のマージに絞り込む。そして**ローカルの重いレーン**（`b4push` / `exam`、[定期再試験](./scheduled-re-exam.mdx#two-commands-two-budgets-b4push-and-exam)と[実行ティア T4](../decision-guide/execution-tiers.mdx)を参照）は、実装時にトピック単位のシグナルを与える。どちらもラウンド時の探索を排除はしないが、両者が合わさればそれがラウンド全体に及ぶことは決してなくなる。
+- **もう 1 つの恒久ブランチ、加えて sync-forward の儀式。**`develop` は健全に保つべき 2 つ目の長命ブランチであり、すべてのラウンドは 4 コマンドの sync-forward を要する。それがこのモデルの反復オーバーヘッドの全体だ -- おおよそラウンドあたり 4 つのスクリプト化された git コマンドと、ラウンド PR そのもの。1 行の呼び出しにスクリプト化すれば（上記の Tip を参照）、摩擦が決して蓄積しないほど安い。4 つの記憶すべきコマンドのまま放置すれば、まさに `develop` が気付かぬうちに `main` の数週間背後にドリフトするまでスキップされがちなステップになる。
+
+これらを、モデルが買うものと天秤にかける。本番はすべてのエージェントのマージではなく意図的なラウンドでのみ変わり、支配的な重い CI コストは「月 200 回以上の実行」から「ラウンドあたり 1 回プラス一晩あたり 1 回」に落ちる。これが書かれた対象である大量のエージェントワークフローにとって、そのトレードは大きくプラスだ。すべてのマージがすでに熟慮された人間の判断である低ボリュームのプロジェクトにとっては、そうではない -- 儀式が節約を上回ってしまう。
+
+## ボーナス: 隔離されたプレビューを develop にマッピングする
+
+プロジェクトに隔離されたプレビュー環境 -- 自前のデータベース、デプロイ時に適用される自前のマイグレーション -- があるなら、そのプレビューのデプロイトリガーを `main` ではなく `develop` に向ける。そのマッピングから 2 つのことがタダで落ちてくる。
+
+- **マイグレーションが継続的にリハーサルされる。**`develop` への各マージは、蓄積ウィンドウを通じてプレビューにデプロイし、そのマイグレーションをプレビューデータベースに対して適用する。ラウンドがカットされる頃には、そのマイグレーションはすでに -- おそらく何十回も -- 実（本番ではないにせよ）データベースに対して走っている。ラウンド PR はそのとき、稼働中のスキーマに一度も触れていないマイグレーションではなく、**予め実行されたマイグレーション**だけを本番に適用している。
+- **プレビューは常に作業と最新である。**作業が実際に蓄積するのは `develop` なので、`develop` を追跡するプレビューはラウンド間のプロジェクトの真の進行中の状態を示す。それはまさにデモやレビューの対象にしたいもの -- 前回ラウンドの凍結された本番スナップショットではなく -- だ。
+
+これは[環境ティア別テスト](./environment-tiered-testing.mdx)モデルにきれいにはまる。あちらのページは 1 つのコントラクトスイートをローカル・プレビュー・本番のティアに対して走らせる。このマッピングは、リリースラウンドのトポロジーで*どのブランチがプレビューティアに供給するか*を固定するだけだ。プレビューティアは継続的なマイグレーションリハーサルの場になり、本番はプレビューがすでに生き延びたマイグレーションだけを受け取るようになる。
+
+## 次に読む
+
+- [定期再試験 & 夜間試験](./scheduled-re-exam.mdx) -- このページが `develop` に向ける夜間の重いレーンのメカニクス。cron の衛生、重複排除された Issue 起票、リトライパスのテレメトリ、オンデマンドディスパッチ。
+- [実行ティア](../decision-guide/execution-tiers.mdx) -- T0-T4 の語彙。ローカルの重いレーン（T4）は、夜間スケジュールと組む、トピック単位の早期シグナルだ。
+- [重いテスト判定ルール](../decision-guide/heavy-test-decision.mdx) -- そもそもテストがどうやって「重い」分類を得るか。ベース `main` でゲートされたレーンに何が属するかを決める。
+- [環境ティア別テスト](./environment-tiered-testing.mdx) -- デプロイターゲットの意味でのステージング、そして `develop` 上のプレビューによるマイグレーションリハーサルのマッピングがどこにはまるか。
