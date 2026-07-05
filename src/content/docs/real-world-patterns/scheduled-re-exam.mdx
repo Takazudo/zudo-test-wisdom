@@ -241,9 +241,12 @@ jobs:
 
 ### Runner Notes
 
+In a release-round branch topology, point this nightly schedule at the accumulation branch (e.g. `develop`) rather than at production -- see [Release Rounds: A develop→main Branch Strategy § A nightly heavy lane pointed at develop](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch-a-nightly-heavy-lane-pointed-at-develop) for why a nightly aimed at a rarely-moving production branch learns nothing new between rounds.
+
 - **GitHub-hosted macOS runners are Apple silicon** (`macos-14` and later): real WebKit, Metal-backed rendering. For a canvas/GPU-heavy web app whose pixel-level specs fail on software-rendering CI runners, this alone can be the difference between false-red and trustworthy.
 - **Third-party hosted macOS providers** exist for when the GitHub-hosted pool is too slow or too expensive for the suite.
 - **A self-hosted runner on your own hardware is an escalation, not a default.** If you do escalate: schedule-only on `main`, never PR-triggered on a public repo, and pair it with offline detection -- e.g. a companion job on a hosted runner that alerts when the self-hosted job has not reported within N hours -- so a sleeping machine is visible rather than silently green-by-absence.
+- **Runner shapes, pricing, and sizing rules live elsewhere.** See [CI Runner Sizing](../tools-reference/ci-runner-sizing.mdx) for the label matrix, macOS cost multipliers, and the four rules for when a bigger or different runner actually helps.
 
 <Warning>
 

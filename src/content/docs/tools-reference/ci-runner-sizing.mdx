@@ -147,7 +147,7 @@ A heavy lane on an eight-vCPU runner that fires on every topic PR costs far more
 
 Gate expensive lanes by two things:
 
-1. **PR base branch.** Run the heavy suite only on release/round PRs — those whose base is `main` — not on every topic-branch PR feeding into an integration branch. Most PRs in an agent-driven flow are topic PRs; keeping the heavy lane off them removes the bulk of the cost.
+1. **PR base branch.** Run the heavy suite only on release/round PRs — those whose base is `main` — not on every topic-branch PR feeding into an integration branch. Most PRs in an agent-driven flow are topic PRs; keeping the heavy lane off them removes the bulk of the cost. See [Release Rounds § Gating Heavy CI by Base Branch](../real-world-patterns/release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch) for the concrete branch topology and CI workflow this rule assumes.
 2. **A nightly `schedule:`.** Back the base-branch gate with a scheduled full run so nothing that skipped the topic PRs goes unverified for long. This is the T3 [scheduled re-exam](../real-world-patterns/scheduled-re-exam.mdx) tier doing its job.
 
 Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger design to make a lane *cheaper* (Rule 4). Conflating the two — trying to save money by downsizing a per-PR heavy lane instead of moving it off per-PR entirely — optimizes the rounding error and ignores the bill.

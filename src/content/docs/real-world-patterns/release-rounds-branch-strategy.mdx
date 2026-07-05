@@ -109,7 +109,7 @@ Wrap the four sync-forward commands in a `scripts/sync-develop.sh` (or a project
 
 ## Gating Heavy CI by Base Branch
 
-The branch topology is only half the payoff. The other half is a CI rule that pairs with it: **heavy lanes run only when the PR's base is `main`.** Round PRs are the near-total majority of base-`main` PRs (the rare exception is a direct hotfix straight to production), so this rule confines the expensive lanes to round boundaries and the nightly schedule below -- not to every one of the month's 200+ PRs.
+The branch topology is only half the payoff. The other half is a CI rule that pairs with it: **heavy lanes run only when the PR's base is `main`.** Round PRs are the near-total majority of base-`main` PRs (the rare exception is a direct hotfix straight to production), so this rule confines the expensive lanes to round boundaries and the nightly schedule below -- not to every one of the month's 200+ PRs. This is the branch-topology instance of the general cost-control principle in [CI Runner Sizing § Rule 4: Cost control comes from trigger design, not runner choice](../tools-reference/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-4-cost-control-comes-from-trigger-design-not-runner-choice).
 
 Filter by **base branch**, not head-branch name:
 
