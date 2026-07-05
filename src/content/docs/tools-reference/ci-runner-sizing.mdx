@@ -112,7 +112,7 @@ The actual fix is to **bound the per-process file count** so memory is reclaimed
 vitest --shard=1/4
 ```
 
-Sharding caps how many test files a single worker process loads before the run rolls to a fresh process, which keeps peak heap under the ceiling regardless of the machine's total RAM. (Evidence: zudo-pattern-gen #1912 — a heap-OOM lane that survived the 2→4vCPU upgrade and only went green once `--shard` bounded the per-process file count.) See [Vitest Patterns](../real-world-patterns/vitest-patterns.mdx) for the surrounding worker- and timeout-budget configuration.
+Sharding caps how many test files a single worker process loads before the run rolls to a fresh process, which keeps peak heap under the ceiling regardless of the machine's total RAM. Note that `--shard=1/4` runs only the *first* of four shards — a CI lane must run all four (`1/4` through `4/4`, in a matrix or in sequence) or three-quarters of the suite silently goes unrun. The flag bounds per-process memory; it does not by itself execute the whole suite. (Evidence: zudo-pattern-gen #1912 — a heap-OOM lane that survived the 2→4vCPU upgrade and only went green once `--shard` bounded the per-process file count.) See [Vitest Patterns](../real-world-patterns/vitest-patterns.mdx) for the surrounding worker- and timeout-budget configuration.
 
 <Warning>
 
