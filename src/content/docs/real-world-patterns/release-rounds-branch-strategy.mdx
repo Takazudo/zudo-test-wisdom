@@ -1,0 +1,245 @@
+---
+title: "Release Rounds: A develop→main Branch Strategy"
+description: Branch topology as a cost + stability lever -- a permanent develop branch, short-lived release rounds into an auto-deploying main, and heavy CI gated by base branch.
+sidebar_position: 16
+---
+
+Every other page in this guide answers *what* to run at a given tier: which assertions belong at the unit level, which heavy lanes need real hardware, when a scheduled re-exam earns its runner. None of them answer a question that sits underneath all of those: **which branch is a given commit sitting on when the expensive tiers fire, and which branch turning green changes production.** That is branch topology, and it is the lever this page adds.
+
+So far on this site, "staging" has meant exactly one thing: the environment-tiered contract suite pointed at a preview deploy, in [Environment-Tiered Testing](./environment-tiered-testing.mdx). That is staging in the *deploy-target* sense -- one suite, three URLs. This page introduces staging in the *branch* sense: a topology that decides when heavy CI runs and when production changes at all. Both are cost + stability levers; they are not the same lever, and an agent-driven solo project needs both.
+
+The pattern here was evaluated 2026-07-05 for adoption in zudo-pattern-gen, and is already proven in another project's release flow. It is written for the specific shape that makes it pay off: a high-volume, agent-heavy workflow shipping into a `main` branch that auto-deploys.
+
+## The Problem: Every Agent Merge Is a Production Deploy
+
+Picture the workflow this is built for: coding agents open and merge pull requests continuously, on the order of **200+ merged PRs a month**, into a `main` branch wired to auto-deploy on every push. That wiring is fine at low volume. At agent volume it produces three distinct problems, and they compound.
+
+- **"Agent finished" and "prod changed" become the same event.** Every autonomous merge is a production deploy. When the deploy pipeline also applies database migrations automatically, each merge can mutate the schema of the real production database against real data -- with no human between the agent declaring victory and the migration running against prod. The blast radius of a single confused agent is a live schema change.
+- **Per-PR heavy CI cost multiplies by PR volume.** Any heavy lane you attach to every PR -- long end-to-end suites, [visual regression](./visual-regression-baselines.mdx), Mac or GPU runners -- runs 200+ times a month whether or not the change could possibly have touched what it covers. The heavy lane, not the feature work, becomes the dominant line item on the CI bill.
+- **A pre-release, single-user app does not need continuous delivery.** Continuous deployment is a feature when you have users waiting on every fix. For a pre-release or single-user project, nobody is waiting; the thing that actually has value is the **stability of the production data**, not the frequency of deploys. Paying the full price of continuous delivery to serve an audience of one is the wrong trade.
+
+The fix is not to slow the agents down or to gate every merge behind a human. It is to change the branch topology so that "an agent merged something" and "production changed" stop being the same event -- and so the heavy lanes run at the boundary that matters instead of on every PR.
+
+## The Model: One Permanent Branch, Short-Lived Rounds
+
+The whole strategy is two branches and a repeating four-step ritual.
+
+```text
+   day-to-day work; epic base/* branches target develop
+                         |
+                         v
+   develop  o--o--o--o--o--o--o        permanent accumulation branch
+                               \
+              cut release/dev-round-YYYYMMDD from origin/main,
+              merge origin/develop into it, run the full gate
+                               \
+                                v   PR -> main (heavy lane always runs)
+   main     o------------------o       auto-deploys production
+                               |
+              sync-forward: merge origin/main back into develop
+                               v
+   develop stays even with production; release branch deleted
+```
+
+### develop is permanent; main is production
+
+`develop` is the **permanent accumulation branch**. All day-to-day work lands here -- agent PRs, human PRs, epic base branches (`base/*`) that target `develop` rather than `main`. It is never deleted, never rebased, never force-pushed. It is the branch the project actually lives on between releases.
+
+`main` is production and nothing else. It changes only when a release round merges into it. Because the auto-deploy is still wired to `main`, deploys now happen exactly as often as rounds do -- on demand -- instead of on every merge.
+
+<Note>
+
+The point of making `develop` permanent (rather than a throwaway integration branch recreated each cycle) is that history has to be continuous for the sync-forward step below to be a clean fast-mergeable operation. A branch that gets deleted and recut every round cannot be merged forward; it can only be diffed and cherry-picked, which is exactly the fragile manual work this model removes.
+
+</Note>
+
+### Shipping a round
+
+A "round" is a batch of accumulated `develop` work promoted to production through a **short-lived release branch**. The ritual, every time:
+
+```bash
+# Cut the round from the current production tip -- NOT from develop
+git fetch origin
+git switch -c release/dev-round-20260705 origin/main
+
+# Regular-merge develop in -- never squash, so main keeps every commit's history
+git merge --no-ff origin/develop
+
+# Run the full quality gate on the round; fix any failures on THIS branch,
+# not on develop -- release-check fixes are committed here and ride into main
+pnpm exam
+
+# Open the round PR into main; the full heavy lane runs because the base is main
+git push -u origin release/dev-round-20260705
+gh pr create --base main --head release/dev-round-20260705 \
+  --title "Release round 20260705" --fill
+```
+
+Three details in that sequence are load-bearing:
+
+- **Cut from `origin/main`, not from `develop`.** The release branch starts at the current production tip and merges `develop` *into* it. This keeps the PR diff readable as "everything since the last round" and keeps `main`'s first parent lineage clean.
+- **`--no-ff` regular merge, never squash.** Squashing a round would collapse a month of history into one commit and destroy the per-change bisection that heavy-failure triage depends on. Preserve every commit.
+- **Release-check fixes land on the release branch.** If the gate goes red, fix it on `release/dev-round-*` and commit there. Do **not** push the fix back to `develop` before the round merges -- the sync-forward step below carries it back automatically, and pushing it to `develop` mid-round races the very branch you are trying to freeze for release.
+
+### Syncing develop forward
+
+After the round PR merges into `main`, `develop` is now behind production by exactly the round's merge commit plus any release-check fixes. Close that gap immediately so `develop` never drifts:
+
+```bash
+# After the round PR merges: pull main's new tip back into develop
+# so develop never drifts behind production. ~4 commands, fully scriptable.
+git fetch origin
+git switch develop
+git merge --no-ff origin/main
+git push origin develop
+```
+
+Then delete the release branch. `develop` is never deleted; the release branch always is. `develop` is now even with `main`, and the next round starts from a clean slate.
+
+<Tip>
+
+Wrap the four sync-forward commands in a `scripts/sync-develop.sh` (or a project agent skill) so the step is one invocation, not four remembered commands. The whole per-round overhead of this model is those four commands plus the round PR itself -- keep it that cheap and nobody is tempted to skip it and let `develop` rot behind `main`.
+
+</Tip>
+
+### Naming and cadence
+
+- **Same-day reruns get an `-HHMM` suffix.** A second round on the same day is `release/dev-round-20260705-1430`. Never reuse a branch name -- a fresh name per round keeps the history and the PR list unambiguous, and avoids the stale-ref confusion of a recycled branch.
+- **Cadence is on demand, not calendar.** There is no weekly release train. Finish something today that you want in production today, cut a round today. The topology decouples deploy frequency from merge frequency without imposing a schedule of its own -- rounds happen exactly when a promotion is worth doing.
+
+## Gating Heavy CI by Base Branch
+
+The branch topology is only half the payoff. The other half is a CI rule that pairs with it: **heavy lanes run only when the PR's base is `main`.** Round PRs are the near-total majority of base-`main` PRs (the rare exception is a direct hotfix straight to production), so this rule confines the expensive lanes to round boundaries and the nightly schedule below -- not to every one of the month's 200+ PRs. This is the branch-topology instance of the general cost-control principle in [CI Runner Sizing § Rule 4: Cost control comes from trigger design, not runner choice](../tools-reference/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-4-cost-control-comes-from-trigger-design-not-runner-choice).
+
+Filter by **base branch**, not head-branch name:
+
+```yaml
+# .github/workflows/heavy.yml -- heavy lanes run only for PRs whose BASE is main
+name: heavy
+
+on:
+  # Round PRs (and rare direct hotfixes) target main -- filter by BASE branch.
+  # This is more robust than pattern-matching release/* head names.
+  pull_request:
+    branches: [main]
+  # Nightly heavy lane aimed at develop so regressions surface mid-round,
+  # not only at round boundaries (see below).
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # PR runs check out the merge ref by default; the nightly run must be
+      # pointed at develop explicitly -- the fast-moving branch is the target.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:heavy # long e2e, visreg, Mac/GPU -- the expensive lane
+```
+
+<Note>
+
+**Base-ref filtering beats head-name matching.** The `release/dev-round-*` naming convention exists for *humans* scanning the branch and PR lists -- it is not what the CI rule keys on. Gating on `github.base_ref == 'main'` (or the `on.pull_request.branches: [main]` trigger filter above) is robust against any head-branch name: a hotfix branch named `fix/urgent`, a round branch, an agent branch that happens to target `main` -- all correctly get the full lane, and nothing has to remember to follow the `release/*` naming to be safe. Matching head-branch patterns is the fragile version of the same intent.
+
+</Note>
+
+When the same workflow file hosts other jobs that should run on every PR, move the filter to the job level instead of the trigger:
+
+```yaml
+jobs:
+  heavy:
+    # Round PRs (base main), the nightly schedule, and manual dispatch reach
+    # this job; every develop-targeting PR skips it. The negated pull_request
+    # check keeps schedule AND workflow_dispatch runs from being filtered out.
+    if: github.base_ref == 'main' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # ...
+```
+
+### The production-safety invariant
+
+There is one rule the base-ref gate must never bend: **a PR into `main` always runs the full lane.** Whatever `[skip test]`-style markers the project honors for fast iteration on other branches, they are inert against `main`. A production-bound change is exactly the change you can least afford to let skip its gate, so the skip path must be structurally unreachable when the base is `main` -- not merely "usually not used".
+
+The optional skip marker applies only to the *non-main* quality gate, where it buys rapid iteration on `develop` or `base/*` branches:
+
+```yaml
+# .github/workflows/quality.yml -- the fast per-PR gate that runs on every PR
+name: quality
+
+on:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # merge-ref checkout: also fetches the PR head commit
+
+      # Production-safety invariant: a PR whose BASE is main ALWAYS runs the gate.
+      # Only non-main targets (develop, base/*) may honor a [skip test] marker.
+      - name: Decide whether to run
+        id: gate
+        run: |
+          # On a pull_request run the checkout is the merge ref, so HEAD is the
+          # synthetic merge commit -- read the marker from the PR head commit.
+          msg="$(git log -1 --pretty=%B ${{ github.event.pull_request.head.sha }})"
+          if [ "${{ github.base_ref }}" = "main" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"   # never skippable into main
+          elif printf '%s' "$msg" | grep -q '\[skip test\]'; then
+            echo "run=false" >> "$GITHUB_OUTPUT"  # opt-out allowed on non-main only
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.gate.outputs.run == 'true'
+        run: pnpm test:ci
+```
+
+<Danger>
+
+**Never let the skip marker reach a base-`main` PR.** The `[skip test]` opt-out exists so an author can iterate quickly on a `develop`-targeting branch without waiting on the full gate every push. If that same marker could suppress the gate on a round PR, one stray commit message would ship untested code straight to the production deploy. The `base_ref == 'main'` check has to be evaluated *first* and unconditionally, exactly as above -- the invariant is that no marker, label, or convention can bypass the gate on the branch that changes production.
+
+</Danger>
+
+### A nightly heavy lane pointed at develop
+
+Gating the heavy lanes to round boundaries has an obvious downside: a heavy regression introduced mid-round is invisible until the round is cut, potentially weeks later. The `schedule` trigger in the `heavy.yml` skeleton above closes that gap by pointing a **nightly run at `develop`** -- the fast-moving branch -- instead of at `main`. Heavy regressions then surface the night they land, mid-round, rather than only at the boundary.
+
+This composes directly with the [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) pattern: that page owns the *mechanics* of a scheduled heavy lane -- the off-minute cron, deduped one-issue-per-workflow failure filing, retry-pass telemetry, on-demand dispatch. This page only adds *which branch it should target*: in a release-round topology, aim the nightly at `develop`, because that is where the changes actually are between rounds. `main` barely moves between rounds, so a nightly aimed at `main` would re-test the same production tip night after night and learn nothing new until the next round lands.
+
+## Trade-Offs, Stated Honestly
+
+This model is not free, and the costs are worth naming plainly.
+
+- **Worse bisection at round time.** A heavy failure caught by the round PR's full lane arrives with a whole round of changes sitting behind it -- potentially weeks of merges -- so "which commit broke it" is a wider search than it would be under per-PR heavy CI. The mitigations are the two early-signal lanes that run *before* the round boundary: the **nightly `develop` schedule** above narrows any heavy regression to a single night's worth of merges, and the **local heavy lane** (`b4push` / `exam`, see [Scheduled Re-exam](./scheduled-re-exam.mdx#two-commands-two-budgets-b4push-and-exam) and [Execution Tiers T4](../decision-guide/execution-tiers.mdx)) gives per-topic signal at implementation time. Neither eliminates the round-time search, but together they keep it from ever spanning the full round.
+- **One more permanent branch, plus the sync-forward ritual.** `develop` is a second long-lived branch to keep healthy, and every round costs the four-command sync-forward. That is the entire recurring overhead -- roughly four scripted git commands per round plus the round PR itself. Scripted into a one-line invocation (see the tip above), it is cheap enough that the friction never accumulates; left as four remembered commands, it is exactly the kind of step that gets skipped until `develop` has silently drifted weeks behind `main`.
+
+Weigh those against what the model buys: production changes only on deliberate rounds instead of on every agent merge, and the dominant heavy-CI cost drops from "200+ runs a month" to "one run per round plus one per night." For the high-volume agent workflow this is written for, that trade is heavily positive. For a low-volume project where every merge is already a considered human decision, it is not -- the ceremony would outweigh the savings.
+
+## Bonus: Map an Isolated Preview to develop
+
+If the project has an isolated preview environment -- its own database, its own migrations applied on deploy -- point that preview's deploy trigger at `develop` rather than at `main`. Two things fall out of that mapping for free:
+
+- **Migrations rehearse continuously.** Every merge to `develop` deploys to the preview and applies its migrations against the preview database throughout the accumulation window. By the time a round is cut, its migrations have already run -- possibly dozens of times -- against a real (if non-production) database. The round PR is then applying only **pre-exercised migrations** to production, not migrations that have never touched a live schema.
+- **The preview is always current with the work.** Because `develop` is where the work actually accumulates, a preview tracking `develop` shows the true in-progress state of the project between rounds, which is exactly what you want to demo or review against -- not the last round's frozen production snapshot.
+
+This slots cleanly onto the [Environment-Tiered Testing](./environment-tiered-testing.mdx) model: that page runs one contract suite against local, preview, and production tiers; this mapping just fixes *which branch feeds the preview tier* in a release-round topology. The preview tier becomes the continuous migration-rehearsal ground, and production only ever receives migrations that the preview has already survived.
+
+## Where to Go Next
+
+- [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) -- the mechanics of the nightly heavy lane this page points at `develop`: cron hygiene, deduped issue filing, retry-pass telemetry, on-demand dispatch.
+- [Execution Tiers](../decision-guide/execution-tiers.mdx) -- the T0-T4 vocabulary; the local heavy lane (T4) is the per-topic early signal that partners with the nightly schedule.
+- [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) -- how a test earns "heavy" classification in the first place, deciding what belongs in the base-`main`-gated lane.
+- [Environment-Tiered Testing](./environment-tiered-testing.mdx) -- staging in the deploy-target sense, and where the preview-on-`develop` migration-rehearsal mapping fits.

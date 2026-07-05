@@ -64,7 +64,7 @@ The test runs fine on CI runners — it just takes long. This category **stays o
 - **Shard** across runners only past roughly 100 tests *and* 30 minutes of runtime
 - Use `--only-changed` as a lossy PR prefilter, backstopped by a scheduled full run
 
-Tag: `@heavy`. Never make this category local-only — slowness alone is not a reason to leave the enforced gate.
+Tag: `@heavy`. Never make this category local-only — slowness alone is not a reason to leave the enforced gate. For the underlying trade-offs of tuning workers, sharding, and sizing the runner itself, see [CI Runner Sizing](../tools-reference/ci-runner-sizing.mdx).
 
 ### 2. Environment-incapable
 
@@ -110,6 +110,8 @@ The classification result is recorded as a tag on the test itself, so the tier m
 | `@verification` | one-time proof artifact | no gate |
 
 `@verification` marks one-time proof artifacts — specs written to prove a change worked once, not to guard it forever. They belong to no gate; see [Required Testing Behavior](./required-behavior.mdx) for how promotion from verification to regression must happen.
+
+Whether a `@heavy`-tagged test's T2/T3 lane runs on every PR or only at release boundaries is a branch-topology decision, not a tagging one — see [Release Rounds: A develop→main Branch Strategy](../real-world-patterns/release-rounds-branch-strategy.mdx) for gating the lane by base branch and cost-controlling it that way.
 
 ## Classifying a New Test: Mechanical Rules
 
@@ -272,4 +274,6 @@ An overloaded tag — a catch-all conflating multiple, unrelated reasons a test 
 
 - [Execution Tiers](./execution-tiers.mdx) — the definitions of T0–T4 and when a project should adopt each one
 - [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) — how the scheduled tier (T3) is actually built: cron, macOS runners, deduped issue filing, on-demand dispatch
+- [CI Runner Sizing](../tools-reference/ci-runner-sizing.mdx) — runner shapes, pricing, and the four sizing rules that decide when a bigger or different runner actually helps
+- [Release Rounds: A develop→main Branch Strategy](../real-world-patterns/release-rounds-branch-strategy.mdx) — gating heavy (T2/T3) lanes by base branch instead of running them on every PR
 - [Required Testing Behavior](./required-behavior.mdx) — the agent-facing rules: never tag `@flaky` without a linked open issue, promote verification specs explicitly, and more
