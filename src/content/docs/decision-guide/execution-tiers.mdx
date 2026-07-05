@@ -105,6 +105,16 @@ T3 has three triggers, not one: a test that is heavy, a test bound to an environ
 
 T4 exists only for genuinely CI-impossible lanes. It splits into a bounded fast pre-push pass (`b4push`, 5–10 minutes) and an opt-in, platform-gated heavy run (`exam`). Because anything local can be bypassed -- by humans and by AI agents alike -- T4 is a convenience layer and never a substitute for T1 or T3.
 
+<Warning>
+
+**A local wall-clock number is a noisy signal -- don't gate on it.** A dev machine is a shared, variably loaded environment: background work and *other concurrent agent sessions on the same box* routinely inflate a single run by 50%+ -- a ~10-minute lane clocking ~15 minutes says nothing about the lane itself. For a T4/local lane the pass/fail is **completion + structural boundedness** -- every phase passes, the lane is change/affected-scoped, and the heavy sweep stays excluded -- not a precise minute count.
+
+Treat "5–10 min" as a soft design target for the lane's **structure** (what is included and excluded, whether it is change-scoped), verified by *whether it completes and stays bounded*. If a number genuinely must be validated, measure on a quiet, representative baseline -- or on CI's controlled runners when a comparable CI-runnable lane exists (the T4 lane itself is CI-impossible by definition). Restructure the lane only when the overage is **structural**, not load-induced.
+
+**Agent anti-pattern:** measure a local lane once on a contended machine, see it exceed the target, declare the acceptance criterion "buggy", and trigger a redesign. That spends real effort chasing load noise. This is the local-timing cousin of the deflaking rule -- wait on the real completion signal, not a fixed deadline; see [the deflaking recipe](../real-world-patterns/deflaking-recipe.mdx).
+
+</Warning>
+
 ## Execution Surfaces
 
 ```mermaid
