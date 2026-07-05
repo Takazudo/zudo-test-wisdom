@@ -1,6 +1,6 @@
 ---
 title: CI Runner Sizing
-description: How Blacksmith CI runners are shaped and priced, and the four rules for when a bigger or different runner actually helps.
+description: Provider choice by repo visibility, Blacksmith runner shapes and pricing, the default-small stance, and the four rules for when a bigger or different runner actually helps.
 sidebar_position: 2
 ---
 
@@ -15,6 +15,15 @@ None of them documents the layer underneath: **what runner shapes exist, how the
 **Prices on this page were re-verified against the live Blacksmith pages on 2026-07-05** ([runner overview](https://docs.blacksmith.sh/blacksmith-runners/overview), [pricing](https://www.blacksmith.sh/pricing)). Pay-as-you-go rates move; treat every dollar figure as "as of 2026-07" and re-check the two source pages before you quote them in a budget.
 
 </Note>
+
+## Provider Choice Comes Before Sizing
+
+Every rule below assumes you are paying for CI minutes. Whether that assumption holds at all is decided by a question that comes before any label or sizing table: **is the repository public or private?**
+
+- **Public repository → standard GitHub-hosted runners, full stop.** The biggest reason is the only one you need: they are free. GitHub's billing policy states it directly — "GitHub Actions usage is free for self-hosted runners and for public repositories that use standard GitHub-hosted runners" (verified 2026-07-05). No per-minute discount competes with a bill of zero, so for a public repo the provider question ends here. One caveat, and it previews this page's default stance: **larger runners are always charged, even on public repositories** — the moment a public repo's job leaves the standard shape, its bill starts existing.
+- **Private repository → Blacksmith, and cost is the #1 reason.** A private repo draws down the plan's included minutes and then pays GitHub's list rate for every minute after. At agent-driven PR volume the included quota is gone within days, so the number that matters is the *marginal* minute — and Blacksmith's roughly half-price Linux minutes on faster machines win that comparison outright. That is why this guide's private-repo CI runs on Blacksmith, and why the rest of this page is written against it.
+
+Visibility first, provider second, sizing last. The sections below only matter once this question has put you on a metered runner.
 
 ## Blacksmith in One Minute
 
@@ -80,6 +89,14 @@ There is an upside hiding in that math. The predictable ~$110/month figure is wh
 ## The Four Runner-Sizing Rules
 
 The labels and prices are the easy part. The hard part is knowing when a bigger or different runner is the right tool — because the instinct to "just throw more cores at it" is right about half the time and actively wrong the other half. These four rules are the core wisdom of this page.
+
+### The default: the smallest shape that works
+
+Before the four rules earn their keep, hold the default: **every lane runs on the smallest, cheapest shape that completes reliably** — `2vcpu` until something below names a reason otherwise.
+
+The justification is an AI-dev-era observation about whose time CI latency actually spends. When implementation is agent-driven, a slower lane's wall-clock lands between agent turns, not in a human's foreground wait — the agents produce work faster than any human reviews it, so a PR gate that takes a few extra minutes still finishes comfortably inside human review cadence. Latency nobody is waiting on is not worth paying for.
+
+So a bigger or more exotic runner needs an **explicitly named reason**, not a vibe. Legitimate ones look like: a preview deploy the team genuinely sits and waits on, an OS-specific build environment (macOS, Windows), or a failure mode diagnosed under Rule 2 or Rule 3. Rule 1 tells you what a bigger runner buys when you choose to buy it — the default is still not to buy it until the latency has a named owner.
 
 ### Rule 1: A bigger runner is a latency lever, not a cost lever
 
@@ -156,7 +173,9 @@ Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger de
 
 | Symptom | Wrong instinct | Right lever |
 |---|---|---|
-| PR gate feels slow, work parallelizes | Leave it; cores cost money | Size **up** for latency (Rule 1) — cost is ~flat |
+| Picking where CI runs at all | One provider fits every repo | Public → free standard GitHub-hosted; private → Blacksmith on marginal-minute cost (provider choice comes first) |
+| Public repo's standard runners feel slow | Move to a paid provider or a larger runner | Stay on the free standard shape unless you are deliberately buying speed — larger runners are charged even on public repos |
+| PR gate feels slow, work parallelizes | Leave it; cores cost money | Size **up** for latency (Rule 1) — cost is ~flat, but only with a named reason (the default is the smallest shape) |
 | vitest/jsdom heap OOM | Bump 2→4vCPU for more RAM | `vitest --shard` (Rule 2) — size does not fix it |
 | e2e specs time out under load | Assume flaky, add retries | Diagnose CPU starvation → 2→4vCPU (Rule 3) |
 | Monthly CI bill too high | Downsize the runners | Gate lanes by base branch + schedule (Rule 4) |
@@ -166,6 +185,7 @@ The through-line: **a runner label is a two-token edit, but choosing it well mea
 
 ## References
 
+- [About billing for GitHub Actions](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions) — the free-for-public-repos policy on standard runners, and the larger-runners-are-always-charged caveat (verified 2026-07-05).
 - [Blacksmith runner overview](https://docs.blacksmith.sh/blacksmith-runners/overview) — the full label matrix, OS images, and free-tier / consumption-multiplier details (verified 2026-07-05).
 - [Blacksmith pricing](https://www.blacksmith.sh/pricing) — per-minute rates by shape (verified 2026-07-05).
 - [Execution Tiers](../decision-guide/execution-tiers.mdx) — the T0–T4 model these sizing rules serve.
