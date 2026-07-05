@@ -48,7 +48,7 @@
     "typescript": "^5.9.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
-    "create-zudo-doc": "^2.0.1",
+    "create-zudo-doc": "^2.5.1",
     "html-validate": "^10.0.0",
     "pagefind": "^1.4.0",
     "tsx": "^4.21.0",
