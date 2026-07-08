@@ -13,6 +13,7 @@ export type {
   TagGovernanceMode,
   TagVocabularyEntry,
   ChangelogConfig,
+  SiteHeadConfig,
   MetaTagsConfig,
 } from "./settings-types";
 import type {
@@ -28,6 +29,7 @@ import type {
   TagPlacement,
   TagGovernanceMode,
   ChangelogConfig,
+  SiteHeadConfig,
   MetaTagsConfig,
 } from "./settings-types";
 
@@ -55,6 +57,22 @@ export const settings = {
     twitterCard: "summary_large_image",
     twitterCreator: "@Takazudo",
   } satisfies MetaTagsConfig as MetaTagsConfig,
+  // Site webfont - Noto Sans JP for JA + Latin body text. Emitted as real <head>
+  // links via settings.head (preconnect + async-loaded stylesheet). Never load
+  // the font via global.css @import: Tailwind v4 bundling can push it past the
+  // first style rule, making the browser silently drop it.
+  head: {
+    preconnect: [
+      { href: "https://fonts.googleapis.com" },
+      { href: "https://fonts.gstatic.com", crossorigin: "anonymous" },
+    ],
+    stylesheets: [
+      {
+        href: "https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&display=swap",
+        async: true,
+      },
+    ],
+  } satisfies SiteHeadConfig as SiteHeadConfig,
   docsDir: "src/content/docs",
   defaultLocale: "en" as const,
   locales: {
