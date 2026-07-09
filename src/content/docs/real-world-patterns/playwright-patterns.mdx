@@ -156,6 +156,103 @@ expect(user).toBeTruthy();
 
 See [Decision Guide — When to Write a Heavy Test](../decision-guide/heavy-test-decision.mdx) for the Step 0 gate that determines whether the precondition belongs in the test at all.
 
+## Selector Actionability: When the Right-Looking Element Is the Wrong Target
+
+A locator's contract is to resolve to a DOM node. Its contract is _not_ to resolve to the node you can actually act on — and on rich UIs (canvas editors, multi-surface viewports, portalled overlays) those two nodes routinely differ. The element looks right in the inspector, `toBeAttached()` passes, and the click still lands on the wrong surface or times out. Three shapes of this trap recur, and all three share one fix: **make the selector encode the intended active surface or state, then assert actionability on that exact target before acting** — never select on element _type_ or _first match_ and hope the resolved node is the live one.
+
+### `.first()` on Duplicate Surfaces Grabs the Hidden One
+
+**Symptom:** A viewport shows exactly one visible `<canvas>`, yet the test interacts with nothing — a click draws onto a surface that never appears on screen, or a drag lands in empty space. A mid-test screenshot shows the pointer action missing the rendered content entirely.
+
+**Diagnosis:** DOM order is not render order. Frameworks keep more than one surface mounted all the time — a previous slide, an offscreen double-buffer, a `display:none` export canvas — and `page.locator("canvas").first()` returns whichever appears first in _source_, not whichever is painted. Element type (`canvas`) and position (`first`) are the two weakest signals you can select on: neither says anything about which surface is active.
+
+**Fix:** Encode the active surface in the selector — scope to the visible/active container, filter by a state attribute (`[data-active]`, `[aria-hidden="false"]`), or select `canvas:visible` — and assert `toBeVisible()` on the chosen target before touching it:
+
+```typescript
+// Anti-pattern: DOM order != render order. `.first()` returns the first
+// <canvas> in source order — which may be a hidden, offscreen, or torn-down
+// surface the framework has left mounted.
+await page.locator("canvas").first().click();
+
+// Fix: scope to the active container and select the visible surface, then
+// prove you picked the rendered target before acting on it.
+const surface = page.locator('[data-active="true"] canvas:visible');
+await expect(surface).toBeVisible();
+await surface.click();
+```
+
+If the app has no state attribute to scope on, `.filter({ visible: true })` narrows a multi-match locator to the one on screen — but adding a `data-active` / `aria-hidden` marker to the surface container is the durable fix, because it makes the _intended_ surface explicit instead of inferring it from paint state.
+
+### A Label Shared by a Slider and a Text Input Trips Strict Mode
+
+**Symptom:** The test throws before any action runs — the failure is at _resolution_, not interaction:
+
+```
+Error: strict mode violation: getByLabel('Amount') resolved to 2 elements:
+    1) <input type="range" aria-label="Amount"> …
+    2) <input type="text"  aria-label="Amount"> …
+```
+
+**Diagnosis:** A range input and a paired numeric/text input under the same panel both expose the accessible name `Amount` (a slider with a linked value box is the classic case). `getByLabel` matches on accessible name and is role-agnostic, so it selects both, and Playwright's strict mode refuses to guess which one you meant.
+
+**Fix:** The two controls share a _name_ but not a _role_ — disambiguate by role. The range input is a `slider`; the value box is a `textbox` (`type="text"`) or `spinbutton` (`type="number"`). Note a range input is **not** fillable — `fill()` throws `Input of type "range" cannot be filled` — so drive the slider with a role-appropriate action and `fill()` the value box:
+
+```typescript
+// Anti-pattern: name-only, role-agnostic — resolves 2 elements, throws.
+await page.getByLabel("Amount").fill("50");
+
+// Fix: same name, different role — the ambiguity disappears.
+await page.getByRole("textbox", { name: "Amount" }).fill("50"); // value box
+await page.getByRole("slider", { name: "Amount" }).press("ArrowRight"); // nudge the range input
+
+// If both controls genuinely share a role too, scope to the dialog/panel
+// and reach for a test id rather than the shared label:
+await page
+  .getByRole("dialog", { name: "Transfer" })
+  .getByTestId("amount-input")
+  .fill("50");
+```
+
+### An Overlay Intercepts the Click Even Though the Target Is Visible
+
+**Symptom:** The target is visible _and_ enabled, yet `.click()` times out. The call log names a different element than the one you selected:
+
+```
+locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for element to be visible, enabled and stable
+  - element is visible, enabled and stable
+  - scrolling into view if needed
+  - <div class="modal-backdrop">…</div> from <div id="portal-root">…</div> subtree intercepts pointer events
+  - retrying click action
+```
+
+**Diagnosis:** Playwright runs four actionability checks before dispatching a click — the element must be **visible**, **stable** (not mid-animation), **enabled**, and **receiving pointer events** (nothing else sits on top at the click point). A portalled overlay — a modal backdrop, a toast, a dropdown that just opened, a full-viewport loading veil — is layered above the target at those coordinates, so the fourth check never passes even though the first three do. The target is fine; something is on top of it.
+
+**Fix:** Wait for the intercepting layer to leave, or scope to the real interactive layer, then click normally so the actionability checks keep protecting you:
+
+```typescript
+// Fix: wait for the intercepting overlay to go away, then click normally.
+await expect(page.locator(".modal-backdrop")).toBeHidden();
+await page.getByRole("button", { name: "Save" }).click();
+```
+
+<Warning>
+
+Do **not** reach for `{ force: true }` here. `force` skips the "receives pointer events" check and dispatches the click at the target's coordinates regardless — so the **overlay** swallows the event, or nothing does. The test goes green while the control you meant to click was never clicked, and the actionability error that was correctly telling you "something is on top" is silenced. `force: true` is for the rare case where you have _proven_ the interception is a false positive (e.g. a decorative `pointer-events: none` layer Playwright still counts); it is never the fix for a real overlay. When you find yourself adding `force` to make a click land, you are almost always masking the bug, not fixing it.
+
+</Warning>
+
+When Playwright reports a hidden or intercepted target and the selector _looks_ correct, stop guessing and look: capture a screenshot or dump the computed geometry (bounding boxes, `z-index`, `pointer-events`) of both the target and whatever is on top of it. Seeing what actually occupies the click point turns "the click mysteriously times out" into "the toast at these coordinates has a 400ms exit animation." The deterministic computed-style dump plus the screenshot review in [Level 5: Deterministic + Visual Verification](../testing-levels/level-5-visual-verification.mdx) is the tool for exactly this — it shows you the on-top element's geometry that the strict-mode error only hints at.
+
+<Tip>
+
+When an interaction depends on the app being _ready_ rather than merely mounted, wait for an explicit readiness signal the app controls — `await expect(page.locator('[data-ready="true"]')).toBeVisible()`, or a visible readiness marker — not a longer timeout. Bumping `{ timeout: 30000 }` on the click only widens the window in which the wrong surface, an ambiguous label, or an animating overlay can still bite; it treats the symptom. A `data-ready` attribute the app sets once its surfaces are painted and its overlays dismissed collapses all three traps above into a single positive precondition you can assert before you act.
+
+</Tip>
+
+The through-line: select on the intended _active surface or state_, not on element type or source position; assert visibility/actionability on the **actual** target before acting; disambiguate shared labels by role or a panel-scoped test id; and gate readiness-dependent interactions on an explicit signal instead of a fatter timeout.
+
 ## Editor Input in E2E
 
 Driving a code editor (CodeMirror, Monaco, ProseMirror, or any `contenteditable`) from Playwright is harder than `page.fill()`. If the editor has a vim mode, `page.keyboard.type("hello")` is a disaster: the leading `h` moves the cursor left, `i` enters insert mode, and the rest is interpreted as commands rather than text.

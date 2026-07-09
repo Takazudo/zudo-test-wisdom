@@ -121,6 +121,74 @@ Level 5 catches this. Running `verify-styles.mjs` against `.notification-contain
 
 The screenshot from `headless-check.js` gives the same conclusion visually -- the banner is not visible on the page.
 
+## Capture Visual Intent Before You Pick a Metric
+
+Part 1's assertions are only as trustworthy as the values you chose to measure. There is a failure mode that survives every deterministic check: you assert a metric that is _convenient_ to extract instead of the one that encodes the actual visual requirement, it comes back green, and verify-ui reports PASS on a layout that is still wrong. The JSON is exact; it just answers the wrong question. This is confirmation bias in deterministic clothing -- and it is exactly what [`/verify-ui`](../claude-skills/verify-ui/index.mdx) exists to prevent, so getting the _choice of signal_ right is the whole game.
+
+Capture the visual intent **before** writing a single assertion.
+
+### Name the Expected and Forbidden states first
+
+Before measuring anything, write down two states in plain language:
+
+- **Expected** -- the target visual relationship or layout the change is supposed to produce.
+- **Forbidden** -- the previous broken state, or a tempting partial fix that looks closer but still does not satisfy the requirement.
+
+The Forbidden state is what catches false positives. A proxy metric can drift toward Expected while the Forbidden layout is still fully on screen; if you only assert the positive, nothing fails.
+
+### Read the screenshots before the DOM
+
+If `expected.png`, `now.png`, or any reference screenshot exists, inspect **those first** -- before you open the DOM or decide what to select. Describe the diff between them in plain language ("the AI reason should sit _above_ the budget; right now they are side by side"), then derive the deterministic assertions _from that sentence_. Deriving assertions the other way around -- from implementation intuition, or from whatever happens to be easy to query in the DOM -- is precisely how a proxy metric sneaks in.
+
+### Assert the Forbidden state, not just the Expected one
+
+For any known-bad layout, add a **negative assertion**: a check that the Forbidden state is _absent_. Then apply the rule.
+
+<Warning>
+
+If any observed signal matches the old broken state or contradicts the expected screenshot, the verdict is **FAIL** or **INCONCLUSIVE** -- never PASS. A present Forbidden state forces the verdict; a suspicious mismatch signal cannot be waved away to reach a green result.
+
+</Warning>
+
+### A false positive from a convenient proxy
+
+A ReadyCrew triage row showed an AI reason and a budget **side by side**. The fix was to stack the AI reason _above_ the budget. The first attempt only widened the AI-reason text and left the side-by-side layout intact -- yet verification reported PASS, because it checked a proxy:
+
+```json
+{
+  "reasonSpansTriageWidth": true,
+  "reasonConfinedToAiColumn": false,
+  "currentIsSideBySide": true
+}
+```
+
+The first two fields are true, and on their own they _look_ done: the reason now spans the triage width and is no longer boxed into the narrow AI column. But `currentIsSideBySide: true` is the exact state the screenshot was correcting -- the Forbidden state, still present. Widening text inside a side-by-side layout is a partial improvement, not the requested change. The correct verdict was **FAIL**, and the proxy metric hid it.
+
+The contract should have asserted the Expected relationship directly, including the negative check on the Forbidden layout:
+
+```json
+{
+  "aiBudgetSideBySide": false,
+  "aiAboveBudget": true,
+  "sameColumn": true
+}
+```
+
+Read this block as the _required_ contract values. The still-present side-by-side layout measures `aiBudgetSideBySide` as `true`, which fails the required `false` -- the broken state trips the contract instead of slipping past it. This is the same trap as the "The Common Failure This Catches" section above: a lower signal passes while the thing the user actually asked for is still broken.
+
+### End with a diff verdict, not a metric dump
+
+Do not report the raw JSON and stop. Close every visual verification with an explicit diff verdict that ties the numbers back to the two states you named:
+
+```
+Expected layout: AI reason stacked directly above the budget, same column
+Observed layout: AI reason widened but still left of the budget (side by side)
+Still different: yes -- the side-by-side (Forbidden) layout is still present
+Verdict: FAIL
+```
+
+Report **INCONCLUSIVE** when the signals can neither confirm the Expected state nor rule out the Forbidden one -- for example when the selector did not resolve or the screenshot is ambiguous. Report **PASS** only when every Expected assertion holds _and_ every Forbidden assertion is absent.
+
 ## Combined Workflow
 
 For UI/CSS changes, the recommended verification workflow is:

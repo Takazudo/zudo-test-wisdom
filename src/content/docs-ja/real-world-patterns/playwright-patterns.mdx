@@ -156,6 +156,103 @@ expect(user).toBeTruthy();
 
 Step 0ゲートについては[デシジョンガイド — 重いテストをいつ書くか](../decision-guide/heavy-test-decision.mdx)を参照してください。前提条件がそもそもテストに属するかどうかの判断基準が記載されています。
 
+## セレクターのアクショナビリティ：正しそうに見える要素が誤ったターゲットであるとき
+
+locator の契約は、DOMノードに解決することです。実際に操作できるノードに解決すること_ではありません_ — そしてリッチなUI（canvasエディター、複数サーフェスのビューポート、ポータル化されたオーバーレイ）では、その2つのノードは日常的に食い違います。要素はインスペクター上では正しく見え、`toBeAttached()` はパスし、それでもクリックは誤ったサーフェスに着地するかタイムアウトします。この罠には3つの形が繰り返し現れ、いずれも1つの修正策を共有しています：**セレクターに、意図した「アクティブなサーフェスまたは状態」をエンコードさせ、操作する前にまさにそのターゲットに対してアクショナビリティをアサートすること** — 要素の_タイプ_や_最初のマッチ_でセレクトして、解決されたノードが生きているものであることを祈るようなことは、決してしてはいけません。
+
+### 重複するサーフェスに対する `.first()` は隠れている方を掴む
+
+**症状：** ビューポートには表示されている `<canvas>` がちょうど1つだけあるのに、テストはどの要素も操作できていません — クリックは画面に決して現れないサーフェスに描画されるか、ドラッグが空白に着地します。テスト途中のスクリーンショットを見ると、ポインター操作がレンダリングされたコンテンツを完全に外していることがわかります。
+
+**診断：** DOMの順序はレンダリングの順序ではありません。フレームワークは常に複数のサーフェスをマウントしたままにします — 前のスライド、オフスクリーンのダブルバッファ、`display:none` のエクスポート用canvasなど — そして `page.locator("canvas").first()` は、描画されている方ではなく_ソース_上で最初に現れる方を返します。要素のタイプ（`canvas`）と位置（`first`）は、セレクトの拠りどころにできる中で最も弱い2つのシグナルです：どちらも、どのサーフェスがアクティブなのかについて何も語りません。
+
+**修正：** アクティブなサーフェスをセレクターにエンコードします — 表示されている／アクティブなコンテナにスコープする、状態属性（`[data-active]`、`[aria-hidden="false"]`）でフィルタする、あるいは `canvas:visible` をセレクトする — そして操作する前に、選んだターゲットに対して `toBeVisible()` をアサートします：
+
+```typescript
+// Anti-pattern: DOM order != render order. `.first()` returns the first
+// <canvas> in source order — which may be a hidden, offscreen, or torn-down
+// surface the framework has left mounted.
+await page.locator("canvas").first().click();
+
+// Fix: scope to the active container and select the visible surface, then
+// prove you picked the rendered target before acting on it.
+const surface = page.locator('[data-active="true"] canvas:visible');
+await expect(surface).toBeVisible();
+await surface.click();
+```
+
+スコープに使える状態属性がアプリにない場合、`.filter({ visible: true })` は複数マッチのlocatorを画面上の1つに絞り込みます — ただし、サーフェスのコンテナに `data-active` / `aria-hidden` マーカーを追加するのが恒久的な修正です。描画状態から推測するのではなく、_意図した_サーフェスを明示的にするからです。
+
+### スライダーとテキスト入力で共有されるラベルはストリクトモードを引っかける
+
+**症状：** どんな操作が走るよりも前にテストがスローします — 失敗は、インタラクションではなく_解決_の段階で起きます：
+
+```
+Error: strict mode violation: getByLabel('Amount') resolved to 2 elements:
+    1) <input type="range" aria-label="Amount"> …
+    2) <input type="text"  aria-label="Amount"> …
+```
+
+**診断：** 同じパネル配下にあるrange inputと、それと対になった数値／テキスト入力の両方が、アクセシブルネーム `Amount` を公開しています（値ボックスが連動したスライダーが典型例です）。`getByLabel` はアクセシブルネームでマッチし、ロールを問いません。そのため両方をセレクトしてしまい、Playwrightのストリクトモードは、あなたがどちらを意図したのかを推測することを拒みます。
+
+**修正：** この2つのコントロールは_ネーム_を共有していますが_ロール_は共有していません — ロールで曖昧さを解消します。range inputは `slider` であり、値ボックスは `textbox`（`type="text"`）または `spinbutton`（`type="number"`）です。range input は **fill できない** 点に注意してください — `fill()` は `Input of type "range" cannot be filled` をスローします — そのため、スライダーはロールに応じた操作で駆動し、値ボックスを `fill()` します：
+
+```typescript
+// Anti-pattern: name-only, role-agnostic — resolves 2 elements, throws.
+await page.getByLabel("Amount").fill("50");
+
+// Fix: same name, different role — the ambiguity disappears.
+await page.getByRole("textbox", { name: "Amount" }).fill("50"); // value box
+await page.getByRole("slider", { name: "Amount" }).press("ArrowRight"); // nudge the range input
+
+// If both controls genuinely share a role too, scope to the dialog/panel
+// and reach for a test id rather than the shared label:
+await page
+  .getByRole("dialog", { name: "Transfer" })
+  .getByTestId("amount-input")
+  .fill("50");
+```
+
+### ターゲットが表示されているのにオーバーレイがクリックをインターセプトする
+
+**症状：** ターゲットは表示されており_かつ_有効なのに、`.click()` がタイムアウトします。コールログには、あなたがセレクトしたのとは別の要素の名前が挙がっています：
+
+```
+locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for element to be visible, enabled and stable
+  - element is visible, enabled and stable
+  - scrolling into view if needed
+  - <div class="modal-backdrop">…</div> from <div id="portal-root">…</div> subtree intercepts pointer events
+  - retrying click action
+```
+
+**診断：** Playwrightはクリックをディスパッチする前に4つのアクショナビリティチェックを実行します — 要素は **表示されている（visible）**、**安定している（stable、アニメーション途中でない）**、**有効（enabled）**、そして **ポインターイベントを受け取れる（クリック地点の最前面に他の何も乗っていない）** 必要があります。ポータル化されたオーバーレイ — モーダルのバックドロップ、トースト、開いたばかりのドロップダウン、ビューポート全面のローディングベール — が、その座標でターゲットの上に重なっているため、最初の3つはパスしても4つ目のチェックは決してパスしません。ターゲット自体は問題なく、何かがその上に乗っているのです。
+
+**修正：** インターセプトしているレイヤーが去るのを待つか、本当のインタラクティブなレイヤーにスコープしてから、通常どおりクリックします。そうすればアクショナビリティチェックが引き続きあなたを守ってくれます：
+
+```typescript
+// Fix: wait for the intercepting overlay to go away, then click normally.
+await expect(page.locator(".modal-backdrop")).toBeHidden();
+await page.getByRole("button", { name: "Save" }).click();
+```
+
+<Warning>
+
+ここで `{ force: true }` に手を伸ばしては **いけません**。`force` は「ポインターイベントを受け取れる」チェックをスキップし、何があろうとターゲットの座標でクリックをディスパッチします — その結果、**オーバーレイ**がイベントを飲み込むか、あるいは何も飲み込まないかのどちらかです。クリックしたかったコントロールは一度もクリックされていないのにテストはグリーンになり、「何かが上に乗っている」と正しく告げていたアクショナビリティのエラーは黙らされてしまいます。`force: true` は、インターセプトが偽陽性であると_証明できた_まれなケース（例：Playwrightがなおカウントしてしまう、装飾目的の `pointer-events: none` レイヤー）のためのものであり、本物のオーバーレイに対する修正では決してありません。クリックを着地させるために `force` を追加している自分に気づいたときは、ほぼ確実にバグを修正しているのではなく覆い隠しています。
+
+</Warning>
+
+Playwrightがターゲットを非表示またはインターセプトされていると報告し、しかもセレクターが正しそうに_見える_ときは、推測をやめて実際に見てください：スクリーンショットを撮るか、ターゲットとその上に乗っている何かの両方について、算出されたジオメトリ（bounding box、`z-index`、`pointer-events`）をダンプします。クリック地点を実際に占めているものが見えれば、「クリックが謎めいてタイムアウトする」は「この座標のトーストに400msの退出アニメーションがある」へと変わります。[レベル5: 決定論的 + 視覚的検証](../testing-levels/level-5-visual-verification.mdx)の決定論的な算出スタイルダンプとスクリーンショットレビューが、まさにこのためのツールです — ストリクトモードのエラーがほのめかすだけの、最前面にある要素のジオメトリを見せてくれます。
+
+<Tip>
+
+インタラクションが、単にマウントされていることではなくアプリが_準備完了_であることに依存する場合は、より長いタイムアウトではなく、アプリが制御する明示的な準備完了シグナルを待ってください — `await expect(page.locator('[data-ready="true"]')).toBeVisible()`、あるいは目に見える準備完了マーカーです。クリックの `{ timeout: 30000 }` を引き上げても、誤ったサーフェス・曖昧なラベル・アニメーション中のオーバーレイが依然として噛みつける時間枠を広げるだけで、症状に対処しているにすぎません。アプリがサーフェスを描画しオーバーレイを片付け終えた時点で一度だけセットする `data-ready` 属性があれば、上記の3つの罠すべてを、操作する前にアサートできる単一の肯定的な事前条件へと畳み込めます。
+
+</Tip>
+
+通底するのはこれです：要素のタイプやソース上の位置ではなく、意図した_アクティブなサーフェスまたは状態_でセレクトする；操作する前に、**実際の**ターゲットに対して可視性／アクショナビリティをアサートする；共有されたラベルは、ロールかパネルにスコープしたtest idで曖昧さを解消する；そして準備完了に依存するインタラクションは、太らせたタイムアウトではなく明示的なシグナルでゲートする。
+
 ## E2Eでのエディター入力
 
 コードエディター（CodeMirror、Monaco、ProseMirror、あるいは任意の `contenteditable`）をPlaywrightから操作するのは、`page.fill()` よりも厄介です。エディターにvimモードがある場合、`page.keyboard.type("hello")` は悲惨なことになります。先頭の `h` でカーソルが左に移動し、`i` でインサートモードに入り、残りはテキストではなくコマンドとして解釈されてしまうのです。
