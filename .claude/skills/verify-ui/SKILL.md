@@ -11,6 +11,42 @@ Verify that CSS/UI changes actually match what was requested.
 
 The user asked you to do something ("add a border", "center the dialog", "make it full width on mobile"). After implementing, verify that **the specific thing they asked for** is actually working. Not a generic checklist — verify the requirement.
 
+## Consume the Requirement Contract — Don't Invent Pass Criteria
+
+When the change came through `/x-as-pr` or `/big-plan` and the request had visual evidence, a **Screenshot Requirement Contract** already exists (in the PR body, the issue / sub-issue body, or `progress.md`). **Read it and verify against it.** Do NOT invent your own convenient pass criterion — inventing one is precisely how confirmation bias slips in and a broken layout gets a PASS.
+
+The contract has `Expected:` states and `Forbidden:` states. Verify **both**, and report in this shape:
+
+```md
+Expected:                 <each expected state → met? how observed>
+Observed:                 <what the computed styles / geometry / screenshot actually show>
+Still different:          <expected-but-not-yet-true states>
+Forbidden states checked: <each forbidden state → present or absent?>
+Verdict: PASS / FAIL / INCONCLUSIVE
+```
+
+**A forbidden state that is still present forces the verdict — it cannot be PASS**, no matter how many `Expected:` items are satisfied. Partial improvement is FAIL, not PASS.
+
+If the contract pins a `Viewport:` (specific widths or breakpoints), verify at those widths — they override the breakpoint auto-detection in Step 2 below.
+
+If no contract exists yet (e.g. a bare `/verify-ui` on visual work), derive the Expected / Forbidden states from the screenshots yourself first — never verify against a proxy you picked because it was easy to read off the DOM. For a non-visual requirement, fall through to Step 1 below.
+
+### Worked example — the false positive this prevents
+
+A ReadyCrew fix had to move the AI reason **above** the budget (they had been side-by-side). The first implementation only widened the AI reason text and left the side-by-side layout intact. Verification checked a proxy — "does the reason span the wider triage column?" — and reported PASS:
+
+```json
+{ "reasonSpansTriageWidth": true, "reasonConfinedToAiColumn": false, "currentIsSideBySide": true }
+```
+
+`reasonSpansTriageWidth` (an Expected-ish proxy) was true, so it looked done — but `currentIsSideBySide: true` was the **forbidden** state the screenshot was correcting. Correct verdict: **FAIL** (partial improvement), not PASS. The second implementation, checked against the real contract, verified the states that actually matter:
+
+```json
+{ "aiBudgetSideBySide": false, "aiAboveBudget": true, "sameColumn": true }
+```
+
+The lesson: check the states the screenshot diff is actually about (`aiBudgetSideBySide: false`, `aiAboveBudget: true`), not a proxy metric that happens to be convenient to read from the DOM.
+
 ## Step 1: Clarify What to Verify
 
 **If the requirement is clear** — translate it to verifiable CSS properties:
