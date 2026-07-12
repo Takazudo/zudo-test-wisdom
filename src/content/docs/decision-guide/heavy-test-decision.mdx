@@ -196,6 +196,16 @@ Quarantine is a pipeline with an exit, not a parking lot:
 
 Before entering the pipeline, confirm there is at least one verifiable green run of the exact assertion on any CI host. Pass-by-skip does not count — Playwright reports skips as `-` rather than `✓`, so check the distinction carefully. A test that has never produced a genuine green run is not flaky; it is broken. Sending it to quarantine would suspend product coverage without any chance of recovery. Note that this step is distinct from Branch 0 (which asks whether the test deserves a tier at all): Step 0 asks whether the test can even pass anywhere. See [Playwright Patterns](../real-world-patterns/playwright-patterns.mdx) for notes on `test.skip` preconditions — a precondition that "should always hold" must be a hard assertion, not a conditional skip that can silently degrade into a permanent vacuous green.
 
+**Step 0.5 of quarantine:** prove the nondeterminism is in the **test**, and not in the **product**. If the product is what varies, the test is not flaky — it is *correctly failing, intermittently*, and quarantining it buries a real bug.
+
+Step 0 does **not** cover this: a test sampling a genuine product bug *does* pass sometimes, so "has it ever passed?" waves it straight through. The check is cheap — **log the product's input on a failing run and diff it against a passing one.** Identical inputs + different outcome → a real flake, proceed. **Different inputs → a product bug, stop and fix the product.** A failure that correlates with the *platform* (one OS, one filesystem, one watcher backend, one CPU architecture) rather than with load or ordering is a product-bug smell, not a timing smell. Full worked case and the diagnostic: [The impostor: when the "flake" is a real product bug](../real-world-patterns/deflaking-recipe.mdx#the-impostor-when-the-flake-is-a-real-product-bug).
+
+<Danger>
+
+This is the step an autonomous agent skips. The quarantine pipeline is *designed* to feel responsible — inline issue URL, manifest row, scheduled allowed-to-fail lane — so an agent that follows it faithfully produces an immaculate paper trail around a live defect. In one real case the filed issue itself, written by an agent correctly following this pipeline, recommended `#[ignore]` as step 1; the bug it was hiding was a silent per-edit performance regression affecting every user on that OS. **The pipeline's own thoroughness is what makes this failure mode dangerous. Gate it here.**
+
+</Danger>
+
 1. **Tagging requires a paper trail.** `@flaky` is only valid with an inline issue URL right next to it:
 
    ```ts
@@ -246,7 +256,7 @@ Worked case: a drag-and-drop spec was quarantined because Playwright-WebKit neve
 
 ### Verifying a Re-placement or Fix
 
-Confirming the test mechanics are sound (the first of the two verifications above) has its own two traps — both surface specifically when deciding whether a quarantined test is ready to leave quarantine, or whether a re-placement into a different tier actually holds.
+Confirming the test mechanics are sound (the first of the two verifications above) has its own three traps — all of them surface specifically when deciding whether a quarantined test is ready to leave quarantine, or whether a re-placement into a different tier actually holds.
 
 **Burn-in proves determinism, not CI-capability.** Running a test N times in a loop locally (`--repeat-each=N` in Playwright) proves the test is deterministic *on the machine that ran it*. It does not prove the test is CI-capable — CI is a different environment, with a different filesystem layout, different environment variables, and different resource limits. Treat burn-in and a real CI run as two separate, both-required signals:
 
@@ -260,6 +270,20 @@ Worked case: during a quarantine-tag refactor, four tests passed a local burn-in
 **The simulated-environment fix trap.** Reproducing a CI-only failure locally by faking the suspected condition — an environment variable that simulates the CI-specific mechanism — can make a fix look confirmed when it actually validates a different mechanism than the real cause. Worked case: a fix was validated under a git-ownership simulation environment variable, then disproven by a real CI run — the simulation modeled a different mechanism than the one actually happening in CI. A fix validated only under a simulated environment condition must still be confirmed against the real environment before the test leaves quarantine.
 
 </Warning>
+
+**The un-ablated fix trap: a green burn-in does not tell you _which_ change fixed it.** Deflaking usually lands more than one edit at once — a test-harness change *and* a product change, or two harness changes. Run the suite afterwards, watch it go green N/N, and it is tempting to call the whole bundle load-bearing. It frequently is not: the cheap half fixed the symptom and the expensive half did nothing, or — far worse — the *test* half masked the failure while the real product bug shipped.
+
+The check is mechanical: **turn each half off, one at a time, and re-run.** Whatever half you can disable while the suite stays green was not load-bearing.
+
+```
+fix A + fix B  -> 12/12 green   (tells you nothing about which half matters)
+fix A only     -> 12/12 green   -> B was decoration
+fix B only     ->  9/12 green   -> A is the real fix
+```
+
+Worked case: a macOS dev-server flake got two changes — a test-harness fix (stop creating files that trigger a full rebuild) and a product fix (handle an OS event shape the product mishandled). Burn-in went 12/12. Disabling *only the product fix* brought the flake straight back on the second run, with the original failure signature. Without that ablation the harness-only change would have shipped as "the fix", the suite would have been green, and the real product bug would have stayed live for every user on that OS — now invisible, because the test that caught it no longer failed.
+
+Ablation is also the cheapest way to satisfy the second of the two verifications above (*confirm the product behavior itself still holds*): if disabling the product fix does **not** reproduce the failure, then the product fix was never what the test was testing.
 
 ### Dissolving an Overloaded Quarantine Tag
 

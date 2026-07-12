@@ -1,7 +1,49 @@
 ---
 title: Flake Root-Cause Catalog & Deflaking Recipe
-description: The five causes of E2E flakiness and a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating them.
+description: The three rules that govern flaky tests, the root-cause catalog behind them, and a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating them.
 sidebar_position: 9
+---
+
+## The three rules
+
+Everything below is machinery. These are the rules the machinery serves — read them first, and if you only remember one page of this guide, remember this one.
+
+### Rule 1 — "Flaky" is not a diagnosis. It is an admission you have not diagnosed it yet.
+
+Never accept a randomly-pass/fail test. **Prove it first.** The word "flaky" is a thought-terminating label: it silently converts _"I don't know why this fails"_ into _"it's fine,"_ and those are not the same sentence.
+
+The proof obligation is cheap and mechanical, so there is no excuse to skip it — **diff the product's input on a failing run against a passing run:**
+
+- Inputs **identical**, only timing differs → a real flake. Work the catalog below.
+- Inputs **differ** → a **product bug**. Stop. Fix the product. See [The impostor](#the-impostor-when-the-flake-is-a-real-product-bug).
+
+### Rule 2 — "It's OK, it's just flaky" is never acceptable. Every accepted flake devalues red.
+
+The obvious cost is re-running CI forever. That is the **cheap** part. The expensive part:
+
+> Once "just re-run it" is normal, you have trained the team — and every agent working in the repo — **not to believe red.**
+
+Then a real regression that fails 100% gets re-run three times before anyone takes it seriously, and a real bug that fails 30% of the time becomes **literally invisible** — it looks exactly like the usual flake.
+
+The entire value of a test suite is that **red means something.** Flake tolerance is an attack on that property, and it compounds. This is why **pass-on-retry is a triage signal, not a success**: record it, never celebrate it.
+
+<Note>
+
+Quarantine is not the enemy — using it as an *answer* is. It is **a pipeline with an exit, not a parking lot.** Legitimate only when ALL of: you have **proven** the nondeterminism is in the test and not the product ([Step 0.5](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky)); a linked issue exists; it still runs allowed-to-fail somewhere; and it has a deadline. And you accept that **while quarantined, the product behavior is unguarded.**
+
+</Note>
+
+### Rule 3 — If a test seems irreducibly probabilistic, you are asserting the wrong thing.
+
+Genuinely nondeterministic systems exist (GC pauses, network latency, thread scheduling). The escape hatch is **not** "accept randomness" — it is to **assert the invariant that IS deterministic**, rather than a point value:
+
+```
+assert(elapsed == 43ms)     // probabilistic — asserts a sample
+assert(elapsed < budget)    // deterministic — asserts the property you actually care about
+```
+
+A probabilistic assertion is almost always a sign you picked a convenient **proxy** instead of the real invariant. Fix the assertion, not the tolerance.
+
 ---
 
 ## Part 1 — Root-Cause Catalog
@@ -19,10 +61,48 @@ Every E2E flake has a cause. The five below cover the overwhelming majority of c
 - **Package-manager environment-variable leakage (`INIT_CWD`, `npm_config_*`)** — not native-specific; any nested build or test tool invoked through a package-manager script inherits these. Under a package-manager-run script, pnpm exports `INIT_CWD=<invocation root>`. A nested fixture build's tool that resolves a relative path (e.g. `--content-dir`) against `INIT_CWD` instead of its own `cwd` will silently scan the wrong directory — producing deterministically-empty data that reproduces only in CI, where the invocation root differs from a developer's local shell. Fix: pin the working directory explicitly for nested builds rather than trusting `INIT_CWD` or `npm_config_*`.
 - **Filesystem ordering** — relying on directory-listing order or a shared temp path; use a unique temp dir per test and never assume `read_dir` order.
 - **Two independent deadlines** — a test that `spawnSync`/`execSync`s a CLI with a generous child-level `timeout:` (e.g. 30s) but relies on the runner's default per-test timeout (vitest: 5000ms) is flaky under host CPU load: the tighter deadline wins, and the failure ("Test timed out in 5000ms") reads like a hang when the subprocess was merely slow-under-load and would have succeeded inside its own budget. A post-reboot load-average storm (load 59 on a 10-core machine) produced 4 consecutive local-gate failures, each on a different test file, including trivial `--help` tests that never touch the network. Fix: align the deadlines at the config level, not per-test — scope a raised `testTimeout` to the subprocess-heavy project via a projects split; see [per-project timeout budgets](./vitest-patterns.mdx#project-level-vitest-configs-per-project-timeout-budgets).
+- **Platform-varied input shape** — the odd one out, and the only cause on this list where **the test is not the problem at all**. See [below](#the-impostor-when-the-flake-is-a-real-product-bug).
 
 For how to quarantine a native flake mechanically (`#[ignore]` + `cargo test -- --ignored`), see [the Rust/cargo note in the quarantine pipeline](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky).
 
 </Note>
+
+### The impostor: when the "flake" is a real product bug
+
+Every cause above is nondeterminism in the **test's own machinery** — its scheduling, its sleeps, its ports, its shared state. There is one more shape, and it is categorically different:
+
+> **The platform nondeterministically varies the _shape of the input_ it hands the product, and the product mishandles one of the shapes.**
+
+The test is then perfectly deterministic *given its input*. It is not flaky. It is **correctly failing, intermittently, because it is sampling a real bug** — one that is live in production for every user on that platform, and that no amount of test-side deflaking will fix.
+
+This matters because **the quarantine pipeline actively harms you here.** Quarantine suspends *product* coverage, and the product is the broken thing. `#[ignore]`-ing the test buries a proven defect behind a paper trail that looks responsible.
+
+**Step 0 of quarantine does not catch it.** "Prove the test has ever genuinely passed" passes trivially — the test *does* pass, most of the time. That is exactly the failure mode.
+
+<Warning>
+
+**Diagnostic — do this before you quarantine anything, it takes minutes.** Log the **product's input** on a failing run and diff it against a passing run.
+
+- If the inputs are **identical** and only the timing differs → a real flake. Work the catalog above.
+- If the inputs **differ** → you have a product bug. Stop. Fix the product.
+
+</Warning>
+
+Worked case: a Rust static-site builder's dev-server test asserted that editing one content file re-renders only that file's route, not its siblings. It failed ~2-3 runs in 4 on macOS and never on Linux CI. The filed issue — correctly following the quarantine pipeline — recommended `#[ignore = "flaky: <url>"]` as step 1.
+
+Enabling the product's own existing tick instrumentation took one run:
+
+```
+# failing run
+tick(): kinds=[alpha.mdx:Created]  fan_out_safe=false   # -> narrowing OFF, full re-render
+
+# passing run
+tick(): kinds=[alpha.mdx:Modified] fan_out_safe=true    # -> narrowing ON, one route
+```
+
+Same test, same code, **different OS-delivered input**: macOS FSEvents coalesces an in-place edit of an *existing* file into a `Created` event, which failed the product's all-`Modified` gate and silently disabled an optimization for every macOS user on every content edit. The test was right. Quarantining it would have hidden the bug it had just caught.
+
+The tell is generic even when the mechanism is not: **a failure that correlates with the platform rather than with load or ordering is a product-bug smell, not a timing smell.** A test that fails only on one OS, only on one filesystem, only under one watcher backend, or only on one CPU architecture is telling you the product treats that environment differently — which is a claim worth checking before you silence it.
 
 ### 1. Timing waits (bare `waitForTimeout`)
 
