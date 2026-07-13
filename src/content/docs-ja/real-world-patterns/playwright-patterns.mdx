@@ -610,6 +610,83 @@ test("production build has no broken links", async ({ page }) => {
 
 </Note>
 
+## モノレポ開発サーバーのためのバンドル依存E2Eレーン
+
+上の本番ビルドレーンが検証するのはビルドの正しさです — しかし多くのアプリスイートは、メインのE2Eボリュームを本番ビルドに対して*実行できません*：MSWのサービスワーカーセットアップ、dev限定ルート、dev限定のテストブリッジ（`import.meta.env.DEV` ガードの内側で `window` に公開されるstate）は、いずれも開発サーバーの下にしか存在しないからです。これらのレーンは競合ではなく補完関係にあります：インタラクティブな作業とHMRには**ソース配信の開発サーバー**、CIのメインE2Eボリュームには**このバンドル依存レーン**、ビルド固有の検証には**本番ビルド**。この中間レーンの存在を強制するのが、pnpmワークスペースのモノレポに潜む、隠れたテストごとの税金です。
+
+**その税金：** `development` エクスポート条件を通して解決されるワークスペースパッケージは —
+
+```json
+"exports": {
+  ".": {
+    "types": "./dist/index.d.ts",
+    "development": "./src/index.ts",
+    "default": "./dist/index.js"
+  }
+}
+```
+
+— **生のソースとして、モジュール1つにつきHTTPリクエスト1本で**配信されます。インタラクティブな開発ではまさにそれが望みの動作です（パッケージのソースへのHMR）。しかしPlaywrightのテストはそれぞれ空のHTTPキャッシュを持つ新しいブラウザコンテキストを得るため、**すべてのテストがパッケージのモジュールグラフ全体を再ダウンロードします**。重いパッケージ（実例ではモジュール約3,500個のパターンジェネレーターレジストリ）では、そのグラフに触れるフローを持つすべてのテストに+10〜28秒 — 15分のCIシャード2本を `timeout-minutes` killに追い込むのに十分でした。
+
+**中間の道 — 重くて安定した依存だけをバンドルし、それ以外はソース配信を維持する：**
+
+```typescript
+// vite.config.ts
+const BUNDLED_GENERATORS = process.env.E2E_BUNDLED_GENERATORS === "1";
+const GENERATORS_DIST = fileURLToPath(
+  new URL("../generators/dist/index.js", import.meta.url),
+);
+if (BUNDLED_GENERATORS && !existsSync(GENERATORS_DIST)) {
+  throw new Error(
+    "E2E_BUNDLED_GENERATORS=1 but the bundle is missing — build the package first.",
+  );
+}
+
+export default defineConfig({
+  resolve: {
+    // However your setup enables the `development` condition, preserve
+    // Vite's defaults — a bare `conditions: ["development"]` REPLACES
+    // them (dropping `module`/`browser` and the mode-dependent
+    // production condition) and can change dependency resolution in the
+    // production build. On Vite 6: spread `defaultClientConditions`.
+    conditions: [...defaultClientConditions, "development"],
+    ...(BUNDLED_GENERATORS
+      ? {
+          alias: [
+            // Exact-match so hypothetical subpath imports still resolve normally
+            { find: /^@acme\/generators$/, replacement: GENERATORS_DIST },
+          ],
+        }
+      : {}),
+  },
+});
+```
+
+```yaml
+# CI e2e job: build the heavy package (~15s), then run with the flag
+- name: Build the bundled-dep e2e lane
+  run: pnpm --filter @acme/core build && pnpm --filter @acme/generators build
+
+- name: Run Playwright e2e tests
+  env:
+    E2E_BUNDLED_GENERATORS: '1'
+  run: pnpm exec playwright test
+```
+
+3つの性質が要になっています：
+
+- **`existsSync` ガードはバンドルの欠如に対してthrowする。** できないことにも注意：*古い*バンドルは検出できません — 鮮度を保証するのはガードではなく、Playwrightの直前にパッケージをビルドするCIステップです。ガードがなくても `dist` の欠如は失敗します（エイリアスがインポートを存在しないファイルへ向けるため）が、それは実行途中の分かりにくいモジュールロードエラーとして現れます。ガードはそれを、名前の付いた即時のブート時エラーへ変換します。
+- **フラグはオプトイン。** ローカルの `pnpm test:e2e` とインタラクティブな開発はソース配信とHMRを維持し、CI（およびCIを再現したい人）だけがグラフ圧縮のための約15秒のビルドを払います。
+- **バンドルするのは重くて安定したパッケージだけ。** アプリ自身のソース — テスト対象のコード — は引き続きライブで配信されます。バンドルしているのは依存であって、被検体ではありません。エイリアスは意図的に完全一致です：サブパスのインポート（`@acme/generators/foo`）は通常のソース解決にフォールスルーするため、パッケージがホットパスで使われるサブパスのエントリポイントを公開しているなら、それぞれにもエイリアスを張ってください。
+
+実例のエビデンス：e2eシャード2本が、ランごとに10〜23回の失敗アテンプトを伴う15分 `timeout-minutes` killの繰り返しから、**6分35秒と8分14秒・失敗アテンプトゼロ**になりました — スイートの過去最良のグリーンと比べても約2倍高速です。
+
+<Note>
+
+この失敗クラスが「探すべきものだと知る*前*」にどう見えるか — バックグラウンドのモジュールストームが無関係な待機を飢えさせる様子と、ゲートしたときに重いロードが待機間を移動する様子 — は、[フレイク根本原因カタログのエントリ6](./deflaking-recipe.mdx#part-1-—-根本原因カタログ-6-無関係な待機を飢えさせるアプリ内バックグラウンド処理)にあります。タイムアウトを越えるポーリングによる証明と、テストごとの実行時間diffも同エントリを参照してください。
+
+</Note>
+
 ## 隠れた補助ソケットのポートレース
 
 上記のポートレースに関するガイダンスや、[実行ティア](../decision-guide/execution-tiers.mdx#マルチフィクスチャe2eでt0を「数秒」にする)で扱っているのは**アプリケーション**ポートです。各フィクスチャに専用の `port` を与えれば、N個並行する `webServer` エントリ間の `EADDRINUSE` 衝突は解消します。しかし、アプリケーションポートを区別するだけでは解決しないもう一段階微妙なパターンがあります。

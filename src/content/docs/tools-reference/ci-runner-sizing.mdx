@@ -150,11 +150,19 @@ flowchart TD
   A[Tests failing under load] --> B{What is the binding constraint?}
   B -->|Peak heap climbs to the ceiling<br/>then OOM| C[Memory-bounded<br/>Rule 2]
   B -->|Workers + dev server<br/>contend for cores → timeouts| D[CPU starvation<br/>Rule 3]
+  B -->|Same-origin requests queued in the<br/>network waterfall while CPU sits idle| E[Connection starvation<br/>see Note below]
   C --> C1[Bigger runner does NOT fix it<br/>Fix: vitest --shard]
   D --> D1[Bigger runner DOES fix it<br/>2vcpu → 4vcpu]
+  E --> E1[Bigger runner does NOT fix it<br/>Fix: app/serving layer]
 ```
 
 The rule that follows: **diagnose the binding constraint before you resize, and size each job to its own failure mode.** Do not uniform-size a whole workflow — a memory-bound vitest lane and a CPU-starved e2e lane in the same workflow want different treatments, and a blanket "everything to 8vcpu" masks the memory bug while overpaying for the jobs that never needed it.
+
+<Note>
+
+A third failure mode presents identically and answers to **neither** lever: **connection starvation** — the browser's per-host connection pool (6 per host in the HTTP/1.1 case) exhausted by a dev-server module storm, so waits time out while CPU sits idle. Idle CPU alone is not enough to take this branch (remote I/O, a blocked lock, or a hung dependency looks the same) — require the network-waterfall evidence: same-origin requests stalled in queue. The pool does not grow with vCPU; the fix is at the app/serving layer. See [catalog entry 6 in the Flake Root-Cause Catalog](../real-world-patterns/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation).
+
+</Note>
 
 ### Rule 4: Cost control comes from trigger design, not runner choice
 
@@ -177,7 +185,7 @@ Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger de
 | Public repo's standard runners feel slow | Move to a paid provider or a larger runner | Stay on the free standard shape unless you are deliberately buying speed — larger runners are charged even on public repos |
 | PR gate feels slow, work parallelizes | Leave it; cores cost money | Size **up** for latency (Rule 1) — cost is ~flat, but only with a named reason (the default is the smallest shape) |
 | vitest/jsdom heap OOM | Bump 2→4vCPU for more RAM | `vitest --shard` (Rule 2) — size does not fix it |
-| e2e specs time out under load | Assume flaky, add retries | Diagnose CPU starvation → 2→4vCPU (Rule 3) |
+| e2e specs time out under load | Assume flaky, add retries | Diagnose first: CPU starvation → 2→4vCPU (Rule 3); connection starvation → fix the app/serving layer, resizing won't help |
 | Monthly CI bill too high | Downsize the runners | Gate lanes by base branch + schedule (Rule 4) |
 | Need real GPU / macOS coverage | Run it per-PR on a Mac runner | Scheduled T3 macOS lane (~$110/mo, not ~$1,400/mo) |
 
