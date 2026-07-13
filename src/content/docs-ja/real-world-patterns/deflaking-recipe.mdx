@@ -241,10 +241,12 @@ useEffect(() => {
 この移動を捕まえるテクニックが、**2つのCIラン間のテストごとの実行時間diff**です。Playwrightのlistレポーターは、完了したテストごとに実行時間つきの行を1行出力します。グリーンだったランのログと壊れたランのログからそれらを抽出し、`spec.ts:line:col` をキーにして、リトライを除外し、共通するテストを比較します：
 
 ```bash
-# One run's log → "<file:line:col>\t<duration>" pairs
+# One run's log → "<file:line:col>\t<duration>" pairs.
+# Drop retry lines BEFORE the sed — it rewrites each line to key+duration,
+# which destroys the "(retry #N)" marker a later grep would need.
 grep -E "  ✓ " run.log |
-  sed -E 's/.*› ([^ ]+\.spec\.ts:[0-9]+:[0-9]+) › .*\(([0-9.]+m?s?)\)$/\1\t\2/' |
-  grep -v retry > run.times
+  grep -v "retry #" |
+  sed -E 's/.*› ([^ ]+\.spec\.ts:[0-9]+:[0-9]+) › .*\(([0-9.]+m?s?)\)$/\1\t\2/' > run.times
 # Repeat for the other run, then compare the common keys.
 ```
 

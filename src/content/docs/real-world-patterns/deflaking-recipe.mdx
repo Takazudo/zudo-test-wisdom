@@ -241,10 +241,12 @@ Gating the background work does not delete its cost; it moves the cost into what
 The technique that catches relocation is a **per-test duration diff between two CI runs**. Playwright's list reporter prints one line per finished test with its duration; extract them from a green run's log and the broken run's log, key by `spec.ts:line:col`, drop retries, and diff the common tests:
 
 ```bash
-# One run's log → "<file:line:col>\t<duration>" pairs
+# One run's log → "<file:line:col>\t<duration>" pairs.
+# Drop retry lines BEFORE the sed — it rewrites each line to key+duration,
+# which destroys the "(retry #N)" marker a later grep would need.
 grep -E "  ✓ " run.log |
-  sed -E 's/.*› ([^ ]+\.spec\.ts:[0-9]+:[0-9]+) › .*\(([0-9.]+m?s?)\)$/\1\t\2/' |
-  grep -v retry > run.times
+  grep -v "retry #" |
+  sed -E 's/.*› ([^ ]+\.spec\.ts:[0-9]+:[0-9]+) › .*\(([0-9.]+m?s?)\)$/\1\t\2/' > run.times
 # Repeat for the other run, then compare the common keys.
 ```
 

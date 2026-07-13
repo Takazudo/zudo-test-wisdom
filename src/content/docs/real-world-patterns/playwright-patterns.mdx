@@ -644,7 +644,12 @@ if (BUNDLED_GENERATORS && !existsSync(GENERATORS_DIST)) {
 
 export default defineConfig({
   resolve: {
-    conditions: ["development"],
+    // However your setup enables the `development` condition, preserve
+    // Vite's defaults — a bare `conditions: ["development"]` REPLACES
+    // them (dropping `module`/`browser` and the mode-dependent
+    // production condition) and can change dependency resolution in the
+    // production build. On Vite 6: spread `defaultClientConditions`.
+    conditions: [...defaultClientConditions, "development"],
     ...(BUNDLED_GENERATORS
       ? {
           alias: [
@@ -670,7 +675,7 @@ export default defineConfig({
 
 Three properties are load-bearing:
 
-- **The `existsSync` guard throws on a missing bundle.** Note what it cannot do: detect a *stale* one — freshness comes from the CI step building the package immediately before Playwright, not from the guard. Without the guard, a missing `dist` would silently fall through to source-serving and the lane's numbers become meaningless.
+- **The `existsSync` guard throws on a missing bundle.** Note what it cannot do: detect a *stale* one — freshness comes from the CI step building the package immediately before Playwright, not from the guard. Without the guard, a missing `dist` still fails (the alias points imports at a nonexistent file), but as a confusing mid-run module-load error; the guard converts it into an immediate, named boot-time failure.
 - **The flag is opt-in.** Local `pnpm test:e2e` and interactive dev keep source-serving and HMR; only CI (and anyone reproducing CI) pays the ~15s build for the collapsed graph.
 - **Only the heavy, stable package is bundled.** The app's own source — the code under test — is still served live. You are bundling a dependency, not the subject. The alias is exact-match by design: subpath imports (`@acme/generators/foo`) fall through to normal source resolution, so if the package exposes subpath entry points on hot paths, alias each one too.
 

@@ -644,7 +644,12 @@ if (BUNDLED_GENERATORS && !existsSync(GENERATORS_DIST)) {
 
 export default defineConfig({
   resolve: {
-    conditions: ["development"],
+    // However your setup enables the `development` condition, preserve
+    // Vite's defaults — a bare `conditions: ["development"]` REPLACES
+    // them (dropping `module`/`browser` and the mode-dependent
+    // production condition) and can change dependency resolution in the
+    // production build. On Vite 6: spread `defaultClientConditions`.
+    conditions: [...defaultClientConditions, "development"],
     ...(BUNDLED_GENERATORS
       ? {
           alias: [
@@ -670,7 +675,7 @@ export default defineConfig({
 
 3つの性質が要になっています：
 
-- **`existsSync` ガードはバンドルの欠如に対してthrowする。** できないことにも注意：*古い*バンドルは検出できません — 鮮度を保証するのはガードではなく、Playwrightの直前にパッケージをビルドするCIステップです。ガードがなければ、`dist` の欠如は静かにソース配信へフォールバックし、このレーンの数値が無意味になります。
+- **`existsSync` ガードはバンドルの欠如に対してthrowする。** できないことにも注意：*古い*バンドルは検出できません — 鮮度を保証するのはガードではなく、Playwrightの直前にパッケージをビルドするCIステップです。ガードがなくても `dist` の欠如は失敗します（エイリアスがインポートを存在しないファイルへ向けるため）が、それは実行途中の分かりにくいモジュールロードエラーとして現れます。ガードはそれを、名前の付いた即時のブート時エラーへ変換します。
 - **フラグはオプトイン。** ローカルの `pnpm test:e2e` とインタラクティブな開発はソース配信とHMRを維持し、CI（およびCIを再現したい人）だけがグラフ圧縮のための約15秒のビルドを払います。
 - **バンドルするのは重くて安定したパッケージだけ。** アプリ自身のソース — テスト対象のコード — は引き続きライブで配信されます。バンドルしているのは依存であって、被検体ではありません。エイリアスは意図的に完全一致です：サブパスのインポート（`@acme/generators/foo`）は通常のソース解決にフォールスルーするため、パッケージがホットパスで使われるサブパスのエントリポイントを公開しているなら、それぞれにもエイリアスを張ってください。
 
