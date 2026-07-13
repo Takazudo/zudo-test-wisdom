@@ -612,7 +612,7 @@ When `webServer` is a list of N entries (one per fixture or app), every inner-lo
 
 ## The Bundled-Dep E2E Lane for Monorepo Dev Servers
 
-The production-build advice above has a monorepo-specific blind spot. Many app suites *cannot* run against the production build: MSW's service-worker setup, dev-only routes, and dev-only test bridges (state exposed on `window` behind an `import.meta.env.DEV` guard) all exist only under the dev server. But running the dev server in a pnpm-workspace monorepo has a hidden per-test tax.
+The production-build lane above verifies build correctness — but many app suites *cannot* run their main e2e volume against the production build: MSW's service-worker setup, dev-only routes, and dev-only test bridges (state exposed on `window` behind an `import.meta.env.DEV` guard) all exist only under the dev server. The lanes are complementary, not competing: **source-serving dev server** for interactive work and HMR, **this bundled-dep lane** for the main CI e2e volume, **production build** for build-specific verification. What forces the middle lane into existence is a hidden per-test tax in pnpm-workspace monorepos.
 
 **The tax:** a workspace package resolved through a `development` export condition —
 
@@ -670,9 +670,9 @@ export default defineConfig({
 
 Three properties are load-bearing:
 
-- **The `existsSync` guard throws.** Without it, a missing or stale `dist` silently falls through to source-serving (or worse, tests a stale bundle) and the lane's numbers become meaningless.
+- **The `existsSync` guard throws on a missing bundle.** Note what it cannot do: detect a *stale* one — freshness comes from the CI step building the package immediately before Playwright, not from the guard. Without the guard, a missing `dist` would silently fall through to source-serving and the lane's numbers become meaningless.
 - **The flag is opt-in.** Local `pnpm test:e2e` and interactive dev keep source-serving and HMR; only CI (and anyone reproducing CI) pays the ~15s build for the collapsed graph.
-- **Only the heavy, stable package is bundled.** The app's own source — the code under test — is still served live. You are bundling a dependency, not the subject.
+- **Only the heavy, stable package is bundled.** The app's own source — the code under test — is still served live. You are bundling a dependency, not the subject. The alias is exact-match by design: subpath imports (`@acme/generators/foo`) fall through to normal source resolution, so if the package exposes subpath entry points on hot paths, alias each one too.
 
 Worked-case evidence: the two e2e shards went from repeated 15-minute `timeout-minutes` kills with 10–23 failed attempts per run to **6m35s and 8m14s with zero failed attempts** — roughly 2× faster than the suite's best-ever green.
 

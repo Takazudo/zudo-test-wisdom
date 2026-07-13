@@ -180,7 +180,7 @@ await page.locator(".submit-btn").click();
 
 The five causes above are nondeterminism in the test's own machinery. This one lives in the **app's** machinery: background work the app kicks off at boot competes with the interactive work the test is waiting on — and under a dev server, it can win.
 
-Worked case: a viewer app idle-prefetched a lazily-loaded editor chunk at boot. Under the Vite dev server (which is also what the Playwright `webServer` runs), a workspace `development` export condition served that package as raw TS source — so the "one chunk" expanded to **~3,500 individual module requests** that monopolized the browser's 6-connections-per-host pool for seconds after every page load. An *unrelated* lazy import — a Settings dialog, in tests that never open the editor — took 2–9.4s to mount instead of ~380ms and consistently missed a correctly event-keyed 5s wait. In a production build the same prefetch is a handful of bundled-chunk requests; the starvation is a dev/e2e-only amplification.
+Worked case: a viewer app idle-prefetched a lazily-loaded editor chunk at boot. Under the Vite dev server (which is also what the Playwright `webServer` runs), a workspace `development` export condition served that package as raw TS source — so the "one chunk" expanded to **~3,500 individual module requests** that monopolized the browser's per-host connection pool (six connections in the observed HTTP/1.1 dev-server case — a property of that setup, not a universal browser constant) for seconds after every page load. An *unrelated* lazy import — a Settings dialog, in tests that never open the editor — took 2–9.4s to mount instead of ~380ms and consistently missed a correctly event-keyed 5s wait. In a production build the same prefetch is a handful of bundled-chunk requests; the starvation is a dev/e2e-only amplification.
 
 The tells, none of which look like a normal flake:
 
@@ -188,6 +188,7 @@ The tells, none of which look like a normal flake:
 - **The awaited element eventually appears.** Poll past the timeout and it mounts seconds late, rather than never.
 - **The failing tests are unrelated to the change under test.** They fail because they share a page load with the storm, not because they exercise the changed code.
 - **Failure correlates with what the app does at boot,** not with what the test does.
+- **The network waterfall shows same-origin requests stalled in queue while CPU sits idle.** This is the tell that separates connection starvation from CPU starvation — the latency A/B below proves the background work *caused* the slowdown; the stalled-while-idle waterfall is what pins the binding constraint on connections rather than compute.
 
 The proof is mechanical (Rule 1 — prove it before you call it flaky). First, measure when the element *actually* appears:
 
@@ -247,7 +248,13 @@ grep -E "  ✓ " run.log |
 # Repeat for the other run, then compare the common keys.
 ```
 
-In the worked case, 50 tests shared by both shards went **710s → 1054s** — the regression was invisible in any single test (each still passed on retry) and unmistakable in the aggregate.
+In the worked case, 50 tests shared by both shards went **710s → 1054s** of completed test-seconds — the regression was invisible in any single test (each still passed on retry) and unmistakable in the aggregate. Three honesty caveats keep the numbers meaningful:
+
+- **The list reporter must be configured on CI.** Playwright's CI default is `dot`, which prints no per-test lines — `reporter: [["list"], ["html"]]` (or similar) has to already be in the config for this salvage to exist.
+- **`file:line` keys are only stable across nearby commits.** If the spec files shifted between the two runs, key by project + full test title instead, and report how many tests matched vs didn't.
+- **The sums are completed test-seconds, not wall-clock.** Parallel workers overlap, and tests killed mid-flight by the timeout never print a line — the broken run's total *understates* its true cost.
+
+This is incident salvage, not telemetry. If you want per-test durations routinely, a ten-line custom reporter emitting structured records from `onTestEnd` beats log parsing — keep the grep for the runs where that reporter didn't exist yet.
 
 <Note>
 
@@ -371,7 +378,7 @@ An untestable wait is a product-code observability gap, not a spec problem. Once
 
 <Note>
 
-**Closing invariant: every wait must be keyed to an observable state transition, not a duration.** If a wait cannot be tied to a signal the production code emits, the fix belongs in the production code — not in a longer timeout.
+**Closing invariant: every wait must be keyed to an observable state transition, not a duration.** If a wait cannot be tied to a signal the production code emits, the fix belongs in the production code — not in a longer timeout. And a correctly event-keyed wait can still time out when the signal itself is resource-starved — that is [catalog entry 6](#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation), an app/serving problem, not a wait problem.
 
 </Note>
 
