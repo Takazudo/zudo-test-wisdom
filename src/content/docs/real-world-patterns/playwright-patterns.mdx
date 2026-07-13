@@ -610,6 +610,78 @@ When `webServer` is a list of N entries (one per fixture or app), every inner-lo
 
 </Note>
 
+## The Bundled-Dep E2E Lane for Monorepo Dev Servers
+
+The production-build advice above has a monorepo-specific blind spot. Many app suites *cannot* run against the production build: MSW's service-worker setup, dev-only routes, and dev-only test bridges (state exposed on `window` behind an `import.meta.env.DEV` guard) all exist only under the dev server. But running the dev server in a pnpm-workspace monorepo has a hidden per-test tax.
+
+**The tax:** a workspace package resolved through a `development` export condition —
+
+```json
+"exports": {
+  ".": {
+    "types": "./dist/index.d.ts",
+    "development": "./src/index.ts",
+    "default": "./dist/index.js"
+  }
+}
+```
+
+— is served as **raw source, one HTTP request per module**. That is exactly what you want for interactive dev (HMR into the package's source). But every Playwright test gets a fresh browser context with an empty HTTP cache, so **every test re-downloads the package's whole module graph**. For a heavy package (in the worked case: a pattern-generator registry of ~3,500 modules) that was +10–28s on every test whose flow touched it — enough to push two 15-minute CI shards into `timeout-minutes` kills.
+
+**The middle path — bundle only the heavy, stable dep; keep everything else source-served:**
+
+```typescript
+// vite.config.ts
+const BUNDLED_GENERATORS = process.env.E2E_BUNDLED_GENERATORS === "1";
+const GENERATORS_DIST = fileURLToPath(
+  new URL("../generators/dist/index.js", import.meta.url),
+);
+if (BUNDLED_GENERATORS && !existsSync(GENERATORS_DIST)) {
+  throw new Error(
+    "E2E_BUNDLED_GENERATORS=1 but the bundle is missing — build the package first.",
+  );
+}
+
+export default defineConfig({
+  resolve: {
+    conditions: ["development"],
+    ...(BUNDLED_GENERATORS
+      ? {
+          alias: [
+            // Exact-match so hypothetical subpath imports still resolve normally
+            { find: /^@acme\/generators$/, replacement: GENERATORS_DIST },
+          ],
+        }
+      : {}),
+  },
+});
+```
+
+```yaml
+# CI e2e job: build the heavy package (~15s), then run with the flag
+- name: Build the bundled-dep e2e lane
+  run: pnpm --filter @acme/core build && pnpm --filter @acme/generators build
+
+- name: Run Playwright e2e tests
+  env:
+    E2E_BUNDLED_GENERATORS: '1'
+  run: pnpm exec playwright test
+```
+
+Three properties are load-bearing:
+
+- **The `existsSync` guard throws.** Without it, a missing or stale `dist` silently falls through to source-serving (or worse, tests a stale bundle) and the lane's numbers become meaningless.
+- **The flag is opt-in.** Local `pnpm test:e2e` and interactive dev keep source-serving and HMR; only CI (and anyone reproducing CI) pays the ~15s build for the collapsed graph.
+- **Only the heavy, stable package is bundled.** The app's own source — the code under test — is still served live. You are bundling a dependency, not the subject.
+
+Worked-case evidence: the two e2e shards went from repeated 15-minute `timeout-minutes` kills with 10–23 failed attempts per run to **6m35s and 8m14s with zero failed attempts** — roughly 2× faster than the suite's best-ever green.
+
+<Note>
+
+How this failure class presents *before* you know to look for it — background module storms starving unrelated waits, and heavy loads relocating between waits when you gate them — is [catalog entry 6 in the Flake Root-Cause Catalog](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation), including the poll-past-the-timeout proof and the per-test duration diff.
+
+</Note>
+
 ## The Hidden Auxiliary-Socket Port Race
 
 The port-race guidance above, and in [Execution Tiers](../decision-guide/execution-tiers.mdx#making-t0-real-for-multi-fixture-e2e), covers the **application** port: give each fixture its own `port` and the `EADDRINUSE` collisions across N parallel `webServer` entries go away. There is a subtler variant that distinct app ports do not fix.

@@ -156,6 +156,12 @@ flowchart TD
 
 The rule that follows: **diagnose the binding constraint before you resize, and size each job to its own failure mode.** Do not uniform-size a whole workflow — a memory-bound vitest lane and a CPU-starved e2e lane in the same workflow want different treatments, and a blanket "everything to 8vcpu" masks the memory bug while overpaying for the jobs that never needed it.
 
+<Note>
+
+A third failure mode presents identically and answers to **neither** lever: **connection starvation** — the browser's per-host connection pool (6 on HTTP/1.1) exhausted by a dev-server module storm, so waits time out while CPU sits idle. The pool does not grow with vCPU; the fix is at the app/serving layer. See [catalog entry 6 in the Flake Root-Cause Catalog](../real-world-patterns/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation).
+
+</Note>
+
 ### Rule 4: Cost control comes from trigger design, not runner choice
 
 The single largest lever on your CI bill is **not** which runner you pick — it is **when the expensive lanes run at all.**
