@@ -161,6 +161,7 @@ This is the same lesson as the filename-prefix guard, one layer down: **a green 
 # The gate ran green -- but did it collect anything? Fail if the suite collected nothing.
 # Note the report must live OUTSIDE outputDir to survive; see the outputDir section below.
 REPORT=b4push-reports/report.json
+rm -f "$REPORT"  # a stale report from a prior run would satisfy both checks below
 PLAYWRIGHT_JSON_OUTPUT_NAME="$REPORT" npx playwright test --reporter=json
 
 [ -f "$REPORT" ] || { echo "FAIL: no report written -- the run did not reach the reporter"; exit 1; }

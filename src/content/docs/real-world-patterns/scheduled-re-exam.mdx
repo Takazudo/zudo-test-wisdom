@@ -463,16 +463,16 @@ jq -r '
       .status == "flaky"
       or ((.results // []) | length > 1 and (.[-1].status == "passed"))
     )
-  | "\($spec.file)\t\($spec.title)"
+  | "\(.projectName // "default")\t\($spec.file)\t\($spec.title)"
 ' playwright-report/report.json |
-while IFS=$'\t' read -r FILE TITLE; do
-  echo "::warning file=${FILE}::${TITLE} -- passed only after retry, record and schedule the fix"
+while IFS=$'\t' read -r PROJECT FILE TITLE; do
+  echo "::warning file=${FILE}::[${PROJECT}] ${TITLE} -- passed only after retry, record and schedule the fix"
 
   # The annotation above is decoration until something reads it --
   # file or append to a deduped tracking issue, one per test, not one per run.
-  # Key the tracking issue on file + title. Keyed on title alone, two specs
+  # Key the tracking issue on project + file + title. Keyed on title alone, two specs
   # sharing a name collect telemetry into one issue that neither fix closes.
-  FLAKY_TITLE="flaky: ${FILE} › ${TITLE}"
+  FLAKY_TITLE="flaky: [${PROJECT}] ${FILE} › ${TITLE}"
   EXISTING="$(gh issue list --label "flaky" --state open --json number,title \
     | jq -r --arg t "$FLAKY_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')"
 
@@ -507,6 +507,9 @@ The mandatory inline comment above every `@flaky` test (the paper-trail rule fro
 set -euo pipefail
 
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+# spec.file is relative to the report's config.rootDir (usually the testDir),
+# not the repo root -- resolve it before grepping or every lookup misses.
+ROOT_DIR="$(jq -r '.config.rootDir' playwright-report/report.json)"
 
 jq -r '
   .. | objects
@@ -518,9 +521,9 @@ jq -r '
 ' playwright-report/report.json |
 while IFS=$'\t' read -r STATUS FILE TITLE; do
   # The tracking-issue URL sits in the mandatory inline comment directly above test().
-  # Scope to $FILE, not all of e2e/ -- head -1 across the tree picks the wrong
-  # issue whenever two specs share a title.
-  ISSUE_URL="$(grep -n -B1 -F "\"${TITLE}" "$FILE" 2>/dev/null \
+  # Scope to the one resolved file, not all of e2e/ -- head -1 across the tree picks
+  # the wrong issue whenever two specs share a title.
+  ISSUE_URL="$(grep -n -B1 -F "\"${TITLE}" "${ROOT_DIR}/${FILE}" 2>/dev/null \
     | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
   [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
   ISSUE_NUM="${ISSUE_URL##*/}"

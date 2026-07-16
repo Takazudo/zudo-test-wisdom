@@ -372,7 +372,7 @@ jq -r '
 
 Two rules keep the key honest across the two ways it can fail:
 
-- **Drop the line number, never the file.** The line is what drifts when spec files shift between commits; the file is what disambiguates. Degrading from `project + file + line + title` to `project + file + title` stays correct — degrading to `title` does not.
+- **Drop the line number, never the file.** The line is what drifts when spec files shift between commits; the file is what disambiguates. Degrading from `project + file + line + title` to `project + file + title` stays correct — degrading to `title` does not. One caveat when you drop the line: `$spec.title` is the _leaf_ title, and two `describe` blocks in the same file may declare the same leaf — if your suites nest, key on the full title path (suite chain › leaf), not the leaf alone.
 - **When you cannot recover the file, report the ambiguity instead of guessing.** If a log line or a legacy artifact only carries a title, count how many specs in the tree declare that title. More than one, and the row is unusable for repeat detection — say so in the triage output rather than letting it vote.
 
 <Note>
