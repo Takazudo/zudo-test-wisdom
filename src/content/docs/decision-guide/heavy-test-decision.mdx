@@ -217,7 +217,7 @@ This is the step an autonomous agent skips. The quarantine pipeline is *designed
 
 2. **Excluded from strict gates.** A quarantined test must not block a PR — otherwise quarantine means nothing.
 3. **It still runs — allowed-to-fail — in the scheduled tier.** A `@flaky` tag that runs nowhere is a graveyard: results stop being collected and the test silently rots. Running allowed-to-fail in T3 keeps fresh failure data flowing into the tracking issue. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../real-world-patterns/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
-4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../real-world-patterns/deflaking-recipe.mdx) — it covers the five causes of E2E flakiness and the mechanical steps to eliminate each one.
+4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../real-world-patterns/deflaking-recipe.mdx) — it covers the seven causes of E2E flakiness and the mechanical steps to eliminate each one.
 
 <Tip>
 

@@ -94,6 +94,87 @@ bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" 
 
 </Warning>
 
+## 不正な `workers` 値はゼロ件のテストを実行してgreenで終了する
+
+上のガードは、どのプロジェクトにも収集されないスペックを捕まえます。同じ偽greenへ至るもう1つの経路があり、それはこのガードを無傷ですり抜けます：すべてのスペックが自分のプロジェクトに完璧に一致しているのに、ランはそれでも何も実行しない——`workers` の値だけが原因で。
+
+`config.workers` が受け付けるのは**数値**（`4`）または**パーセンテージ文字列**（`"50%"`）です。数値の文字列は受け付けません：`workers: "3"` は `config.workers must be a number or percentage` というエラーになります。この非対称性こそが、誰もが思いつくenvオーバーライドのイディオムを罠にします：
+
+```typescript
+// playwright.config.ts -- Anti-pattern. Number() is the whole bug.
+export default defineConfig({
+  workers: Number(process.env.PW_WORKERS),
+});
+```
+
+`Number("abc")` は `NaN` です——typoした、あるいは古くなった環境変数。`Number("50%")` も**また** `NaN` です——Playwright自身のネイティブなパーセンテージ構文が、それを受け付けるために書かれたはずの型変換によって破壊されるのです。そして `workers` が `NaN` のとき、Playwrightはエラーになりません。`Running N tests` の行も、pass/failのサマリーも出力せず、**exit 0 で終了します**：
+
+```text
+$ PW_WORKERS=abc npx playwright test
+$ echo $?
+0
+```
+
+これは、何も実行していないのに成功を報告するゲートです。
+
+この失敗は非対称で、だからこそカジュアルなテストを生き延びます——開発者が試そうと思いつく値は、行儀よく振る舞う値ばかりだからです：
+
+| `PW_WORKERS` | `Number()` の結果 | Playwrightの振る舞い |
+|---|---|---|
+| `4` | `4` | 正常に実行 |
+| `0` | `0` | **大きな音でエラー** -- `config.workers must be a positive number` |
+| `-2` | `-2` | **大きな音でエラー** -- 同じメッセージ |
+| `1.5` | `1.5` | 黙って丸める。スイートは実行される |
+| `50%` | `NaN` | **ゼロ件のテストを実行し、exit 0** |
+| `abc` | `NaN` | **ゼロ件のテストを実行し、exit 0** |
+
+オーバーライドは設定ロード時に検証し、不正な値は「何も起きない」時点ではなくブート時点で失敗させてください：
+
+```typescript
+// playwright.config.ts
+function resolveWorkers(raw: string | undefined): number | string | undefined {
+  if (raw === undefined) return undefined; // let Playwright pick its default
+  if (/^\d+%$/.test(raw)) return raw;      // pass percentages through as strings
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`PW_WORKERS must be a positive integer or a percentage -- got "${raw}"`);
+  }
+  return n;
+}
+
+export default defineConfig({
+  workers: resolveWorkers(process.env.PW_WORKERS),
+});
+```
+
+未設定のケースで `undefined` を返すことが重要です：設定の作者が推測した数値を固定するのではなく、判断をPlaywright自身のデフォルトへ返します。
+
+<Warning>
+
+**Playwright 1.58.2 に対して検証済み**——silent-on-`NaN` はドキュメント化された保証ではなく観測された振る舞いなので、あなたがピン留めしているバージョンに対して再確認してください。このルールはこの1つのキーを超えて一般化します：環境変数から素の `Number()` を通して供給されるあらゆるランナー設定値は、人間には意味のある文字列を `NaN` に変換しえます。そして `NaN` がエラーになるか静かに劣化するかは、各ランナーが勝手に決めることです。すべてのenvオーバーライドを境界でパースして検証してください。型変換の結果を未チェックのまま設定フィールドへ到達させてはいけません。
+
+</Warning>
+
+これはファイル名プレフィックスガードと同じ教訓の、1つ下のレイヤーです：**greenなランが証明するのは、実行されたテストがパスしたことだけ——何かのテストが実行されたことは決して証明しません。** 最も安価な独立チェックは、exit codeではなく件数のアサートです。自分のレポーター出力を読んでテスト件数が非ゼロであることを確認するゲートは、このクラスのすべてのメンバーを一度に捕まえます——収集されないスペック、`NaN` のワーカー数、そして次にどんなメカニズムが現れようとも。（これは*収集*件数のガードです：すべてのスペックが `test.skip` するスイートはこれを通過します——それは別の[pass-by-skipという罠](#前提条件としての-test-skip-—-pass-by-skip-という罠)です。）
+
+```bash
+# The gate ran green -- but did it collect anything? Fail if the suite collected nothing.
+# Note the report must live OUTSIDE outputDir to survive; see the outputDir section below.
+REPORT=b4push-reports/report.json
+rm -f "$REPORT"  # a stale report from a prior run would satisfy both checks below
+PLAYWRIGHT_JSON_OUTPUT_NAME="$REPORT" npx playwright test --reporter=json
+
+[ -f "$REPORT" ] || { echo "FAIL: no report written -- the run did not reach the reporter"; exit 1; }
+count="$(jq '[.. | objects | select(.tests? and .title?)] | length' "$REPORT")"
+[ "$count" -gt 0 ] || { echo "FAIL: suite collected 0 specs -- the gate is vacuous"; exit 1; }
+```
+
+<Note>
+
+`workers` の設定ミスはゲートを定義するファイルの中に住んでいるため、そこへの編集は[ルール8 — ゲートを不正操作しない](../decision-guide/required-behavior.mdx#4つの実行ルール-ルール8-—-ゲートを不正操作しない)の対象になります：ランナー設定は、他のあらゆるゲートファイルと同じくフレッシュコンテキストのレビューを受けます。ルール8はすでに、アサーションに触れずにゲートを無力化する手段として `testMatch` の絞り込みと `--grep-invert` フィルターを名指ししています。`NaN` に解決される `workers` 値はそのどちらよりも完全にゲートを無力化し、しかもdiffの上ではパフォーマンス調整に見えるのです。
+
+</Note>
+
 ## フレイキーテストの隔離：リトライ回数の非対称性という罠
 
 CI安全テスト vs `@interactive` の分割に加えて、知っておく価値のある3つ目のタグがあります：`@flaky` です。このタグが存在する理由は、ある微妙な罠にあります。**CIとローカルのプッシュ前ゲートは、しばしば異なるリトライ回数（リトライバジェット）で実行される**ため、同じテストが一方ではグリーン、もう一方ではレッドになりうるのです。
@@ -131,6 +212,8 @@ Chromiumステップは（`@interactive` に加えて）`--grep-invert` に `@fl
 <Warning>
 
 `@flaky` は隔離であって、恒久的なスキップではありません。**すでに** `main` 上で既知のフレイキーと分かっているテストにのみタグを付けてください。新規テストにタグを付けてゲートを通そうとしてはいけません。根本的なレース条件を修正したら、同じPR内でタグを削除してください。そうしないとリストが知らぬ間に膨らみ、本物のカバレッジが失われていきます。
+
+そして、リトライ回数ゼロのローカルゲートが赤くした何かにタグを付ける前に：**同じ**スペックがラン間で失敗しているかを確認してください。ランのたびに異なるスペックへ着地する失敗——古典的には、フルスイートランの終盤に出るcontext teardownのタイムアウト——は[レーンのオーバーサブスクリプション](./deflaking-recipe.mdx#part-1-—-根本原因カタログ-7-レーンのオーバーサブスクリプション)であって、フレイキーテストではありません。最新の犠牲者にタグを付けても、健全なカバレッジを停止し、レーンの欠陥に次の犠牲者を選ばせるだけです。
 
 </Warning>
 
@@ -777,6 +860,67 @@ jobs:
 各シャードは、デフォルトのHTMLレポートの代わりに `blob` レポートを書き出すようになりました——別々のシャードのHTMLレポートは結合できませんが、blobレポートなら結合できます。失敗したシャードのレポートこそ最も必要になるため、この失敗ケースでは2つの設定が重要です。マトリクスの `fail-fast: false` は、1つのシャードが失敗した瞬間に他のシャードがキャンセルされるのを防ぎます。アップロードステップの `if: always()` は、失敗したシャードのblobレポートがスキップされるのを防ぎます（GitHub Actionsはステップが非ゼロで終了すると、デフォルトで以降のステップをスキップします）。この2つがどちらも無ければ、`merge-reports`（こちらも `if: always()` で実行されます）はパスしたシャードのblobレポートしか目にすることができません。
 
 </Note>
+
+## 残したいアーティファクトは `outputDir` の外に置かなければならない
+
+Playwrightは**毎回のランの開始時に `outputDir` を空にします**。デフォルトは `test-results/` で、このワイプは無条件です：今回のランが上書きするファイルに限定されず、それを誰が書いたかも気にしません。ランが始まる時点でそのディレクトリに置かれていたものは、すべて消えます。
+
+これは正しい振る舞いです——前回のランの失敗で埋まったトレースディレクトリは、役に立たないどころか有害です——そして、何かを残そうとするまでは見えません。
+
+```bash
+# Run 1 -- writes its report into outputDir
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/report-1.json npx playwright test
+
+# Run 2 -- a DIFFERENT filename, so surely both survive?
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/report-2.json npx playwright test
+
+ls test-results/
+# .last-run.json  report-2.json
+#
+# report-1.json is gone. So is anything else that was in there.
+```
+
+<Warning>
+
+**一意なファイル名はアーティファクトを救いません。** 上書きされたレポートを発見したときの本能は、名前を一意にすることです——ランのカウンター、タイムスタンプ、gitのSHA。それは役に立ちません。なぜなら、何も*上書き*されてはいないからです：最初のテストが始まる前に、ディレクトリ全体が空にされているのです。タイムスタンプ方式は毎回ちょうど1つのファイルを生み、うまくいきそうに見える名前の裏へメカニズムを隠します。
+
+</Warning>
+
+修正は命名ではなく配置です。残す・比較するつもりのあるものはすべて、**`outputDir` の外の兄弟ディレクトリ**へ書いてください：
+
+```bash
+# Reports accumulate -- run N leaves run N-1's report untouched
+PLAYWRIGHT_JSON_OUTPUT_NAME=b4push-reports/report-1.json npx playwright test
+PLAYWRIGHT_JSON_OUTPUT_NAME=b4push-reports/report-2.json npx playwright test
+
+ls b4push-reports/
+# report-1.json  report-2.json
+```
+
+`PLAYWRIGHT_JSON_OUTPUT_NAME` は**設定ディレクトリ**からの相対パスとして解決され、JSONレポーターは足りない親ディレクトリを自分で作ります——`mkdir -p` のステップは不要です。兄弟ディレクトリは `.gitignore` に追加してください。
+
+<Note>
+
+**修正に見えて違う、名指しする価値のある2つのニアミス：**
+
+- **`preserveOutput` はワイプを防ぎません。** 名前はまさにこの制御のように読めますが、違います。これは*テストごとのアーティファクトサブディレクトリ*（トレース、スクリーンショット、ビデオ）をパスしたテストについても保持するかどうかを制御するもので、ラン開始時のクリーン処理にあなたのファイルをスキップさせるものではありません。
+- **カスタム `outputDir` は誤った理由で「うまくいき」ます。** `outputDir` を別の場所へ向けてもワイプの場所が移るだけで、すべてのトレース、スクリーンショット、ビデオを道連れにします。兄弟ディレクトリが即座に解決する問題と引き換えに、はるかに大きな爆発半径を抱え込むことになります。
+
+</Note>
+
+### なぜこれが本サイトの推奨するクロスランワークフローを直撃するのか
+
+このハザードはローカルファーストです。CIではほぼ観測できません——各ランはフレッシュなランナーを得るため、ラン開始時のワイプが見つけるのは空のディレクトリで、アーティファクトのアップロードステップはいずれにせよレポートを出荷します。表面化するのは2つのランがワーキングツリーを共有した瞬間で、それはまさに本サイトが処方するローカルトリアージの形そのものです：[2つのラン間のテストごとの実行時間diff](./deflaking-recipe.mdx#part-1-—-根本原因カタログ-6-無関係な待機を飢えさせるアプリ内バックグラウンド処理-続編の罠-—-コストは移動するだけで、消えはしない)と、「このスペックは*両方の*ランで失敗したか？」を判定するあらゆるツーリング（[レーンのオーバーサブスクリプション](./deflaking-recipe.mdx#part-1-—-根本原因カタログ-7-レーンのオーバーサブスクリプション)を参照）。「2回実行して2つのJSONレポートを比較する」の上に組まれたツールは、両方のレポートが `test-results/` に書かれる限り構造的に不可能です——しかも**静かに**失敗します：2回目のランはレポートを1つだけ見つけ、比較するものは無いと結論し、成功を報告するのです。
+
+<Warning>
+
+**インメモリのフィクスチャの上に組まれたセルフテストは、このバグにすでに壊されているツールを認証してしまいます。** 実例では、クロスラン・トリアージスクリプトの `--self-test` はレポートオブジェクトをメモリ内で構築し、パーサーを動かして100%パスしました——その一方で、それが存在する理由であるディスク上のワークフローは、パースすべき2つ目のレポートを決して生み出せなかったのです。greenのセルフテストはエンドツーエンドの検証として読まれ、動きようのないツールが出荷されました。
+
+実際に問題となる継ぎ目——*アーティファクトは2回目のランを生き延びるか？*——をテストしてください。パーサーだけでは足りません。自分の仮定から組み立てたフィクスチャは、その仮定を確認することしかできないのです。
+
+</Warning>
+
+（Playwright 1.58.2 に対して実際に実行して検証済み：`test-results/` に置いたセンチネルファイルは次のランで削除され、兄弟ディレクトリに書いた2つのレポートは共存しました。）
 
 ## フロントエント専用E2Eのためのモックバックエンドアダプター
 
