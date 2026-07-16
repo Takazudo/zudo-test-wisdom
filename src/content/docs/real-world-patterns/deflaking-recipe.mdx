@@ -377,7 +377,7 @@ Two rules keep the key honest across the two ways it can fail:
 
 <Note>
 
-**The same key governs issue filing.** A tracking issue titled `flaky: closes with Escape` is one issue collecting telemetry from two unrelated specs, and neither spec's fix will ever close it cleanly. Title issues with the identity — `flaky: e2e/settings-dialog.spec.ts › closes with Escape` — so the dedup query matches one spec and only that spec. This is the same discipline as the workflow-name-in-the-title rule for [deduped exam issues](./scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run): the dedup key has to be as specific as the thing it identifies.
+**The same key governs issue filing.** A tracking issue titled `flaky: closes with Escape` is one issue collecting telemetry from two unrelated specs, and neither spec's fix will ever close it cleanly. Title issues with the identity — `flaky: e2e/settings-dialog.spec.ts › closes with Escape` — so the dedup query matches one spec and only that spec (and when the same spec runs under several Playwright projects, put the project in the title too). This is the same discipline as the workflow-name-in-the-title rule for [deduped exam issues](./scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run): the dedup key has to be as specific as the thing it identifies.
 
 </Note>
 

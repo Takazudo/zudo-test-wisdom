@@ -155,17 +155,17 @@ Returning `undefined` for the unset case matters: it hands the decision back to 
 
 </Warning>
 
-This is the same lesson as the filename-prefix guard, one layer down: **a green run proves the tests that ran passed — it never proves any test ran.** The cheapest independent check is to assert the count, not the exit code. A gate that reads its own reporter output for a nonzero test count catches every member of this class at once — the uncollected spec, the `NaN` worker count, and whatever the next mechanism turns out to be:
+This is the same lesson as the filename-prefix guard, one layer down: **a green run proves the tests that ran passed — it never proves any test ran.** The cheapest independent check is to assert the count, not the exit code. A gate that reads its own reporter output for a nonzero test count catches every member of this class at once — the uncollected spec, the `NaN` worker count, and whatever the next mechanism turns out to be. (It is a *collected*-count guard: a suite whose specs all `test.skip` still clears it — that is the separate [pass-by-skip trap](#test-skip-as-a-precondition-—-the-pass-by-skip-trap) below.)
 
 ```bash
-# The gate ran green -- but did it run anything? Fail if the suite executed nothing.
+# The gate ran green -- but did it collect anything? Fail if the suite collected nothing.
 # Note the report must live OUTSIDE outputDir to survive; see the outputDir section below.
 REPORT=b4push-reports/report.json
 PLAYWRIGHT_JSON_OUTPUT_NAME="$REPORT" npx playwright test --reporter=json
 
 [ -f "$REPORT" ] || { echo "FAIL: no report written -- the run did not reach the reporter"; exit 1; }
 count="$(jq '[.. | objects | select(.tests? and .title?)] | length' "$REPORT")"
-[ "$count" -gt 0 ] || { echo "FAIL: suite executed 0 specs -- the gate is vacuous"; exit 1; }
+[ "$count" -gt 0 ] || { echo "FAIL: suite collected 0 specs -- the gate is vacuous"; exit 1; }
 ```
 
 <Note>
