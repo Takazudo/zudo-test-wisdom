@@ -141,7 +141,7 @@ Sharding caps how many test files a single worker process loads before the run r
 
 Rule 2 says a bigger runner does not fix memory problems — but it genuinely *does* fix a different problem that looks almost identical from the outside.
 
-**CPU starvation:** on a two-vCPU runner, e2e workers and the dev server contend for the same two cores. Under contention, specs miss their timing budgets and fail as timeouts — which reads, on the surface, exactly like a flaky or under-resourced test. Here, moving to four vCPU **is** the fix: giving the dev server and the test workers their own cores removes the contention. (Evidence: zudo-pattern-gen #3321 — spec timeouts under two-core contention, resolved by four vCPU.)
+**CPU starvation:** on a two-vCPU runner, e2e workers and the dev server contend for the same two cores. Under contention, specs miss their timing budgets and fail as timeouts — which reads, on the surface, exactly like a flaky or under-resourced test. Here, moving to four vCPU **is** the fix: giving the dev server and the test workers their own cores removes the contention. (Evidence: zudo-pattern-gen #3321 — spec timeouts under two-core contention, resolved by four vCPU.) If the resize leads you to tune worker counts through an environment variable, validate the value at the boundary — a Playwright `workers` override that coerces to `NaN` [runs zero tests and exits green](../real-world-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green), a false green worse than the timeouts you started with.
 
 So two failures that both present as "tests dying under load" have **opposite** remedies:
 

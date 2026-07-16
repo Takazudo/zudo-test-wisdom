@@ -48,11 +48,11 @@ A probabilistic assertion is almost always a sign you picked a convenient **prox
 
 ## Part 1 — Root-Cause Catalog
 
-Every E2E flake has a cause. The six below cover the overwhelming majority of cases in practice, and each has a deterministic fix.
+Every E2E flake has a cause. The seven below cover the overwhelming majority of cases in practice, and each has a deterministic fix.
 
 <Note>
 
-**These six are browser-specific; native suites flake for different reasons.** The catalog below (`waitForTimeout`, `networkidle`, animations, hydration races) is the E2E/browser shape of flakiness. A native suite — a Rust/cargo project, a Go service, any non-browser test runner — flakes for a parallel set of causes:
+**These seven are browser-specific; native suites flake for different reasons.** The catalog below (`waitForTimeout`, `networkidle`, animations, hydration races) is the E2E/browser shape of flakiness. A native suite — a Rust/cargo project, a Go service, any non-browser test runner — flakes for a parallel set of causes:
 
 - **Non-deterministic scheduling** — tests that depend on thread/task interleaving (the native analogue of a hydration race).
 - **Fixed `sleep`/timeout deadlines** — a hard-coded `sleep(N)` waiting for async work is the same guess as a bare `waitForTimeout(N)`; poll the real condition or await the completion signal instead.
@@ -253,7 +253,7 @@ grep -E "  ✓ " run.log |
 In the worked case, 50 tests shared by both shards went **710s → 1054s** of completed test-seconds — the regression was invisible in any single test (each still passed on retry) and unmistakable in the aggregate. Three honesty caveats keep the numbers meaningful:
 
 - **The list reporter must be configured on CI.** Playwright's CI default is `dot`, which prints no per-test lines — `reporter: [["list"], ["html"]]` (or similar) has to already be in the config for this salvage to exist.
-- **`file:line` keys are only stable across nearby commits.** If the spec files shifted between the two runs, key by project + full test title instead, and report how many tests matched vs didn't.
+- **`file:line` keys drift; bare titles fuse.** Line numbers are only stable across nearby commits, so if the spec files shifted between the two runs, drop the line and key by **project + file + title** — not by title alone. See [Key cross-run triage on test identity, not on test title](#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title). Report how many tests matched vs didn't.
 - **The sums are completed test-seconds, not wall-clock.** Parallel workers overlap, and tests killed mid-flight by the timeout never print a line — the broken run's total *understates* its true cost.
 
 This is incident salvage, not telemetry. If you want per-test durations routinely, a ten-line custom reporter emitting structured records from `onTestEnd` beats log parsing — keep the grep for the runs where that reporter didn't exist yet.
@@ -262,9 +262,124 @@ This is incident salvage, not telemetry. If you want per-test durations routinel
 
 **Why the job log is the only artifact here:** a CI `timeout-minutes` kill terminates the runner before Playwright's HTML reporter reaches its `onEnd` hook, so the report artifact never uploads on exactly the runs you most need to triage. The list-reporter lines streamed into the job log survive; parse those.
 
+Rebuilding the same diff **locally** from two JSON reports instead? Both reports must be written outside Playwright's `outputDir` — the start-of-run wipe deletes run 1's report before run 2 begins, and the comparison becomes structurally impossible. See [Artifacts You Want to Keep Must Live Outside `outputDir`](./playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
+
 </Note>
 
 The end-state fix for the relocated cost — stop serving thousands of source modules per test at all — is the [bundled-dep e2e lane](./playwright-patterns.mdx#the-bundled-dep-e2e-lane-for-monorepo-dev-servers) in Playwright Patterns.
+
+### 7. Lane over-subscription (the failure whose identity roams)
+
+Entry 6 is the app's machinery starving the test's. This one is neither: the **lane itself** is over-subscribed, and the failure lands on whichever spec happened to be holding a resource when the budget ran out. Nothing about that spec caused it — it was standing in the wrong place.
+
+The signature is specific enough to recognize on sight:
+
+```
+Tearing down "context" exceeded the test timeout of 30000ms.
+```
+
+Read the phase, not the number. This fires in **fixture teardown**, after the test body finished — there is no failed assertion, no failed locator, no failed wait. The spec's own work was already done; closing its browser context is what missed the budget. A per-spec explanation cannot account for a per-spec-agnostic phase.
+
+The tells, in the order you will meet them:
+
+- **It appears at the END of a local full-suite run,** as the lane's aggregate load peaks — not when the spec runs early.
+- **It hits a DIFFERENT spec on each run.** This is the discriminating tell; everything below is corroboration.
+- **Every affected spec is green when rerun focused.** The spec is fine. It was always fine.
+- **No assertion failed.** Compare entry 6, where a real wait really does time out.
+- **It reproduces on `retries: 0` locally and never in CI,** where `retries: 2` absorbs it — see [the retries-asymmetry trap](./playwright-patterns.mdx#quarantining-flakes-the-retries-asymmetry-trap).
+
+<Warning>
+
+**Do not quarantine the spec that happened to lose the race.** It is an existing test on `main` that genuinely went red on the zero-retry gate, so it clears the "never tag a brand-new test" guard on [`@flaky`](./playwright-patterns.mdx#quarantining-flakes-the-retries-asymmetry-trap) — and tagging it is still wrong. You would suspend coverage of a spec that has no defect, leave the lane defect fully intact, and hand it a fresh victim next run. Repeat that three runs running and you have quarantined three healthy specs and fixed nothing.
+
+**The rule: identity that roams is a lane property; only identity that REPEATS is a per-spec fix candidate.** Rule 1's proof obligation applies unchanged — you have not diagnosed anything until you know which of the two you are holding.
+
+</Warning>
+
+**The diagnostic is one run at lower concurrency.** Lane over-subscription is a function of the load, so removing the load removes the failure — cleanly, not marginally:
+
+```bash
+# If the full suite fails on a roaming spec but --workers=1 is green,
+# the binding constraint is the lane, not any spec it landed on.
+pnpm test:e2e --workers=1
+```
+
+Confirm across runs rather than by eye. Two runs' JSON reports, diffed on failing tests, answer the only question that matters — did the same test fail twice?
+
+<Warning>
+
+**Key the diff on test identity — `file:line` plus title — never on the bare title.** Two specs can share a title ("closes with Escape" in a dialog spec and a menu spec), and a title-keyed diff fuses them into a phantom repeat offender. That inverts this entry's decision: you quarantine a spec that never repeated. See [Key cross-run triage on test identity, not on test title](#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title).
+
+Reports must also be written **outside** Playwright's `outputDir`: it is emptied at the start of every run, so run 2 deletes run 1's report and the comparison is structurally impossible. Point `PLAYWRIGHT_JSON_OUTPUT_NAME` at a sibling directory (`b4push-reports/`), not `test-results/` — see [Artifacts You Want to Keep Must Live Outside `outputDir`](./playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
+
+</Warning>
+
+Once confirmed, the lever is the lane's own budget — worker count first, then trace retention and per-test timeout. This is the Playwright analogue of [capping vitest parallelism in the heavy local gate](./vitest-patterns.mdx#project-level-vitest-configs-cap-worker-parallelism-in-the-heavy-local-gate), and for the same reason: a heavy local gate buys reliability with wall-clock, because a gate that reds out on a healthy spec is worth less than a gate that takes two more minutes.
+
+<Note>
+
+**Three presentations, three binding constraints, and only one of them is a test problem at all.**
+
+| Presentation | Binding constraint | Lever |
+|---|---|---|
+| Specs time out on a 2-vCPU CI runner | Cores | 2→4 vCPU ([runner-sizing Rule 3](../tools-reference/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-3-diagnose-the-failure-mode-before-resizing)) |
+| A real wait times out; same-origin requests stall while CPU idles | Per-host connection pool | App/serving layer ([entry 6](#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation)) |
+| Teardown times out on a roaming spec, locally, at full load | The lane's own budget | Cap workers — **not** a `@flaky` tag |
+
+The local row has no runner to resize: on your own machine, worker count *is* the vCPU dial. Reaching for `@flaky` because "the gate is red and I cannot buy cores" is how a lane defect gets laundered into a test defect.
+
+</Note>
+
+Worked case: a Tauri app's local `b4push` lane failed on a context-teardown timeout across several consecutive runs — a different spec each time, including specs untouched by the change under review, each green when rerun focused. The proposed fix, arrived at by faithfully following the quarantine pipeline, was to tag the most recent victim `@flaky`. The actual cause was the lane: default workers plus the dev server plus trace retention plus `retries: 0`, all on one loaded laptop. `--workers=1` was green. Nothing about any spec was ever wrong.
+
+### Key cross-run triage on test identity, not on test title
+
+Every cross-run comparison on this page — the duration diff above, [lane over-subscription](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), the retry-pass telemetry in [Scheduled Re-Exam](./scheduled-re-exam.mdx#flake-telemetry-mechanics-retry-pass-detection), any "did this fail twice?" triage — joins two runs on a key. **That key must be the test's identity: project + file + title.** A bare test title is not an identity, and using one corrupts the comparison silently.
+
+Nothing stops two spec files from containing the same `test()` name:
+
+```typescript
+// e2e/settings-dialog.spec.ts
+test("closes with Escape", async ({ page }) => { /* ... */ });
+
+// e2e/command-palette.spec.ts
+test("closes with Escape", async ({ page }) => { /* ... */ });
+```
+
+Run 1 fails the settings one. Run 2 fails the palette one. Keyed on title, triage sees `closes with Escape` fail in **both** runs and reports a repeat offender — a spec that does not exist. Two independent one-off failures have fused into one phantom.
+
+<Warning>
+
+**A phantom repeat offender inverts the fix-vs-quarantine decision.** "Repeats across runs" is the rule that separates a real per-spec flake (fix it, or quarantine it through the pipeline) from a lane-level resource-contention signature (fix the lane — cap workers, cut trace retention — and quarantine nothing). Title-fusion manufactures the "repeats" evidence out of two failures that repeat nothing. The outcome is the worst available: an innocent spec goes into quarantine with its behavior now unguarded, and the lane problem that actually produced both failures stays live and keeps hitting new specs.
+
+</Warning>
+
+The key is already in the artifact — most triage scripts just throw it away. Playwright's JSON reporter puts `file`, `line`, and `title` on the same spec node, so keying correctly costs one jq field:
+
+```bash
+# WRONG -- bare title. Two specs named "closes with Escape" fuse into one key.
+jq -r '.. | objects | select(.tests? and .title?) | .title'
+
+# RIGHT -- project + file + line + title is a real identity.
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)
+  | . as $spec
+  | .tests[]
+  | "\(.projectName // "default")\t\($spec.file):\($spec.line)\t\($spec.title)"
+'
+```
+
+Two rules keep the key honest across the two ways it can fail:
+
+- **Drop the line number, never the file.** The line is what drifts when spec files shift between commits; the file is what disambiguates. Degrading from `project + file + line + title` to `project + file + title` stays correct — degrading to `title` does not.
+- **When you cannot recover the file, report the ambiguity instead of guessing.** If a log line or a legacy artifact only carries a title, count how many specs in the tree declare that title. More than one, and the row is unusable for repeat detection — say so in the triage output rather than letting it vote.
+
+<Note>
+
+**The same key governs issue filing.** A tracking issue titled `flaky: closes with Escape` is one issue collecting telemetry from two unrelated specs, and neither spec's fix will ever close it cleanly. Title issues with the identity — `flaky: e2e/settings-dialog.spec.ts › closes with Escape` — so the dedup query matches one spec and only that spec. This is the same discipline as the workflow-name-in-the-title rule for [deduped exam issues](./scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run): the dedup key has to be as specific as the thing it identifies.
+
+</Note>
 
 ---
 

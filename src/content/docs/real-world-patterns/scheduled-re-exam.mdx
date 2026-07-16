@@ -451,24 +451,28 @@ set -euo pipefail
 RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
 # Playwright marks a retry-pass "flaky" -- fall back to the structural shape
-# (more than one result, the last one "passed") for reporters that drop the field
+# (more than one result, the last one "passed") for reporters that drop the field.
+# Emit identity, not just title -- two specs may share a title
+# (see deflaking-recipe.mdx#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title)
 jq -r '
   .. | objects
   | select(.tests? and .title?)        # a "spec" node: has a title and per-project test runs
-  | .title as $title
+  | . as $spec
   | .tests[]
   | select(
       .status == "flaky"
       or ((.results // []) | length > 1 and (.[-1].status == "passed"))
     )
-  | $title
+  | "\($spec.file)\t\($spec.title)"
 ' playwright-report/report.json |
-while IFS= read -r TITLE; do
-  echo "::warning::${TITLE} -- passed only after retry, record and schedule the fix"
+while IFS=$'\t' read -r FILE TITLE; do
+  echo "::warning file=${FILE}::${TITLE} -- passed only after retry, record and schedule the fix"
 
   # The annotation above is decoration until something reads it --
-  # file or append to a deduped tracking issue, one per test, not one per run
-  FLAKY_TITLE="flaky: ${TITLE}"
+  # file or append to a deduped tracking issue, one per test, not one per run.
+  # Key the tracking issue on file + title. Keyed on title alone, two specs
+  # sharing a name collect telemetry into one issue that neither fix closes.
+  FLAKY_TITLE="flaky: ${FILE} › ${TITLE}"
   EXISTING="$(gh issue list --label "flaky" --state open --json number,title \
     | jq -r --arg t "$FLAKY_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')"
 
@@ -508,16 +512,15 @@ jq -r '
   .. | objects
   | select(.tests? and .title?)
   | select(.title | test("@flaky"))
-  | .title as $title
+  | . as $spec
   | .tests[]
-  | "\(.status)\t\($title)"
+  | "\(.status)\t\($spec.file)\t\($spec.title)"
 ' playwright-report/report.json |
-while IFS=$'\t' read -r STATUS TITLE; do
+while IFS=$'\t' read -r STATUS FILE TITLE; do
   # The tracking-issue URL sits in the mandatory inline comment directly above test().
-  # Recursive `grep -rn --include` matches scripts/guard-flaky-paper-trail.sh's discovery
-  # convention -- bash's e2e/**/*.spec.ts glob silently drops specs at the wrong nesting
-  # depth without `shopt -s globstar`
-  ISSUE_URL="$(grep -rn --include='*.spec.ts' -B1 -F "\"${TITLE}" e2e/ 2>/dev/null \
+  # Scope to $FILE, not all of e2e/ -- head -1 across the tree picks the wrong
+  # issue whenever two specs share a title.
+  ISSUE_URL="$(grep -n -B1 -F "\"${TITLE}" "$FILE" 2>/dev/null \
     | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
   [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
   ISSUE_NUM="${ISSUE_URL##*/}"
@@ -649,6 +652,8 @@ export default defineConfig({
       playwright-report/
       test-results/
 ```
+
+The placement cuts the other way too: `outputDir` (`test-results/`) is **emptied at the start of every run**, so anything you park there to keep across runs is deleted by the next one — see [Artifacts You Want to Keep Must Live Outside `outputDir`](./playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
 
 </Warning>
 

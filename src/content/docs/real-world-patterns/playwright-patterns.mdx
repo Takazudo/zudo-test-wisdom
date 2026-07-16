@@ -94,6 +94,86 @@ The guard script, not the config, is what makes a filename-prefix project split 
 
 </Warning>
 
+## A Bad `workers` Value Runs Zero Tests and Exits Green
+
+The guard above catches a spec that no project collects. There is a second route to the same false green, and it survives that guard untouched: every spec matches its project perfectly, and the run still executes nothing — because of the `workers` value alone.
+
+`config.workers` accepts a **number** (`4`) or a **percentage string** (`"50%"`). It does not accept a numeric string: `workers: "3"` errors with `config.workers must be a number or percentage`. That asymmetry is what makes the obvious env-override idiom a footgun:
+
+```typescript
+// playwright.config.ts -- Anti-pattern. Number() is the whole bug.
+export default defineConfig({
+  workers: Number(process.env.PW_WORKERS),
+});
+```
+
+`Number("abc")` is `NaN` — a typo'd or stale env var. `Number("50%")` is **also** `NaN` — Playwright's own native percentage syntax, destroyed by the coercion meant to accept it. And with `NaN` workers, Playwright does not error. It prints no `Running N tests` line, no pass/fail summary, and **exits 0**:
+
+```text
+$ PW_WORKERS=abc npx playwright test
+$ echo $?
+0
+```
+
+That is a gate reporting success having executed nothing.
+
+The failure is asymmetric, which is why it survives casual testing — the values a developer thinks to try are the ones that behave:
+
+| `PW_WORKERS` | `Number()` yields | Playwright's behavior |
+|---|---|---|
+| `4` | `4` | runs normally |
+| `0` | `0` | **errors loudly** -- `config.workers must be a positive number` |
+| `-2` | `-2` | **errors loudly** -- same message |
+| `1.5` | `1.5` | silently rounds; still runs the suite |
+| `50%` | `NaN` | **runs zero tests, exits 0** |
+| `abc` | `NaN` | **runs zero tests, exits 0** |
+
+Validate the override at config load, so a bad value fails at boot instead of at nothing:
+
+```typescript
+// playwright.config.ts
+function resolveWorkers(raw: string | undefined): number | string | undefined {
+  if (raw === undefined) return undefined; // let Playwright pick its default
+  if (/^\d+%$/.test(raw)) return raw;      // pass percentages through as strings
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`PW_WORKERS must be a positive integer or a percentage -- got "${raw}"`);
+  }
+  return n;
+}
+
+export default defineConfig({
+  workers: resolveWorkers(process.env.PW_WORKERS),
+});
+```
+
+Returning `undefined` for the unset case matters: it hands the decision back to Playwright's own default rather than pinning a number the config author guessed.
+
+<Warning>
+
+**Verified against Playwright 1.58.2** — re-check against whatever version you pin, since silent-on-`NaN` is observed behavior rather than a documented guarantee. The rule generalizes past this one key: any runner config value fed from an environment variable through a bare `Number()` can coerce a human-meaningful string into `NaN`, and each runner decides for itself whether `NaN` errors or degrades quietly. Parse and validate every env override at the boundary; never let a coercion result reach a config field unchecked.
+
+</Warning>
+
+This is the same lesson as the filename-prefix guard, one layer down: **a green run proves the tests that ran passed — it never proves any test ran.** The cheapest independent check is to assert the count, not the exit code. A gate that reads its own reporter output for a nonzero test count catches every member of this class at once — the uncollected spec, the `NaN` worker count, and whatever the next mechanism turns out to be:
+
+```bash
+# The gate ran green -- but did it run anything? Fail if the suite executed nothing.
+# Note the report must live OUTSIDE outputDir to survive; see the outputDir section below.
+REPORT=b4push-reports/report.json
+PLAYWRIGHT_JSON_OUTPUT_NAME="$REPORT" npx playwright test --reporter=json
+
+[ -f "$REPORT" ] || { echo "FAIL: no report written -- the run did not reach the reporter"; exit 1; }
+count="$(jq '[.. | objects | select(.tests? and .title?)] | length' "$REPORT")"
+[ "$count" -gt 0 ] || { echo "FAIL: suite executed 0 specs -- the gate is vacuous"; exit 1; }
+```
+
+<Note>
+
+Because a `workers` misconfiguration lives in a gate-defining file, an edit to it falls under [Rule 8 — Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate): the runner config gets a fresh-context review like any other gate file. Rule 8 already names `testMatch` narrowing and `--grep-invert` filters as ways to neutralize a gate without touching an assertion; a `workers` value that resolves to `NaN` neutralizes it more completely than either, and looks like a performance tweak in the diff.
+
+</Note>
+
 ## Quarantining Flakes: The Retries-Asymmetry Trap
 
 Beyond the CI-safe vs `@interactive` split, there is a third tag worth knowing: `@flaky`. It exists because of a subtle trap — **CI and your local pre-push gate often run with different retry budgets**, so a test can be green in one and red in the other.
@@ -131,6 +211,8 @@ The Chromium step adds `@flaky` to its `--grep-invert` (alongside `@interactive`
 <Warning>
 
 `@flaky` is a quarantine, not a permanent skip. Tag only tests that are **already** known-flaky on `main`; never tag a brand-new test to make a gate pass. When you fix the underlying race, remove the tag in the same PR — otherwise the list silently grows and you lose real coverage.
+
+And before tagging anything the zero-retry local gate turned red: check whether the SAME spec fails across runs. A failure that lands on a different spec each run — classically a context-teardown timeout at the end of a full-suite run — is [lane over-subscription](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), not a flaky test. Tagging its latest victim suspends healthy coverage and leaves the lane defect to pick a new one.
 
 </Warning>
 
@@ -777,6 +859,67 @@ jobs:
 Each shard now writes a `blob` report instead of the default HTML report — HTML reports from separate shards can't be combined, but blob reports can. Two details matter for the failure case, which is exactly when you need the report most: `fail-fast: false` on the matrix stops GitHub Actions from cancelling the other shards the moment one fails, and `if: always()` on the upload step keeps a failed shard's blob report from being skipped (GitHub Actions skips later steps by default once a step exits non-zero). Without both, `merge-reports` — which itself runs `if: always()` — would only ever see the blob reports of shards that passed.
 
 </Note>
+
+## Artifacts You Want to Keep Must Live Outside `outputDir`
+
+Playwright **empties `outputDir` at the start of every run**. The default is `test-results/`, and the wipe is unconditional: it is not scoped to files this run will overwrite, and it does not care what wrote them. Anything sitting in that directory when a run begins is gone.
+
+This is correct behaviour — a trace directory full of last run's failures would be worse than useless — and it is invisible until you try to keep something.
+
+```bash
+# Run 1 -- writes its report into outputDir
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/report-1.json npx playwright test
+
+# Run 2 -- a DIFFERENT filename, so surely both survive?
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/report-2.json npx playwright test
+
+ls test-results/
+# .last-run.json  report-2.json
+#
+# report-1.json is gone. So is anything else that was in there.
+```
+
+<Warning>
+
+**A unique filename does not rescue an artifact.** The instinct on discovering a clobbered report is to make the name unique — a run counter, a timestamp, a git SHA. It does not help, because nothing is being *overwritten*: the whole directory is emptied before the first test starts. Timestamping produces exactly one file, every time, and hides the mechanism behind a name that looks like it should have worked.
+
+</Warning>
+
+The fix is placement, not naming. Write anything you intend to keep or compare to a **sibling directory outside `outputDir`**:
+
+```bash
+# Reports accumulate -- run N leaves run N-1's report untouched
+PLAYWRIGHT_JSON_OUTPUT_NAME=b4push-reports/report-1.json npx playwright test
+PLAYWRIGHT_JSON_OUTPUT_NAME=b4push-reports/report-2.json npx playwright test
+
+ls b4push-reports/
+# report-1.json  report-2.json
+```
+
+`PLAYWRIGHT_JSON_OUTPUT_NAME` resolves relative to the **config directory**, and the JSON reporter creates missing parent directories itself — no `mkdir -p` step is required. Add the sibling directory to `.gitignore`.
+
+<Note>
+
+**Two near-misses worth naming, because both look like the fix:**
+
+- **`preserveOutput` does not prevent the wipe.** The name reads like exactly this control; it is not. It governs whether *per-test artifact subdirectories* (traces, screenshots, videos) are retained for passing tests — it does not make the start-of-run clean skip your file.
+- **A custom `outputDir` "works" for the wrong reason.** Pointing `outputDir` somewhere else relocates the wipe, and takes every trace, screenshot, and video with it. You get a much larger blast radius in exchange for a problem a sibling directory solves outright.
+
+</Note>
+
+### Why this bites the cross-run workflows this site recommends
+
+The hazard is local-first. In CI it is nearly unobservable — each run gets a fresh runner, so the start-of-run wipe finds an empty directory and the artifact-upload step ships the report regardless. It surfaces the moment two runs share a working tree, which is precisely the shape of the local triage this site prescribes: the [per-test duration diff between two runs](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation-the-sequel-trap-—-cost-relocation-not-cost-removal) and any tooling that decides "did this spec fail in *both* runs?" (see [lane over-subscription](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams)). A tool built on "run twice, compare the two JSON reports" is structurally impossible when both reports are written into `test-results/` — and it fails **silently**: the second run finds one report, concludes there is nothing to compare, and reports success.
+
+<Warning>
+
+**A self-test built on in-memory fixtures will certify a tool this bug has already broken.** In the worked case, a cross-run triage script's `--self-test` constructed its report objects in memory, exercised the parser, and passed 100% — while the on-disk workflow it existed to run could never produce a second report to parse. The green self-test read as end-to-end validation and shipped a tool that could not work.
+
+Test the seam that actually matters — *does the artifact survive a second run?* — not just the parser. A fixture built from your assumptions can only ever confirm them.
+
+</Warning>
+
+(Verified against Playwright 1.58.2 by running it: sentinel files placed in `test-results/` were deleted by the next run; two reports written to a sibling directory coexisted.)
 
 ## Mock Backend Adapter for Frontend-Only E2E
 

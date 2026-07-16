@@ -151,7 +151,7 @@ pnpm test:unit --maxWorkers=4
 
 <Note>
 
-Cap this only in the heavy local gate, not everywhere. Keep interactive `pnpm test:unit` uncapped for fast feedback during development, and leave CI runners alone -- they are typically low-core already and self-capping, so an explicit cap there just adds a needless ceiling.
+Cap this only in the heavy local gate, not everywhere. Keep interactive `pnpm test:unit` uncapped for fast feedback during development, and leave CI runners alone -- they are typically low-core already and self-capping, so an explicit cap there just adds a needless ceiling. And when the cap is fed from an environment variable, validate the value at the boundary — Playwright's analogue, a `workers` value that coerces to `NaN`, [runs zero tests and exits green](./playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green).
 
 </Note>
 
