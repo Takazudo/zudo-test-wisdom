@@ -200,15 +200,19 @@ source scripts/ignored-allowlist.sh   # IGNORED_EXAM_ALLOWLIST -- tests that run
 
 # The tree's ignored set. A raw grep of `#[ignore = "` finds the attribute but
 # not the module path; nextest resolves both. --workspace so every member is
-# listed, not just the default set. Run it on EACH supported platform: a test
-# that is both #[cfg(target_os = "...")] and #[ignore] is not compiled
-# elsewhere, so a Linux-only run would read its valid row and needle as stale.
+# listed, not just the default set. A #[cfg(target_os = "...")] + #[ignore]
+# test only compiles on its own platform, so no single run sees the whole tree:
+# either union every platform's inventory before the diff, or partition the
+# manifest and filterset by platform so each job checks only its own rows.
 # The issue-numbered naming keeps testcase paths unique tree-wide; in a
 # workspace where two suites can share a path, key by binary and pair each
 # needle with binary_id(=...) so the two do not collapse.
 tree_names() {
+  # --run-ignored ignored-only still lists non-ignored testcases as
+  # filter-mismatch entries, so select on .value.ignored -- keys[] alone
+  # would emit every test name, not just the ignored ones.
   cargo nextest list --workspace --run-ignored ignored-only --message-format json \
-    | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
+    | jq -r '."rust-suites"[].testcases | to_entries[] | select(.value.ignored) | .key' | sort -u
 }
 
 # Both the manifest table and the workflow spell each test as an exact-name
