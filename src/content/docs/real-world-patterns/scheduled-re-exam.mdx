@@ -198,10 +198,16 @@ set -euo pipefail
 
 source scripts/ignored-allowlist.sh   # IGNORED_EXAM_ALLOWLIST -- tests that run in no exam lane BY DESIGN (e.g. pending-feature:)
 
-# The tree's ignored set, as fully-qualified names. A raw grep of `#[ignore = "`
-# finds the attribute but not the module path; nextest resolves both.
+# The tree's ignored set. A raw grep of `#[ignore = "` finds the attribute but
+# not the module path; nextest resolves both. --workspace so every member is
+# listed, not just the default set. Run it on EACH supported platform: a test
+# that is both #[cfg(target_os = "...")] and #[ignore] is not compiled
+# elsewhere, so a Linux-only run would read its valid row and needle as stale.
+# The issue-numbered naming keeps testcase paths unique tree-wide; in a
+# workspace where two suites can share a path, key by binary and pair each
+# needle with binary_id(=...) so the two do not collapse.
 tree_names() {
-  cargo nextest list --run-ignored ignored-only --message-format json \
+  cargo nextest list --workspace --run-ignored ignored-only --message-format json \
     | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
 }
 
@@ -211,6 +217,12 @@ needles() { grep -oE 'test\(=[^)]+\)' "$1" | sed -E 's/test\(=(.+)\)/\1/' | sort
 
 TREE="$(tree_names)"
 ALLOW="$(printf '%s\n' "${IGNORED_EXAM_ALLOWLIST[@]}" | sort -u)"
+
+# A stale exemption is as silent a hole as a bare one: every allowlisted name
+# must still name a live ignored test (each entry's mandatory "# reason:" is
+# enforced exactly as in the guard allowlist above).
+STALE="$(comm -13 <(echo "$TREE") <(echo "$ALLOW"))"
+[ -z "$STALE" ] || { echo "::error::allowlist names a test that no longer exists: $STALE"; exit 1; }
 
 # tree <-> manifest: every ignored test has a row, and every row a live test
 # (this half is also what catches a header count of 33 against a tree of 34)
