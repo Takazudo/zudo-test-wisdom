@@ -77,6 +77,10 @@ Playwright `toHaveScreenshot()` with committed baseline PNGs -- the deterministi
 
 One contract suite pointed at local, a preview deploy, and production -- what belongs in each tier, how to reach gated previews, and why a production failure is an incident, not a test run.
 
+### [Negative Assertions vs. Their Own Fixture Data](./negative-assertion-fixtures.mdx)
+
+Why an absence assertion (`assert_contains_none`) can fail on its own fixture when the fixture's payload flows into the scanned output -- the deterministic assertion-design collision, plus the grep-the-fixture-tree and unnatural-marker rules that keep it from recurring.
+
 ## Start from Your Symptom
 
 Not sure which pattern applies? Start from what you are actually seeing:
@@ -92,6 +96,7 @@ Not sure which pattern applies? Start from what you are actually seeing:
 | A broken link, missing page, dead image, or stale sitemap entry in the built site | [Built-Site Integrity Gates](./site-integrity-checks.mdx) |
 | A visual diff regression across a refactor -- nothing catches it until someone eyeballs a screenshot | [Deterministic Visual Regression with Committed Baselines](./visual-regression-baselines.mdx) |
 | It works on your machine but breaks on preview or production | [Environment-Tiered Testing Against Deployed Targets](./environment-tiered-testing.mdx) |
+| An absence assertion fails in CI only, and every positive assertion in the same test passes | [Negative Assertions vs. Their Own Fixture Data](./negative-assertion-fixtures.mdx) |
 
 ## Common Theme
 

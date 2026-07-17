@@ -1,0 +1,91 @@
+---
+title: Negative Assertions vs. Their Own Fixture Data
+description: When a test asserts a marker string is absent from processed output while its own fixture flows into that output, the fixture can trip the assertion -- a deterministic assertion-design collision that first fails in CI, not a flake.
+sidebar_position: 17
+---
+
+## The Fixture Is Part of the Output
+
+A negative string assertion -- "this substring must **not** appear in the output" -- reads like one of the safest checks you can write. It turns into a trap the moment the thing being processed is your own fixture and the fixture's payload flows into the output you are scanning. Then the assertion can fail not because the product regressed, but because the fixture author wrote the forbidden marker into the very text that gets inlined, copied, or emitted. The check fires on the fixture, not on a bug.
+
+This is **not a flake**, and that distinction is the whole reason it earns its own page. It fails the same way every time the lane runs -- identical input, identical output, a deterministic assertion. The [deflaking recipe](./deflaking-recipe.mdx) has nothing to offer here: there is no timing to stabilize and no signal to wait on. Worse, because it fails 100% of the time rather than intermittently, it never *looks* like a flake -- it looks like a product regression. The fix lives in the **design** of the fixture and the assertion, not anywhere near the test's timing.
+
+## A Worked Case: A `?raw` Absence Assertion Ate Its Own Fixture
+
+A build-output acceptance test needed to prove that `?raw` import specifiers were fully resolved -- that no unresolved `?raw` query string survived into the emitted client bundle. The natural way to prove an absence is a negative assertion: scan the bundle body and require the substring `"?raw"` to be gone.
+
+```
+assert_contains_none(body, ["?raw"], "client bundle must not leak an unresolved ?raw specifier")
+```
+
+The fixture feeding this test was a set of raw-payload text files -- content deliberately imported with `?raw` so the pipeline would inline it as a string. Being helpful, the fixture author wrote each payload file to describe *itself*: what it was, where it came from, and which mechanism it exercised. One line read:
+
+```
+sibling workspace ?raw reached from a claimed sub-package host
+```
+
+The pipeline worked perfectly. The `?raw` import was resolved, and the payload text was inlined into the client bundle exactly as designed -- which carried the literal substring `?raw` from the fixture's own prose straight into the bundle body. The absence assertion scanned the bundle, found `?raw` sitting inside its own fixture's descriptive text, and failed. Every *positive* assertion in the same test -- the payload was present, the import resolved, the bundle built -- passed. Only the negative one tripped, and it tripped on the successfully-inlined fixture, not on any defect.
+
+## The Generalized Trap
+
+Strip the specifics and the shape is general:
+
+> Any time a test asserts a marker string is **absent** from processed output while fixture inputs flow **into** that output, the fixture must be **structurally unable** to contain the marker.
+
+It is an easy trap to fall into because it runs against a natural authoring instinct: fixture authors name the mechanism under test *inside the human-readable payload*, so a future reader of the fixture knows what it is for. A `?raw` fixture "wants" to say the words "?raw" in its own text. A test that later forbids that exact string in the output is on a collision course with its own fixture the instant the payload reaches that output.
+
+The collision hides in two of the three places you would look:
+
+- The **positive** assertions pass, so the pipeline looks correct.
+- The **fixture** looks correct -- it is readable and self-documenting, which is exactly what made it dangerous.
+- Only the **negative** assertion fails, and it points at the output, not at the one fixture line that actually caused it.
+
+## Rule 1 -- Grep the Fixture Tree for Every Absence Token Before Shipping
+
+Before shipping any `assert_contains_none`-style assertion, grep the fixture tree for the exact token and confirm it appears only where it legitimately must -- in test code and assertion strings -- and never in payload text that flows into the output:
+
+```bash
+grep -rn '?raw' tests/fixtures/raw-payload/
+```
+
+The result you want is *nothing from the payload files* -- only matches in the test source and the assertion itself. A hit inside a `.txt`, `.md`, or data payload under the fixture directory **is** the bug, caught before CI ever runs the lane. Make it part of the test's own review checklist: a new absence token is not done until its fixture tree has been grepped clean.
+
+<Warning>
+
+The grep has to run against the fixture **payload**, not the whole repo. A repo-wide `grep '?raw'` drowns in legitimate hits -- the import statements, the assertion string, this very doc page -- and trains you to ignore it. Scope it to the directory whose contents actually flow into the scanned output, so any match is a real collision.
+
+</Warning>
+
+## Rule 2 -- Unnatural Markers for Presence, Syntax Tokens for Absence
+
+The deeper fix is to stop using the same vocabulary for two opposite jobs.
+
+- **Positive assertions** -- "this marker **must** appear" -- should key on tokens that cannot occur naturally in prose. An uppercase sentinel like `ZFB_MARKER_RAW_INLINED` will never turn up by accident in a descriptive sentence, a comment, or a neighbouring fixture, so a presence check on it is unambiguous.
+- **Absence assertions** -- "this token must **not** appear" -- should be reserved for **syntax tokens** the output genuinely must not contain (`?raw`, an import specifier, a template placeholder). Then the discipline is the mirror of Rule 1: keep those syntax tokens out of the *prose* of every payload file, so the only route by which one can reach the output is the bug you are hunting.
+
+Put together: describe a fixture with the sentinels its assertions look **for**, never with the syntax tokens its assertions look **against**. A payload that must exercise `?raw` should be *imported* with `?raw` from the test side, not *narrate* the word "?raw" in its body.
+
+```
+ZFB_MARKER_RAW_INLINED payload body, imported via the raw specifier from the test side
+```
+
+The fixture above says the sentinel it is checked *for* and never the syntax token it is checked *against* -- so an inlined payload can satisfy the positive assertion without ever tripping the negative one.
+
+## Why It First Fails in CI -- the Detection Asymmetry
+
+Build-output acceptance lanes are heavy: they build the real bundle and scan the emitted bytes, so they are commonly env-gated or reserved for a heavy [execution tier](../decision-guide/execution-tiers.mdx) rather than run on every local save. Wherever that lane is skipped, this whole class of bug passes -- there is nothing to catch it until the bundle is actually built and scanned.
+
+The consequence is a detection asymmetry: the failure characteristically appears for the first time **in CI**, on first exposure of the gated lane, and it wears the costume of a product regression. "An unresolved `?raw` leaked into the client bundle" reads as a resolver bug, and the natural instinct is to go hunting in the product's resolution pipeline -- which is working perfectly. The wasted CI round is the cheap cost; the expensive one is debugging the wrong subsystem because a fixture-authoring bug disguised itself as a product one.
+
+<Note>
+
+The tell that separates this from a genuine regression: **every positive assertion in the same test passes, and only the absence assertion fails.** A real resolver regression would also break the positive checks that depend on correct resolution. When the pipeline demonstrably worked -- the payload is present, the import resolved, the build succeeded -- but a lone absence assertion is red, suspect the fixture before the product, and run the fixture-tree grep from **Rule 1** first.
+
+</Note>
+
+## The Two Rules Together
+
+1. **Grep the fixture tree for every absence token before shipping the test.** The forbidden string may appear in test code and assertion strings; it must never appear in payload text that flows into the scanned output.
+2. **Split the vocabulary by assertion polarity.** Presence checks key on unnatural sentinels (`ZFB_MARKER_...`) that cannot occur in prose; absence checks are reserved for syntax tokens, which are then kept out of every payload's prose.
+
+Both rules serve one invariant: a fixture must be **structurally incapable** of producing the marker its own test forbids. Get that right and the absence assertion can only ever fail on the defect it was written to catch.
