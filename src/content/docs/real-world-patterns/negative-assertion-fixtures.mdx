@@ -79,7 +79,7 @@ The consequence is a detection asymmetry: the failure characteristically appears
 
 <Note>
 
-The tell that separates this from a genuine regression: **every positive assertion in the same test passes, and only the absence assertion fails.** A real resolver regression would also break the positive checks that depend on correct resolution. When the pipeline demonstrably worked -- the payload is present, the import resolved, the build succeeded -- but a lone absence assertion is red, suspect the fixture before the product, and run the fixture-tree grep from **Rule 1** first.
+A useful first clue, though not proof on its own: **every positive assertion in the same test passes, and only the absence assertion fails.** It stays a clue rather than a verdict because a *partial* resolver regression -- one unresolved specifier among many that did resolve -- can also leave every positive check green while the absence assertion goes red. The clue narrows suspicion toward the fixture; it does not settle it. What settles it is **Rule 1's grep**: find the forbidden token inside a fixture payload and you have proven fixture contamination; find it nowhere in the fixtures and the product really did leak the marker. Run that grep before concluding the pipeline is correct.
 
 </Note>
 
