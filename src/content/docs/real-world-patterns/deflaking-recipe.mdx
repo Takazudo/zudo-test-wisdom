@@ -66,6 +66,8 @@ Every E2E flake has a cause. The seven below cover the overwhelming majority of 
 
 For how to quarantine a native flake mechanically (`#[ignore]` + `cargo test -- --ignored`), see [the Rust/cargo note in the quarantine pipeline](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky).
 
+One CI-first failure shape does **not** belong in this catalog at all: a string-absence assertion tripped by the test's own fixture payload is fully deterministic — it just first *surfaces* in CI and masquerades as a product regression. Before treating such a failure as a flake or a real bug, see [Negative Assertions vs. Their Own Fixture Data](./negative-assertion-fixtures.mdx).
+
 </Note>
 
 ### The impostor: when the "flake" is a real product bug
