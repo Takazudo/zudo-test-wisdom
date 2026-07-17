@@ -178,6 +178,71 @@ GUARD_CI_ALLOWLIST=(
 
 </Tip>
 
+## 兄弟インベントリ契約としての無視テストマニフェストのパリティ
+
+すぐ上の除外は、一見よりも狭いものです。重いレーンがガードマニフェストの外に置かれるのは、重い_ジョブ_ -- ビルド、フルテスト実行、プラットフォームゲート付きのexam -- が部分文字列照合可能なスクリプトステップではないからです。しかし重いレーンには**メンバーシップリスト**、つまりそれが実行するはずのテストの集合もあります。そのリストはジョブではありません -- まさにメタチェックが対象とするために作られた、部分文字列照合可能なインベントリです。これは独自のパリティ契約に値します -- ガードマニフェストの中に折り込む新しい行ではなく、その_兄弟_としての契約です。
+
+罠は、テストを**厳密名**で選ぶスケジュールexamに特有のものです。cargo/nextestプロジェクトでは、T3のexamは無視（ignored）セットを厳密名の`-E`フィルタセット -- `-E 'test(=crate::e2e::foo) + test(=crate::e2e::bar)'` -- を通して実行します。そして厳密名フィルタセットは**許可リスト**です：テストは、その完全修飾名がそこに明記されている場合にのみexamで実行されます。したがって、真新しい重い`#[ignore]`のe2eは、デフォルトでは**どのCIレーンでも実行されません**。T1は`#[ignore]`が付いているのでスキップし、examは誰も名前を追加していないので決して選択しません。テストは宙に浮き、しかもそれを知らせる赤は何も出ません。
+
+これは仮の話ではありません。`dev_sibling_watch_1678_e2e` -- そのエピックウェーブの目玉となる受け入れテスト -- は、正しい分類タグ、無視テストマニフェスト表の正しい行、そして`e2e-heavy`グループへの正しい所属を備えて着地したにもかかわらず、examレーンのフィルタセットからは単に欠けていました。マージされた瞬間から継続的なリグレッション保護は**ゼロ**であり、このギャップが表面化したのは、2人の独立したレビュアーがたまたま各自フィルタセットを手作業で差分したからにすぎません。同じ監査は、マニフェスト自体にも同一の失敗モードを掘り当てました：表のヘッダーは無視テストが33件だと主張していたのに、ツリーには34件あったのです -- 以前のマージで1行が静かに欠落していました。どちらも人間だけが突き合わせるドキュメント/インベントリのサーフェスであり、だからこそどちらもドリフトします。
+
+治療法は、ガードパリティのメカニズムを2つ目のマニフェストに向けることです。スクリプトはツリー内のすべての`#[ignore = "..."]`テストを列挙し、2つのサーフェス -- 無視テストマニフェスト表の行と、スケジュールレーンのフィルタセット内の厳密名ニードル -- に対して**双方向の集合一致**を要求します。双方向であることが肝心です -- 古くなったマニフェストの行や、宙に浮いたフィルタセットのニードルは、新たに行き場を失ったテストとまったく同じ大きさで失敗するので、どちらのサーフェスもどちら向きにも腐ることができません。（ツリー対マニフェストの半分は、33対34のドリフトを捕まえるものでもあります：欠落した行は、対応する行を持たないツリー上のテストとして現れます。）理由付きの許可リストが、_設計上_どのexamレーンでも実行されないテストを免除します -- `pending-feature:`で無視されたテストは、その機能が出荷されるまでゲートを持ちません -- 上のガード許可リストと同じ規律に従います：裸の免除は、変装したドリフトです。
+
+```bash
+#!/usr/bin/env bash
+# scripts/ignored-manifest-parity.sh
+# The #[ignore]d tests in the tree, the manifest table's rows, and the exam's
+# exact-name filterset must name the SAME set. Equality is bidirectional -- a
+# stale row or a dangling needle fails just like a newly-homeless test does.
+set -euo pipefail
+
+source scripts/ignored-allowlist.sh   # IGNORED_EXAM_ALLOWLIST -- tests that run in no exam lane BY DESIGN (e.g. pending-feature:)
+
+# The tree's ignored set. A raw grep of `#[ignore = "` finds the attribute but
+# not the module path; nextest resolves both. --workspace so every member is
+# listed, not just the default set. Run it on EACH supported platform: a test
+# that is both #[cfg(target_os = "...")] and #[ignore] is not compiled
+# elsewhere, so a Linux-only run would read its valid row and needle as stale.
+# The issue-numbered naming keeps testcase paths unique tree-wide; in a
+# workspace where two suites can share a path, key by binary and pair each
+# needle with binary_id(=...) so the two do not collapse.
+tree_names() {
+  cargo nextest list --workspace --run-ignored ignored-only --message-format json \
+    | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
+}
+
+# Both the manifest table and the workflow spell each test as an exact-name
+# needle -- test(=fully::qualified::name) -- so one extractor serves both.
+needles() { grep -oE 'test\(=[^)]+\)' "$1" | sed -E 's/test\(=(.+)\)/\1/' | sort -u; }
+
+TREE="$(tree_names)"
+ALLOW="$(printf '%s\n' "${IGNORED_EXAM_ALLOWLIST[@]}" | sort -u)"
+
+# A stale exemption is as silent a hole as a bare one: every allowlisted name
+# must still name a live ignored test (each entry's mandatory "# reason:" is
+# enforced exactly as in the guard allowlist above).
+STALE="$(comm -13 <(echo "$TREE") <(echo "$ALLOW"))"
+[ -z "$STALE" ] || { echo "::error::allowlist names a test that no longer exists: $STALE"; exit 1; }
+
+# tree <-> manifest: every ignored test has a row, and every row a live test
+# (this half is also what catches a header count of 33 against a tree of 34)
+diff <(echo "$TREE") <(needles docs/ignored-test-manifest.md) \
+  || { echo "::error::ignored-test tree and manifest table disagree (diff above)"; exit 1; }
+
+# (tree - allowlist) <-> filterset: every non-exempt ignored test is selected,
+# and no needle points at a test that no longer exists
+diff <(comm -23 <(echo "$TREE") <(echo "$ALLOW")) <(needles .github/workflows/exam.yml) \
+  || { echo "::error::exam filterset out of sync with the ignored-test tree (diff above)"; exit 1; }
+```
+
+これを**両方の**サーフェスに配線します -- ガードパリティチェックとまったく同じように：ローカルのプッシュ前フィードバックのための`b4push`ステップと、requiredなCIジョブ -- マージをブロックする強制サーフェス -- です。そうすれば、2人のレビュアーが目でフィルタセットを差分するのを待つのではなく、新しい`#[ignore]`テストが行き場を失った瞬間に失敗します。フィルタは厳密名のままに保ちます -- nextestの厳密名の形は`test(=fully::qualified::name)`であり、部分文字列フィルタ（`test(foo)`）はレーンを静かに広げてしまい、「名前を明記した1テストにつき1つの許可リスト判断」という契約を無効にします。
+
+<Tip>
+
+これはガードマニフェストの兄弟として保ち、その拡張にはしないでください。ガードマニフェストは「このライトウェイトなゲートはb4pushとCIの両方に配線されているか？」に答えます。無視テストマニフェストは「ツリーが定義するすべての重いテストは、実際にどこかのレーンで実行されているか？」に答えます。同じメタチェックの形、同じ理由付き許可リストの規律、しかし2つの異なるインベントリ -- ひとつに折り込めば、片方の契約のスコープ記述がもう片方をカバーするために歪められてしまいます。
+
+</Tip>
+
 ## スケジュールCI再試験ワークフロー
 
 <Note>

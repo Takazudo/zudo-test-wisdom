@@ -178,6 +178,71 @@ This pattern is purely additive to the `b4push`/`exam` split above: it does not 
 
 </Tip>
 
+## Ignored-Test-Manifest Parity: A Sibling Inventory Contract
+
+The exclusion just above is narrower than it first looks. Heavy lanes stay out of the guard manifest because the heavy _jobs_ -- the build, the full test run, the platform-gated exam -- are not substring-matchable script steps. But a heavy lane also has a **membership list**: the set of tests it is supposed to run. That list is not a job; it is exactly the substring-matchable inventory the meta-check was built for. It earns its own parity contract -- a _sibling_ of the guard manifest, not a new row folded inside it.
+
+The trap is specific to a scheduled exam that selects its tests by **exact name**. In a cargo/nextest project the T3 exam runs the ignored set through an exact-name `-E` filterset -- `-E 'test(=crate::e2e::foo) + test(=crate::e2e::bar)'` -- and an exact-name filterset is an **allowlist**: a test runs in the exam only if its fully-qualified name is spelled out there. So a brand-new heavy `#[ignore]` e2e defaults to running in **no CI lane at all**. T1 skips it because it is `#[ignore]`d; the exam never selects it because nobody added its name. The test is homeless, and nothing goes red to say so.
+
+This is not hypothetical. `dev_sibling_watch_1678_e2e` -- the headline acceptance test of its epic wave -- landed with a correct taxonomy tag, a correct row in the ignored-test manifest table, and correct `e2e-heavy` group membership, yet was simply absent from the exam-lane filterset. It had **zero** ongoing regression protection from the moment it merged, and the gap surfaced only because two independent reviewers each happened to diff the filterset by hand. The same audit turned up the identical failure mode on the manifest itself: the table's header claimed 33 ignored tests while the tree held 34 -- a row silently dropped in an earlier merge. Both are doc/inventory surfaces that only a human ever reconciles, so both drift.
+
+The cure is the guard-parity mechanism pointed at a second manifest. A script enumerates every `#[ignore = "..."]` test in the tree and requires **bidirectional set equality** against two surfaces: the rows of the ignored-test manifest table, and the exact-name needles in the scheduled lane's filterset. Bidirectional is the point -- a stale manifest row or a dangling filterset needle fails the check exactly as loudly as a newly-homeless test, so neither surface can rot in either direction. (The tree-versus-manifest half is also what catches the 33-vs-34 drift: a dropped row shows up as a tree test with no matching row.) An allowlist-with-reason exempts the tests that run in no exam lane _by design_ -- a `pending-feature:`-ignored test has no gate until its feature ships -- following the same discipline as the guard allowlist above: a bare exemption is drift wearing a disguise.
+
+```bash
+#!/usr/bin/env bash
+# scripts/ignored-manifest-parity.sh
+# The #[ignore]d tests in the tree, the manifest table's rows, and the exam's
+# exact-name filterset must name the SAME set. Equality is bidirectional -- a
+# stale row or a dangling needle fails just like a newly-homeless test does.
+set -euo pipefail
+
+source scripts/ignored-allowlist.sh   # IGNORED_EXAM_ALLOWLIST -- tests that run in no exam lane BY DESIGN (e.g. pending-feature:)
+
+# The tree's ignored set. A raw grep of `#[ignore = "` finds the attribute but
+# not the module path; nextest resolves both. --workspace so every member is
+# listed, not just the default set. Run it on EACH supported platform: a test
+# that is both #[cfg(target_os = "...")] and #[ignore] is not compiled
+# elsewhere, so a Linux-only run would read its valid row and needle as stale.
+# The issue-numbered naming keeps testcase paths unique tree-wide; in a
+# workspace where two suites can share a path, key by binary and pair each
+# needle with binary_id(=...) so the two do not collapse.
+tree_names() {
+  cargo nextest list --workspace --run-ignored ignored-only --message-format json \
+    | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
+}
+
+# Both the manifest table and the workflow spell each test as an exact-name
+# needle -- test(=fully::qualified::name) -- so one extractor serves both.
+needles() { grep -oE 'test\(=[^)]+\)' "$1" | sed -E 's/test\(=(.+)\)/\1/' | sort -u; }
+
+TREE="$(tree_names)"
+ALLOW="$(printf '%s\n' "${IGNORED_EXAM_ALLOWLIST[@]}" | sort -u)"
+
+# A stale exemption is as silent a hole as a bare one: every allowlisted name
+# must still name a live ignored test (each entry's mandatory "# reason:" is
+# enforced exactly as in the guard allowlist above).
+STALE="$(comm -13 <(echo "$TREE") <(echo "$ALLOW"))"
+[ -z "$STALE" ] || { echo "::error::allowlist names a test that no longer exists: $STALE"; exit 1; }
+
+# tree <-> manifest: every ignored test has a row, and every row a live test
+# (this half is also what catches a header count of 33 against a tree of 34)
+diff <(echo "$TREE") <(needles docs/ignored-test-manifest.md) \
+  || { echo "::error::ignored-test tree and manifest table disagree (diff above)"; exit 1; }
+
+# (tree - allowlist) <-> filterset: every non-exempt ignored test is selected,
+# and no needle points at a test that no longer exists
+diff <(comm -23 <(echo "$TREE") <(echo "$ALLOW")) <(needles .github/workflows/exam.yml) \
+  || { echo "::error::exam filterset out of sync with the ignored-test tree (diff above)"; exit 1; }
+```
+
+Wire it into **both** surfaces, exactly as the guard-parity check is: a `b4push` step for local pre-push feedback, and a required CI job -- the enforcing surface that blocks the merge. It then fails the moment a new `#[ignore]` test is homeless, instead of waiting for two reviewers to diff the filterset by eye. Keep the filter exact -- nextest's exact-name form is `test(=fully::qualified::name)`; a substring filter (`test(foo)`) would silently widen the lane and defeat the "one named test, one allowlist decision" contract.
+
+<Tip>
+
+Keep this a sibling of the guard manifest, not an extension of it. The guard manifest answers "is this lightweight gate wired into both b4push and CI?"; the ignored-test manifest answers "does every heavy test the tree defines actually run in some lane?" Same meta-check shape, same allowlist-with-reason discipline, two different inventories -- folding them together would force one contract's scoping statement to bend to cover the other.
+
+</Tip>
+
 ## The Scheduled CI Re-exam Workflow
 
 <Note>
