@@ -5,12 +5,12 @@ Takazudo's frontend testing strategy guide, built with zudo-doc (zfb stack, MDX,
 ## Commands
 
 ```bash
-pnpm dev              # Start zfb dev server (port 4321)
+pnpm dev              # Start zfb dev server (4321) + doc-history server (4322)
 pnpm build            # Build static site via zfb build
 pnpm preview          # Preview built site
 pnpm check            # zfb type checking
 pnpm format:md        # Format MDX files
-pnpm b4push           # Pre-push validation (format + typecheck + build)
+pnpm b4push           # Pre-push validation (format + drift + pins + typecheck + build + html + links)
 pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 ```
 
@@ -26,7 +26,7 @@ pnpm setup:doc-skill  # Generate test-wisdom skill + symlink all skills
 
 ## Content Categories
 
-Top-level directories under `src/content/docs/`. Directories with header nav entries are mapped via `categoryMatch` in `src/config/settings.ts`:
+Top-level directories under `src/content/docs/`. Directories with header nav entries are mapped via `categoryMatch` in the `headerNav` list in `zfb.config.ts`:
 
 - `overview/` - Introduction and purpose of the testing guide
 - `testing-levels/` - The 6 testing levels from unit to AI-based verification
@@ -45,7 +45,7 @@ All documentation files use `.mdx` format with YAML frontmatter.
 
 ### Frontmatter Fields
 
-Schema defined in `src/content.config.ts`:
+Schema is the zudo-doc package default (shipped by `@takazudo/zudo-doc`; override via `buildDocsSchema` in `zfb.config.ts` if ever needed):
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -104,23 +104,26 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all ski
 
 ## Project Layout
 
+zudo-doc 4.x is a thin host shell — all wiring (components, config types,
+utils, routes, chrome) lives inside `@takazudo/zudo-doc`, driven by the single
+`zudoDoc()` config.
+
 ```
-pages/          # Host-app routing layer (zfb entry points)
+pages/                       # Thin route stubs (package-owned routes injected at build)
+  index.tsx                  # Home: re-exports @takazudo/zudo-doc/routes/index
+  docs/[[...slug]].tsx       # EN doc route stub
+  [locale]/docs/[[...slug]].tsx  # JA doc route stub
 src/
-  components/   # Shared UI components
-  config/       # settings.ts — site-wide config
-  content/      # MDX doc pages (docs/ + docs-ja/)
-  utils/        # Shared utilities
-plugins/        # zfb integration plugins (.mjs)
-zfb.config.ts   # Build config (framework, collections, plugins, adapter)
+  content/                   # MDX doc pages (docs/ + docs-ja/)
+  styles/global.css          # Package CSS imports + host brand overrides
+zfb.config.ts                # The single config file — zudoDoc({ ... })
 ```
 
 ## Site Config
 
 - Base path: `/` (root — no subpath prefix)
 - Live URL: `https://zudo-test-wisdom.takazudomodular.com/`
-- Settings: `src/config/settings.ts`
-- Build config: `zfb.config.ts`
+- Settings + build config: `zfb.config.ts` (the single `zudoDoc()` config)
 
 ## CI/CD
 
