@@ -102,7 +102,7 @@ So a bigger or more exotic runner needs an **explicitly named reason**, not a vi
 
 For a **parallelizable** workload, going bigger buys you speed, not savings.
 
-Playwright workers scale with cores, and — from the pricing section above — price scales linearly with cores. Those two linear relationships cancel: doubling from four to eight vCPU roughly halves the wall-clock while total cost stays about the same, because you pay twice the per-minute rate for about half as many minutes.
+Playwright workers scale with cores **by default**, and — from the pricing section above — price scales linearly with cores. Those two linear relationships cancel: doubling from four to eight vCPU roughly halves the wall-clock while total cost stays about the same, because you pay twice the per-minute rate for about half as many minutes. The cancellation rests entirely on that first leg — it holds only while the job's *effective* worker count actually scales with the added cores.
 
 ```text
 4vcpu:  ~10 min  ×  ~$0.008/min  ≈  $0.08
@@ -113,7 +113,7 @@ So the decision is purely about feedback-loop speed. Size a parallelizable job *
 
 <Tip>
 
-The cancellation only holds while the work actually parallelizes. A job that pins one core — a single-threaded build step, a serial migration — gets **no** wall-clock benefit from more vCPU, so for that job a bigger runner is pure added cost. Rule 1 is about parallelizable workloads specifically.
+The cancellation breaks in two ways, and only one of them looks serial. Work that is *inherently* serial — a single-threaded build step, a serial migration — gets **no** wall-clock benefit from more vCPU; for that job a bigger runner is pure added cost. And work that is inherently parallel can be **artificially capped**: an explicit `workers: N` in `playwright.config.ts` (or a fixed numeric `--workers=N` on the CLI — a percentage like `--workers=50%` still scales with cores) pins concurrency, which removes the "workers scale with cores" leg of the cancellation. A capped job is not serial — a bigger runner can still relieve CPU starvation at the pinned count, which is Rule 3's territory and has Rule 3's ceiling — but it loses the automatic scaling this rule promises: past the point of no contention, cost keeps climbing and wall-clock stops moving. "It's Playwright" is not proof the job scales; check the config for a pinned `workers` value before sizing up.
 
 </Tip>
 
@@ -142,6 +142,8 @@ Sharding caps how many test files a single worker process loads before the run r
 Rule 2 says a bigger runner does not fix memory problems — but it genuinely *does* fix a different problem that looks almost identical from the outside.
 
 **CPU starvation:** on a two-vCPU runner, e2e workers and the dev server contend for the same two cores. Under contention, specs miss their timing budgets and fail as timeouts — which reads, on the surface, exactly like a flaky or under-resourced test. Here, moving to four vCPU **is** the fix: giving the dev server and the test workers their own cores removes the contention. (Evidence: zudo-pattern-gen #3321 — spec timeouts under two-core contention, resolved by four vCPU.) If the resize leads you to tune worker counts through an environment variable, validate the value at the boundary — a Playwright `workers` override that coerces to `NaN` [runs zero tests and exits green](../real-world-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green), a false green worse than the timeouts you started with.
+
+This fix has a ceiling that Rule 1's cancellation does not. The mechanism is relieving **contention at a fixed worker count** — not adding parallelism — and it saturates: roughly once the pinned workers and the dev server each have a core of their own, further vCPU buys nothing. With `workers: 2` pinned, a 4→8 vCPU bump hands two workers and one dev server more idle cores than they can use — wall-clock ~unchanged, bill doubled, which is Rule 1's pinned-workers trap entered from the other side. Treat the core count as a heuristic, not a formula (browsers spawn subprocesses, and the OS takes its share); the real stopping condition is that the contention timeouts are gone and one more size step no longer moves wall-clock. Size up to that point, then stop.
 
 So two failures that both present as "tests dying under load" have **opposite** remedies:
 
@@ -183,13 +185,13 @@ Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger de
 |---|---|---|
 | Picking where CI runs at all | One provider fits every repo | Public → free standard GitHub-hosted; private → Blacksmith on marginal-minute cost (provider choice comes first) |
 | Public repo's standard runners feel slow | Move to a paid provider or a larger runner | Stay on the free standard shape unless you are deliberately buying speed — larger runners are charged even on public repos |
-| PR gate feels slow, work parallelizes | Leave it; cores cost money | Size **up** for latency (Rule 1) — cost is ~flat, but only with a named reason (the default is the smallest shape) |
+| PR gate feels slow, work parallelizes | Leave it; cores cost money | Size **up** for latency (Rule 1) — cost is ~flat while effective concurrency scales with cores (check for a pinned `workers` first), and only with a named reason (the default is the smallest shape) |
 | vitest/jsdom heap OOM | Bump 2→4vCPU for more RAM | `vitest --shard` (Rule 2) — size does not fix it |
-| e2e specs time out under load | Assume flaky, add retries | Diagnose first: CPU starvation → 2→4vCPU (Rule 3); connection starvation → fix the app/serving layer, resizing won't help |
+| e2e specs time out under load | Assume flaky, add retries | Diagnose first: CPU starvation → 2→4vCPU, only until contention clears (Rule 3); connection starvation → fix the app/serving layer, resizing won't help |
 | Monthly CI bill too high | Downsize the runners | Gate lanes by base branch + schedule (Rule 4) |
 | Need real GPU / macOS coverage | Run it per-PR on a Mac runner | Scheduled T3 macOS lane (~$110/mo, not ~$1,400/mo) |
 
-The through-line: **a runner label is a two-token edit, but choosing it well means naming the binding constraint first.** Latency, memory, CPU contention, and total cost are four different problems with four different levers, and a bigger runner is the correct answer to exactly one of them.
+The through-line: **a runner label is a two-token edit, but choosing it well means naming the binding constraint first.** Latency, memory, CPU contention, and total cost are four different problems with four different levers, and a bigger runner is the correct answer to exactly two of them — latency (Rule 1) and CPU starvation (Rule 3) — with both answers bounded by the same config knob: the effective worker count.
 
 ## References
 
