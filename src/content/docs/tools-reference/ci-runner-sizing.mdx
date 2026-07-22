@@ -113,7 +113,7 @@ So the decision is purely about feedback-loop speed. Size a parallelizable job *
 
 <Tip>
 
-The cancellation breaks in two ways, and only one of them looks serial. Work that is *inherently* serial — a single-threaded build step, a serial migration — gets **no** wall-clock benefit from more vCPU. But work that is inherently parallel can be **artificially capped**: an explicit `workers: N` in `playwright.config.ts` (or a `--workers` CLI flag) pins concurrency, so the "workers scale with cores" leg of the cancellation disappears — cost still scales linearly while wall-clock does not move. "It's Playwright" is not proof the job parallelizes; check the config for a pinned `workers` value before sizing up. In both cases a bigger runner is pure added cost.
+The cancellation breaks in two ways, and only one of them looks serial. Work that is *inherently* serial — a single-threaded build step, a serial migration — gets **no** wall-clock benefit from more vCPU; for that job a bigger runner is pure added cost. And work that is inherently parallel can be **artificially capped**: an explicit `workers: N` in `playwright.config.ts` (or a fixed numeric `--workers=N` on the CLI — a percentage like `--workers=50%` still scales with cores) pins concurrency, which removes the "workers scale with cores" leg of the cancellation. A capped job is not serial — a bigger runner can still relieve CPU starvation at the pinned count, which is Rule 3's territory and has Rule 3's ceiling — but it loses the automatic scaling this rule promises: past the point of no contention, cost keeps climbing and wall-clock stops moving. "It's Playwright" is not proof the job scales; check the config for a pinned `workers` value before sizing up.
 
 </Tip>
 
