@@ -177,10 +177,14 @@ function parseLocales(source) {
   }
   if (end === -1) return [];
   const block = source.slice(open, end);
-  return [...block.matchAll(/(\w+)\s*:\s*\{[^}]*?\bdir\s*:\s*["']([^"']+)["']/g)].map((m) => ({
-    locale: m[1],
-    dir: m[2],
-  }));
+  // Key may be bare (`ja:`) or quoted, and BCP-47 tags contain hyphens
+  // (`"pt-BR"`, `zh-Hant`). A bare-\w+ pattern skipped those locales entirely,
+  // so a localized index with category_no_page would never be inspected and CI
+  // would pass on a 404ing localized nav route — the same false-green class as
+  // the bugs above.
+  return [
+    ...block.matchAll(/["']?([\w-]+)["']?\s*:\s*\{[^}]*?\bdir\s*:\s*["']([^"']+)["']/g),
+  ].map((m) => ({ locale: m[1], dir: m[2] }));
 }
 
 const failures = [];
