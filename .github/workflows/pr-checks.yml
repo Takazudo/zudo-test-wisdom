@@ -3,12 +3,13 @@
 # Triggered on PRs targeting `main`. The pipeline:
 #   1. Template drift check (needs pnpm install — create-zudo-doc devDep)
 #   2. Pin parity check (pure-Node, reads package.json only)
-#   3. Format check (pnpm format:md:check — pnpm dlx, no install needed)
-#   4. Type check (pnpm check) + wrangler pin check
-#   5. Build the zfb docs site (full clone) + link check
-#   6. HTML validate
-#   7. Build doc history JSONs
-#   8. Deploy preview (wrangler versions upload --preview-alias) + post PR comment
+#   3. Category metadata check (pure-Node, reads src/ + zfb.config.ts)
+#   4. Format check (pnpm format:md:check — pnpm dlx, no install needed)
+#   5. Type check (pnpm check) + wrangler pin check
+#   6. Build the zfb docs site (full clone) + link check
+#   7. HTML validate
+#   8. Build doc history JSONs
+#   9. Deploy preview (wrangler versions upload --preview-alias) + post PR comment
 #
 # No e2e job.
 #
@@ -82,7 +83,27 @@ jobs:
         run: node scripts/check-pin-parity.mjs
 
   # ---------------------------------------------------------------------------
-  # Job 0.6: Format check
+  # Job 0.6: Category metadata check
+  # ---------------------------------------------------------------------------
+  # Pure-Node script — reads src/ + zfb.config.ts only, no pnpm install needed.
+  # Catches silently-dropped category metadata: leftover _category_.json
+  # sidecars (ignored by zudo-doc under zfb) and headerNav entries targeting a
+  # category_no_page page — a site-wide 404 that check:links --strict-broken
+  # provably does not catch.
+  check-category-meta:
+    name: Category Metadata Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Check category metadata
+        run: node scripts/check-category-meta.mjs
+
+  # ---------------------------------------------------------------------------
+  # Job 0.7: Format check
   # ---------------------------------------------------------------------------
   # Runs `pnpm dlx @takazudo/mdx-formatter --check ...` — fetches the
   # formatter on the fly, so no pnpm install is needed.  Only pnpm + node
