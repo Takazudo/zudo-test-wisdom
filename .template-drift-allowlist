@@ -6,11 +6,17 @@
 # Format: one repo-relative path per line (no leading slash).
 # Blank lines and `#` comments are ignored.
 #
-# Reconciled for the zudo-doc 4.x baseline (single-entry `zudoDoc()` config;
+# Reconciled for the zudo-doc 4.4.x baseline (single-entry `zudoDoc()` config;
 # the ejected pages/lib + src/{config,components,utils,types,integrations}
 # shells are gone — all wiring now lives inside @takazudo/zudo-doc). Only three
 # template files diverge from the pinned baseline; everything else is either
 # byte-identical to the template or host-owned (not template-tracked).
+#
+# The former `pages/index.tsx` entry was dropped at the 4.4.13 bump: zudo-doc
+# 4.4.x added the `home.wide` config toggle requested in zudo-doc#2959, so the
+# host reconstruction (and its `pages/[locale]/index.tsx` sibling) was deleted
+# in favour of `home: { wide: true }` in zfb.config.ts and the package-owned
+# routes, which also pass a `tags` prop the reconstruction had gone stale on.
 
 # ── docHistory-patched route stubs ────────────────────────────────────────
 # create-zudo-doc patches the base + i18n doc-route stubs when the docHistory
@@ -29,10 +35,3 @@ pages/[locale]/docs/[[...slug]].tsx
 # Everything else (design tokens, base rules, feature CSS) ships from
 # @takazudo/zudo-doc via theme.css / content.css / features.css.
 src/styles/global.css
-
-# ── Wide home page override (css-wisdom PR #182 parity) ──────────────────────
-# pages/index.tsx is reconstructed (no longer the locked 1-line re-export of
-# @takazudo/zudo-doc/routes/index) to render HomePageView with `wide`, matching
-# the zudo-doc showcase. zudo-doc 4.2.1 has no config toggle for the wide home
-# grid; upstream request: https://github.com/zudolab/zudo-doc/issues/2959
-pages/index.tsx
