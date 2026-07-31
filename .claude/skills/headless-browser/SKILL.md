@@ -255,7 +255,45 @@ Playwright CLI creates a `.playwright-cli/` directory at the current working dir
 - The `--raw` flag strips metadata, outputting only the result value
 - Element refs (e3, e15, etc.) come from `snapshot` output -- use them in click/fill/select
 - For **color scheme testing** (light/dark), use Tier 1's headless-check.js which supports Playwright's `colorScheme` context option. Playwright CLI does not have a `--color-scheme` flag
-- If browsers are missing on a fresh machine, run: `npx playwright install chromium`
+- Missing browsers self-heal — see "Dependencies self-heal" below. You do not need to run an install command first, and you should not report a missing install back to the user as a blocker
+
+---
+
+## Dependencies self-heal — never report "Playwright is not installed"
+
+This skill bundles its own Playwright (`package.json` in the skill directory) and
+**installs it on demand**. It is designed to run standalone — symlinked into
+`~/.claude/skills/` on its own, or copied into another project — so it never assumes
+a repo checkout, a setup script, or a populated `node_modules`.
+
+Both entry points recover by themselves on a fresh machine:
+
+- `headless-check.js` imports Playwright *dynamically*; on `ERR_MODULE_NOT_FOUND` it
+  runs `scripts/ensure-deps.sh` and retries. (A static top-level import would fail at
+  module-load, before any recovery code could run — do not convert it back.)
+- `pw-cli.sh` calls `scripts/ensure-deps.sh chromium` when it finds no usable Chromium,
+  then re-scans the caches.
+
+**Agent rule: do not stop and tell the user to run an install command.** A missing
+module or browser binary is a setup gap, not a decision that needs their input. Let the
+self-heal run — first use on a fresh machine takes a minute or two, then it is instant.
+Only surface a problem if `ensure-deps.sh` itself fails (it prints why on stderr).
+
+### `scripts/ensure-deps.sh`
+
+Idempotent bootstrap; safe to run at any time, exits in milliseconds when satisfied.
+
+```bash
+bash scripts/ensure-deps.sh                    # playwright + chromium-headless-shell
+bash scripts/ensure-deps.sh chromium           # a specific browser
+bash scripts/ensure-deps.sh chromium chromium-headless-shell
+```
+
+It drives the browser download through **this package's own** `node_modules/playwright/cli.js`,
+never a bare `npx playwright install`. Each Playwright version pins its own browser
+revisions, so `npx` (which fetches `@latest`) downloads a revision this module will never
+look for — the launch then fails with `Executable doesn't exist` despite an install that
+reported success. If you touch the install path, preserve that property.
 
 ---
 

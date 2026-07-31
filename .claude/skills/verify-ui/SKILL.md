@@ -104,6 +104,33 @@ If computed styles look correct but the user's concern might be visual (layout, 
 
 **NEVER say "looks correct" without stating what specific thing you checked and what you observed.**
 
+## Playwright self-heals — never report "Playwright is not installed"
+
+`verify-styles.mjs` resolves Playwright in this order, and **installs it on demand** if
+none of them hit:
+
+1. A `playwright-core` in the target project's `node_modules/.pnpm` whose pinned
+   `chromium-headless-shell` revision is actually cached
+2. The sibling `headless-browser` skill's bundled install
+3. This skill's own `node_modules/playwright` (present when used standalone)
+4. Any project `playwright-core`, then a global `playwright-core` / `playwright`
+
+If all miss, it installs into the sibling `headless-browser` skill when that exists, and
+otherwise into **its own directory** — so the skill works symlinked into
+`~/.claude/skills/` on its own, with no sibling and no repo checkout. It then retries
+once. Separately, if a module resolves but its browser binary is not cached, the launch
+error is caught and the browser installed before one retry.
+
+**Agent rule: do not stop and tell the user to run `npx playwright install`.** A missing
+module or browser is a setup gap, not a decision. Let the self-heal run — first use on a
+fresh machine takes a minute or two, then it is instant. Only surface a problem if the
+auto-install itself fails (it prints why on stderr).
+
+The browser download is always driven by the **resolved** package's own `cli.js`, never a
+bare `npx playwright install`: each Playwright version pins its own browser revisions, so
+`npx` (which fetches `@latest`) downloads a revision the resolved module will never look
+for, and the retry fails identically. Preserve that if you touch the install path.
+
 ## Limited-env browser fallback (web/WSL)
 
 `verify-styles.mjs` includes a browser-resolver that falls back to a pre-installed Chromium when the default Playwright cache (`~/Library/Caches/ms-playwright/` on Mac, `~/.cache/ms-playwright/` on Linux/WSL) is absent — e.g. on Claude Code web, where the browser-download CDN is blocked. Resolution order: default cache (Mac/local, unchanged) → `PLAYWRIGHT_EXECUTABLE_PATH` → newest `/opt/pw-browsers/*/chrome-linux/chrome`. On **Linux (WSL, native, web container)** the resolver passes `--no-sandbox --disable-gpu --disable-dev-shm-usage` on **every** branch — including the default cache — so a browser sitting in `~/.cache/ms-playwright/` launches without the "No usable sandbox!" error. On Mac/`darwin` no flags are added and the default-cache branch returns `{}` (unchanged). In-container, bind the dev server to `127.0.0.1` (`*.localhost` does not resolve there). When you cannot serve locally at all, verify against the PR preview deploy — see `/verify-ui-ai`'s "Verify against the PR preview deploy".

@@ -20,11 +20,33 @@
  *   echo '{"url":"https://example.com"}' | node scripts/headless-check.js
  */
 
-import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import { execFileSync } from 'child_process';
+
+// Playwright is imported DYNAMICALLY, not with a static top-level import: this
+// skill runs standalone (symlinked into ~/.claude/skills/ without its repo), so
+// node_modules may not be populated yet. A static import fails at module-load
+// with ERR_MODULE_NOT_FOUND before any recovery code can run. Resolving it here
+// lets a first-run miss self-heal via ensure-deps.sh instead of reporting
+// "Playwright is not installed" back to the caller.
+async function loadChromium() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  try {
+    return (await import('playwright')).chromium;
+  } catch (err) {
+    if (err?.code !== 'ERR_MODULE_NOT_FOUND') throw err;
+    execFileSync('bash', [path.join(here, 'ensure-deps.sh')], {
+      stdio: 'ignore',
+      timeout: 10 * 60_000,
+    });
+    return (await import(path.join(here, '..', 'node_modules', 'playwright', 'index.mjs')))
+      .chromium;
+  }
+}
+const chromium = await loadChromium();
 // Dynamic import to handle symlinked skill directories — relative paths
 // resolve against the symlink target, not $HOME/.claude/
 const { getLogDir } = await import(

@@ -283,13 +283,65 @@ JAEOF
   echo "  [$target] Global symlink: $global_skills_dir/$SKILL_NAME"
 }
 
+# Skills that live in git (not generated). CLAUDE.md documents this script as
+# handling "the generated doc-lookup skill and the tracked skills in one step",
+# so they are symlinked here rather than by hand.
+TRACKED_SKILLS=(verify-ui verify-ui-ai headless-browser)
+
+link_tracked_skills() {
+  local target="$1"
+  local global_skills_dir="$HOME/.$target/skills"
+  mkdir -p "$global_skills_dir"
+  for skill in "${TRACKED_SKILLS[@]}"; do
+    local src="$ROOT_DIR/.claude/skills/$skill"
+    [ -d "$src" ] || continue
+    ensure_symlink "$global_skills_dir/$skill" "$src"
+    echo "  [$target] Tracked skill: $global_skills_dir/$skill -> $src"
+  done
+}
+
+# headless-browser bundles its own Playwright (package.json). verify-ui falls
+# back to it when the target project has no usable playwright-core, so a missing
+# bundle is the single most common cause of "no working Playwright installation
+# found" on a fresh machine. Installing it was previously a manual step in
+# CLAUDE.md that is trivially forgotten — do it here instead. Degrades to a
+# warning: the doc-skill setup must still succeed offline.
+ensure_headless_browser_deps() {
+  local skill_dir="$ROOT_DIR/.claude/skills/headless-browser"
+  [ -f "$skill_dir/package.json" ] || return 0
+  if [ -d "$skill_dir/node_modules/playwright" ]; then
+    echo "  [deps] headless-browser Playwright already installed"
+    return 0
+  fi
+
+  echo "  [deps] Installing headless-browser Playwright (bundled fallback) …"
+  if ! (cd "$skill_dir" && npm install --silent --no-audit --no-fund >/dev/null 2>&1); then
+    echo "  [deps] WARNING: npm install failed in $skill_dir — /verify-ui will fall back to the project's own Playwright." >&2
+    return 0
+  fi
+
+  # Browser binaries must be installed by THIS package's own CLI: each
+  # Playwright version pins its own chromium-headless-shell revision, so a bare
+  # `npx playwright install` (which fetches @latest) downloads a revision the
+  # bundled module will never look for.
+  local cli="$skill_dir/node_modules/playwright/cli.js"
+  if [ -f "$cli" ] && node "$cli" install chromium-headless-shell >/dev/null 2>&1; then
+    echo "  [deps] Playwright + chromium-headless-shell ready"
+  else
+    echo "  [deps] WARNING: browser download failed — /verify-ui will retry it on first run." >&2
+  fi
+}
+
 read -r -a TARGETS <<< "$(resolve_targets)"
 echo "Target: $TARGET_MODE -> ${TARGETS[*]}"
 echo ""
 
 for target in "${TARGETS[@]}"; do
   generate_skill "$target"
+  link_tracked_skills "$target"
 done
+
+ensure_headless_browser_deps
 
 echo ""
 echo "Done! Skill '$SKILL_NAME' is ready."

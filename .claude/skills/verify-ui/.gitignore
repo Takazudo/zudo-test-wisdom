@@ -1,0 +1,6 @@
+# verify-styles.mjs installs Playwright here when this skill is used STANDALONE
+# (no sibling headless-browser skill to host it). Those artifacts are machine
+# state, not source — without this, a self-heal run leaves the repo dirty.
+node_modules/
+package.json
+package-lock.json
