@@ -92,9 +92,15 @@ This repo contains test-related Claude Code skills under `.claude/skills/`:
 
 - `test-wisdom/` - Doc-lookup skill (**generated** by `pnpm setup:doc-skill`, gitignored -- do NOT track or edit directly)
 - `verify-ui/` - Deterministic CSS/computed-style verification (tracked in git)
-- `headless-browser/` - Headless browser screenshots and interaction (tracked in git, run `npm install` in its directory for playwright)
+- `headless-browser/` - Headless browser screenshots and interaction (tracked in git; bundles its own Playwright)
 
-Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all skills to `~/.claude/skills/`. The script handles both the generated doc-lookup skill and the tracked skills in one step.
+Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all skills to `~/.claude/skills/`. The script handles the generated doc-lookup skill, the tracked skills, and `headless-browser`'s Playwright install in one step.
+
+**Playwright needs no manual install step.** `headless-browser` bundles Playwright and installs it on demand; `verify-ui` falls back to that bundle, or to its own directory when used standalone. Both self-heal on a fresh machine and retry once — see each skill's SKILL.md. Agents must NOT stop and ask the user to run `npx playwright install`; a missing browser is a setup gap, not a decision.
+
+Both skills are designed to work **standalone** (symlinked or copied without this repo), so each carries its own bootstrap — `headless-browser/scripts/ensure-deps.sh` is the shared, idempotent entry point. Keep them self-sufficient: do not move recovery logic into `setup-doc-skill.sh` only.
+
+One invariant to preserve if you touch the install path: browser downloads must be driven by the **resolved** Playwright package's own `cli.js`, never a bare `npx playwright install`. Each version pins its own browser revisions, so `npx` (which fetches `@latest`) installs a revision the resolved module never looks for — the launch then fails with `Executable doesn't exist` despite a "successful" install.
 
 ## Typography
 

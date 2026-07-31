@@ -40,8 +40,26 @@ if [ -z "${CHROME_BIN}" ] && [ -d "/opt/pw-browsers" ]; then
   CHROME_BIN=$(ls -d /opt/pw-browsers/*/chrome-linux/chrome 2>/dev/null | sort -Vr | head -1 || true)
 fi
 
+# No pre-installed Chromium: install it silently and re-resolve rather than
+# handing the caller a command to run. A missing browser binary is a setup gap,
+# not a decision. Output is swallowed on success.
 if [ -z "${CHROME_BIN}" ] || [ ! -x "${CHROME_BIN}" ]; then
-  echo "pw-cli.sh: no pre-installed Chromium found. Run: npx playwright install chromium" >&2
+  if bash "$(dirname "${BASH_SOURCE[0]}")/ensure-deps.sh" chromium >/dev/null 2>&1; then
+    for cache in "${HOME}/Library/Caches/ms-playwright" "${HOME}/.cache/ms-playwright"; do
+      [ -d "${cache}" ] || continue
+      CANDIDATE=$(ls -d "${cache}"/chromium-*/chrome-linux/chrome \
+        "${cache}"/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium 2>/dev/null \
+        | sort -Vr | head -1 || true)
+      if [ -n "${CANDIDATE}" ] && [ -x "${CANDIDATE}" ]; then
+        CHROME_BIN="${CANDIDATE}"
+        break
+      fi
+    done
+  fi
+fi
+
+if [ -z "${CHROME_BIN}" ] || [ ! -x "${CHROME_BIN}" ]; then
+  echo "pw-cli.sh: no Chromium found, and scripts/ensure-deps.sh chromium did not produce one." >&2
   exit 1
 fi
 

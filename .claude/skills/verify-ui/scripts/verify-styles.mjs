@@ -52,7 +52,79 @@ async function requiredHeadlessShellRevision(playwrightCoreDir) {
   }
 }
 
-async function findPlaywright() {
+// Silent self-heal. A missing Playwright module or an uncached browser binary
+// is a machine-setup gap, not a decision the caller needs to make — installing
+// it is the only sensible next step, so do it here instead of erroring out and
+// making the agent relay "run npx playwright install" back to the user.
+// Output is swallowed on success; only a genuine failure is reported.
+// Directory of the playwright package findPlaywright() actually resolved. The
+// browser install MUST be driven by that exact package's own CLI: each
+// playwright version pins its own chromium-headless-shell revision, so a bare
+// `npx playwright install` (which fetches @latest) downloads a revision the
+// resolved module will not look for, and the retry fails identically.
+let resolvedPlaywrightDir = null;
+
+async function autoInstall(what) {
+  const { execSync } = await import("node:child_process");
+  const { existsSync } = await import("node:fs");
+
+  const run = (cmd, cwd) => {
+    try {
+      execSync(cmd, { cwd, stdio: "ignore", timeout: 10 * 60_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (what === "module") {
+    // Preferred host: the sibling headless-browser skill, which declares
+    // playwright in its own package.json. But this skill is often installed
+    // STANDALONE (symlinked into ~/.claude/skills/ on its own), in which case
+    // there is no sibling — fall back to installing into this skill's own
+    // directory so it never depends on a neighbour being present.
+    const sibling = new URL("../../headless-browser/", import.meta.url).pathname;
+    const own = new URL("../", import.meta.url).pathname;
+
+    let host = null;
+    if (existsSync(`${sibling}package.json`)) {
+      if (run("npm install --silent --no-audit --no-fund", sibling)) host = sibling;
+    }
+    if (!host) {
+      // No sibling (or its install failed): self-contained install. `npm i
+      // playwright` writes a package.json here if absent, which is fine — the
+      // directory is the skill's own and node_modules is gitignored.
+      if (run("npm install --silent --no-audit --no-fund playwright", own)) host = own;
+    }
+    if (!host) {
+      console.error(
+        "Error: auto-install failed — could not install Playwright into " +
+          `${sibling} or ${own}.`
+      );
+      return false;
+    }
+    resolvedPlaywrightDir = `${host}node_modules/playwright`;
+  }
+
+  // Prefer the resolved package's own CLI; fall back to npx only if we have no
+  // resolved directory to work from.
+  const cli = resolvedPlaywrightDir && `${resolvedPlaywrightDir}/cli.js`;
+  const ok =
+    cli && existsSync(cli)
+      ? run(`node "${cli}" install chromium-headless-shell`, process.cwd())
+      : run("npx --yes playwright install chromium-headless-shell", process.cwd());
+
+  if (!ok) {
+    console.error(
+      "Error: auto-install of chromium-headless-shell failed. " +
+        "Run `npx playwright install chromium-headless-shell` manually to see why."
+    );
+    return false;
+  }
+  return true;
+}
+
+async function findPlaywright({ allowInstall = true } = {}) {
   const { execSync } = await import("node:child_process");
   const { existsSync } = await import("node:fs");
   const cachedRevs = await cachedChromiumRevisions();
@@ -72,6 +144,7 @@ async function findPlaywright() {
     for (const dir of dirs) {
       const rev = await requiredHeadlessShellRevision(`${process.cwd()}/${dir}`);
       if (rev && cachedRevs.has(rev)) {
+        resolvedPlaywrightDir = `${process.cwd()}/${dir}`;
         return await import(`${process.cwd()}/${dir}/index.mjs`);
       }
     }
@@ -87,7 +160,19 @@ async function findPlaywright() {
       import.meta.url
     );
     if (existsSync(skillIndex)) {
+      resolvedPlaywrightDir = new URL(".", skillIndex).pathname;
       return await import(skillIndex.href);
+    }
+  } catch {}
+
+  // Candidate 2b: this skill's OWN bundled install. Present when verify-ui is
+  // used standalone (no sibling headless-browser skill) and autoInstall() has
+  // self-healed into its own directory.
+  try {
+    const ownIndex = new URL("../node_modules/playwright/index.mjs", import.meta.url);
+    if (existsSync(ownIndex)) {
+      resolvedPlaywrightDir = new URL(".", ownIndex).pathname;
+      return await import(ownIndex.href);
     }
   } catch {}
 
@@ -101,6 +186,7 @@ async function findPlaywright() {
       { encoding: "utf-8" }
     ).trim();
     if (result) {
+      resolvedPlaywrightDir = `${process.cwd()}/${result}`;
       return await import(`${process.cwd()}/${result}/index.mjs`);
     }
   } catch {}
@@ -111,10 +197,16 @@ async function findPlaywright() {
   try {
     return await import("playwright");
   } catch {}
+  // Nothing resolved. Install the headless-browser skill's bundled Playwright
+  // (the one candidate we control) and retry once, rather than handing the
+  // caller an instruction to run.
+  if (allowInstall && (await autoInstall("module"))) {
+    return await findPlaywright({ allowInstall: false });
+  }
   console.error(
     "Error: no working Playwright installation found (checked the project's " +
       "node_modules, the headless-browser skill's bundled install, and global " +
-      "packages). Run `npx playwright install chromium-headless-shell` in the project."
+      "packages), and auto-install did not resolve it."
   );
   process.exit(1);
 }
@@ -230,7 +322,21 @@ async function resolveBrowserOpts() {
 const browserOpts = await resolveBrowserOpts();
 // Print resolved opts when BROWSER_RESOLVER_DEBUG is set (for path-logic testing without a real launch)
 if (process.env.BROWSER_RESOLVER_DEBUG) { console.log(JSON.stringify({ resolvedBrowserOpts: browserOpts })); process.exit(0); }
-const browser = await chromium.launch({ ...browserOpts });
+// A resolvable Playwright module whose pinned browser build isn't in the cache
+// fails here, not in findPlaywright() — Playwright's own error names the exact
+// install command. Run it silently and retry once instead of surfacing it.
+async function launchChromium() {
+  try {
+    return await chromium.launch({ ...browserOpts });
+  } catch (err) {
+    if (!/Executable doesn'?t exist|please run the following command|install/i.test(String(err?.message))) {
+      throw err;
+    }
+    if (!(await autoInstall("browsers"))) throw err;
+    return await chromium.launch({ ...browserOpts });
+  }
+}
+const browser = await launchChromium();
 const report = { url, selector, timestamp: new Date().toISOString(), styles: {}, screenshots: [] };
 
 // --- Layer 1: Computed style extraction (use first width/scheme) ---
