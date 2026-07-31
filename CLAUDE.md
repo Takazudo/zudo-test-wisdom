@@ -94,7 +94,17 @@ This repo contains test-related Claude Code skills under `.claude/skills/`:
 - `verify-ui/` - Deterministic CSS/computed-style verification (tracked in git)
 - `headless-browser/` - Headless browser screenshots and interaction (tracked in git; bundles its own Playwright)
 
-Run `pnpm setup:doc-skill` to generate the test-wisdom skill AND symlink all skills to `~/.claude/skills/`. The script handles the generated doc-lookup skill, the tracked skills, and `headless-browser`'s Playwright install in one step.
+Run `pnpm setup:doc-skill` to generate the test-wisdom skill and symlink it to `~/.claude/skills/` (and `~/.codex/skills/`).
+
+**It does NOT symlink the tracked skills** (`verify-ui`, `verify-ui-ai`, `headless-browser`) — despite what this file used to claim. `scripts/setup-doc-skill.sh` is a create-zudo-doc **template file** guarded by `pnpm check:template-drift`, so it must not be edited locally: a local edit fails the drift check and is silently overwritten on the next template re-sync. Symlink the tracked skills by hand, or from a host-owned script:
+
+```bash
+ln -sfn "$PWD/.claude/skills/verify-ui" ~/.claude/skills/verify-ui   # etc.
+```
+
+Improving the shared template is an upstream change — see `/dev-upstream-report`.
+
+The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry. The template's deterministic default derives `<packageName>-wisdom` = `zudo-test-wisdom-wisdom`, which is NOT the name `.gitignore` pins — leaving an untracked duplicate skill directory on every run.
 
 **Playwright needs no manual install step.** `headless-browser` bundles Playwright and installs it on demand; `verify-ui` falls back to that bundle, or to its own directory when used standalone. Both self-heal on a fresh machine and retry once — see each skill's SKILL.md. Agents must NOT stop and ask the user to run `npx playwright install`; a missing browser is a setup gap, not a decision.
 
