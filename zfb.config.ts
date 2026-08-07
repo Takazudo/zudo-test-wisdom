@@ -15,6 +15,11 @@ export default defineConfig(
       "Takazudo's frontend testing strategy guide for AI agents and developers",
     githubUrl: "https://github.com/Takazudo/zudo-test-wisdom",
     siteUrl: "https://zudo-test-wisdom.takazudomodular.com",
+    // This site's own home-hero brand mark, rendered as a theme-adaptive CSS
+    // mask. REQUIRED — zudo-doc's `logo` default is "auto", which generates a
+    // deterministic SVG seeded by `siteName` and silently displaces the host's
+    // own asset (zudo-doc 4.4.0+). Omitting this does not fail the build.
+    logo: "/img/logo.svg",
     // Deploy target: Cloudflare Workers static assets (wrangler.toml `main`
     // points at dist/_worker.js). REQUIRED — the default is a pure static build
     // that emits no _worker.js, which would break `wrangler deploy`.
