@@ -86,6 +86,73 @@ skip ロジックを削除せずスクリプトに残しておけば、同じス
 
 </Warning>
 
+## ブラウザが送るものを送る。さもないとユーザーが通らない経路をテストすることになる
+
+デプロイ後のチェックは HTTP 越しに生きたシステムと話すので、どの HTTP クライアントもブラウザと等価だと思いたくなる。等価ではないし、その差はすでに障害を本番に出している。
+
+**Cloudflare の静的アセット層が `not_found_handling` を適用するのはナビゲーションリクエストだけである** — つまり `sec-fetch-mode: navigate` を伴うリクエストで、人が URL を開いたときにブラウザが必ず送るもの。それが無くアセットにも一致しないリクエストは、代わりに Worker へフォールスルーする。インデックスがサーバーレンダリングのサイトでは、この 2 経路はまったく別のものを返す：
+
+```
+curl そのまま                          -> 200  本物のトップページ
+curl -H 'sec-fetch-mode: navigate'   -> 404  404 ページ
+ヘッドレスブラウザ                      -> 404
+```
+
+サイトは人間の訪問者全員に対して壊れていたのに、スモークテストは緑だった。テストがユーザーの生成しない形状でリクエストしていたからである。
+
+<Danger>
+
+**`fetch()` はそのヘッダーを送れないので、Node のスモークテストに足しても何も起きない。** `Sec-` で始まる名前は Fetch 仕様の**禁止ヘッダー名**であり、undici — したがって Node のグローバル `fetch()` — はこれを**黙って**取り除く。エラーも警告も出ず、リクエストは通常のものとして送出される：
+
+```js
+await fetch(url, { headers: { "sec-fetch-mode": "navigate" } });  // -> 200、ヘッダーは落ちている
+```
+
+これは試さないより悪い。コードがブラウザのナビゲーションを再現している*ように見えて*しまうからだ。信じる前に、リクエストヘッダーをエコーするサーバーで確認するか、`curl` と結果を比較すること。
+
+</Danger>
+
+ヘッダーをそのまま書き出すクライアントを使う。`node:https` は組み込みで依存も要らない：
+
+```js
+import { request as httpsRequest } from "node:https";
+
+function navigationGet(url) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpsRequest(
+      {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: "GET",
+        headers: {
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-dest": "document",
+          "sec-fetch-site": "none",
+        },
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+```
+
+`undici.request()` も使える（禁止ヘッダー名を強制しない）。実ヘッドレスブラウザを動かす手もあるが、コストは高い。
+
+<Tip>
+
+**新しいアサーションは、壊れたデプロイに対して失敗することを確認してから信用すること。** バグがまだ本番で生きているうちに走らせる — 具体的なメッセージを伴って赤くなるはずである。修正をデプロイした後に足したアサーションは、一度も失敗するところを観測されておらず、失敗しえないチェックは走っていないチェックと区別がつかない。
+
+</Tip>
+
 ## テスト自体を検証する
 
 スモークテストは生きたサイトに対してアサートするので、意図的に誘発しない限り、テスト自身の失敗モードは見えない。TLS が既知の不良状態であるホストに対して走らせ、終了コードを確認すること — [badssl.com](https://badssl.com/) が安定したものを提供している：
