@@ -86,6 +86,73 @@ Keeping the skip logic in the script rather than deleting it means the same scri
 
 </Warning>
 
+## Send What a Browser Sends, or You Test a Path No User Takes
+
+A post-deploy check speaks to a live system over HTTP, so it is tempting to treat any HTTP client as equivalent to a browser. They are not, and the gap has already shipped an outage.
+
+**Cloudflare's static-asset layer applies `not_found_handling` only to navigation requests** -- ones carrying `sec-fetch-mode: navigate`, which every browser sends when a person opens a URL. A request without it that matches no asset falls through to the Worker instead. On a site whose index is server-rendered, those two paths return completely different things:
+
+```
+curl bare                            -> 200  the real homepage
+curl -H 'sec-fetch-mode: navigate'   -> 404  the 404 page
+headless browser                     -> 404
+```
+
+The site was broken for every human visitor while the smoke suite was green, because the suite requested it in a shape no user produces.
+
+<Danger>
+
+**`fetch()` cannot send that header, so adding it to a Node smoke test does nothing.** `Sec-` prefixed names are **forbidden header names** in the Fetch spec, so undici -- and therefore Node's global `fetch()` -- strips them **silently**. No error, no warning; the request goes out as an ordinary one:
+
+```js
+await fetch(url, { headers: { "sec-fetch-mode": "navigate" } });  // -> 200, header dropped
+```
+
+This is worse than not trying, because the code now *looks* like it reproduces a browser navigation. Verify against a server that echoes request headers, or compare against `curl`, before believing it.
+
+</Danger>
+
+Use a client that writes headers verbatim. `node:https` is built in and needs no dependency:
+
+```js
+import { request as httpsRequest } from "node:https";
+
+function navigationGet(url) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpsRequest(
+      {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: "GET",
+        headers: {
+          accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-dest": "document",
+          "sec-fetch-site": "none",
+        },
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+```
+
+`undici.request()` also works -- it does not enforce forbidden header names -- as does driving a real headless browser, at higher cost.
+
+<Tip>
+
+**Prove the new assertion fails against the broken deploy before you trust it.** Run it against production *while the bug is still live*: it should go red with a specific message. An assertion added after the fix is deployed has never been observed failing, and a check that cannot fail is indistinguishable from one that is not running.
+
+</Tip>
+
 ## Verifying the Test Itself
 
 A smoke test asserts against a live site, so its own failure modes are invisible unless you deliberately provoke them. Run it against hosts with known-bad TLS and confirm the exit codes -- [badssl.com](https://badssl.com/) provides stable ones:
