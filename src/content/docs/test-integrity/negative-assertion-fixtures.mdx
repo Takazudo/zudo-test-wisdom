@@ -1,6 +1,6 @@
 ---
 title: Negative Assertions vs. Their Own Fixture Data
-description: When a test asserts a marker string is absent from processed output while its own fixture flows into that output, the fixture can trip the assertion -- a deterministic assertion-design collision that first fails in CI, not a flake.
+description: When a test asserts a marker string is absent from processed output while its own fixture flows into that output, the fixture can trip the assertion -- a deterministic assertion-design collision that first fails in CI, not a flake. The grep-the-fixture-tree and unnatural-marker rules keep it from recurring.
 sidebar_position: 2
 ---
 
