@@ -15,7 +15,10 @@ These are the core topics documented here, all based on patterns extracted from 
 
 - **Testing Levels** -- The 6-level escalation ladder from unit tests to AI-based visual verification, each with increasing coverage and decreasing blind spots
 - **Decision Guide** -- Which testing level to use based on what changed, where and when a test should run (execution tiers), common failure patterns when the wrong level is chosen, required behaviors for AI agents, and an archetype playbook for picking a starting test suite by repo type
-- **Real-World Patterns** -- Battle-tested Vitest configurations, Playwright E2E patterns, Tauri desktop app testing, backend/Node.js testing approaches, built-site integrity gates, deterministic visual regression baselines, environment-tiered testing against deployed targets, and operational concerns like deflaking, scheduled re-exam lanes, and publishing-pipeline verification
+- **Tool Patterns** -- Pages organized around a specific tool or implementation technique, not a project shape: Vitest, Playwright, visual regression, browser-in-container verification, and cargo-nextest
+- **Project Recipes** -- Pages organized around a repo or project shape, not a single tool: backend, Tauri, remark/rehype plugins, and built-site integrity
+- **CI Operations** -- Running suites across CI, deploys, and releases: environment-tiered testing, smoke tests, scheduled re-exam, branch strategy, publishing, and runner sizing
+- **Test Integrity** -- Ways tests deceive -- flakes, false greens, self-agreement, fixture traps -- and the discipline that prevents them
 - **Tools Reference** -- Quick lookup of tools and commands for each testing level
 
 <Note>
