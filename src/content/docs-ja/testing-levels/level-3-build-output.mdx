@@ -32,7 +32,7 @@ sidebar_position: 4
 pnpm build && pnpm vitest run --project build
 ```
 
-`--project build`は、Vitestの設定で名前付きの`build`プロジェクトを定義していれば、それにスコープした実行になります（[Vitestパターン](../real-world-patterns/vitest-patterns.mdx)を参照）。名前付きプロジェクトがない場合は、ビルド後に素の`vitest run`を実行しても同じように機能します。
+`--project build`は、Vitestの設定で名前付きの`build`プロジェクトを定義していれば、それにスコープした実行になります（[Vitestパターン](../tool-patterns/vitest-patterns.mdx)を参照）。名前付きプロジェクトがない場合は、ビルド後に素の`vitest run`を実行しても同じように機能します。
 
 開発者がビルドステップを覚えていることに頼らないようにするには、`globalSetup`でVitest自体に組み込み、素の`vitest run`が常に最新のビルドに対して実行されるようにします：
 

@@ -111,7 +111,7 @@ What makes this class dangerous is that **every level below Level 4 passes**:
 - Level 1 / Level 2 (including render-to-string SSG-presence tests) pass -- the pre-hydration markup is correct.
 - Level 3 passes -- the built dist HTML is correct.
 
-The breakage appears *only after hydration runs in a real browser*, so nothing that inspects static output can see it. This is a **structural, deterministic** bug -- not a [hydration race](../real-world-patterns/deflaking-recipe.mdx) (a flake). It also recurs: one project hit this exact class twice, in two different island components.
+The breakage appears *only after hydration runs in a real browser*, so nothing that inspects static output can see it. This is a **structural, deterministic** bug -- not a [hydration race](../test-integrity/deflaking-recipe.mdx) (a flake). It also recurs: one project hit this exact class twice, in two different island components.
 
 Only a **Level 4 test with a hydration wait** catches it: trigger hydration (scroll the island into view, or otherwise activate it), wait for the hydration signal, then assert the post-hydration DOM structure -- child counts and vertical stacking, not just presence.
 

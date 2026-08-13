@@ -1,0 +1,983 @@
+---
+title: Playwright Patterns
+description: E2E testing patterns with Playwright for CI and production verification.
+sidebar_position: 2
+---
+
+## CI-Safe vs @interactive Test Split
+
+Not all E2E tests can run in CI. Tests requiring keyboard shortcuts, clipboard access, or desktop-specific interactions should be tagged and split:
+
+```typescript
+// e2e/basic-navigation.spec.ts -- runs in CI
+import { test, expect } from "@playwright/test";
+
+test("loads the home page", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("h1")).toBeVisible();
+});
+```
+
+```typescript
+// e2e/keyboard-shortcuts.spec.ts -- only runs locally
+import { test, expect } from "@playwright/test";
+
+test("@interactive Ctrl+S saves document", async ({ page }) => {
+  await page.goto("/editor");
+  await page.keyboard.press("Control+KeyS");
+  await expect(page.locator(".save-indicator")).toHaveText("Saved");
+});
+```
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    {
+      name: "ci",
+      grepInvert: /@interactive/,
+    },
+    {
+      name: "interactive",
+      grep: /@interactive/,
+    },
+  ],
+});
+```
+
+<Warning>
+
+`testMatch`/`testIgnore` filter by **file path**; `grep`/`grepInvert` filter by **test title**. The `@interactive` tag above lives in the test title (`test("@interactive Ctrl+S saves document", ...)`), not the filename `e2e/keyboard-shortcuts.spec.ts` — a path-based `testMatch: /.*@interactive.*\.spec\.ts/` matches that filename against zero files, so the `interactive` project would collect nothing and the tagged test would fall through to `ci` instead of being excluded from it. Filter on title with `grep`/`grepInvert` as above, or, on Playwright ≥1.42, use first-class tags (`test("Ctrl+S saves document", { tag: "@interactive" }, ...)`) with `--grep @interactive` on the command line. The `@flaky` quarantine further down this page already filters on title — that's the pattern to copy.
+
+</Warning>
+
+<Tip>
+
+Run `npx playwright test --project=ci` in CI and `npx playwright test --project=interactive` locally when you need full keyboard/clipboard testing.
+
+</Tip>
+
+## Guard against specs that match no project
+
+The CI-safe / interactive split above leaves `testMatch` at its **default** (no path restriction) on the `ci` project, so every spec file is collected regardless of title — that implicit catch-all is exactly what prevents the trap described here. The trap only appears once you move to a **partitioned** setup where each project maps to a disjoint filename prefix (e.g. one project per fixture or app):
+
+```typescript
+// playwright.config.ts — partitioned by filename prefix (NOT a catch-all)
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    { name: "fixtureA", testMatch: /fixtureA[^/]*\.spec\.ts/ },
+    { name: "fixtureB", testMatch: /fixtureB[^/]*\.spec\.ts/ },
+    { name: "fixtureC", testMatch: /fixtureC[^/]*\.spec\.ts/ },
+  ],
+});
+```
+
+In this config, a spec whose filename starts with anything other than `fixtureA`, `fixtureB`, or `fixtureC` matches no project and is collected by zero projects. Playwright runs without error — it simply has nothing to run — and no test failure reveals it. The missing spec produces no result to fail.
+
+The fix mirrors the single-source-of-truth meta-test pattern: a tiny script that asserts every e2e spec filename starts with a known project prefix, wired into both the local pre-push gate and CI. Enumerate specs **recursively** with `find` (not `ls e2e/*.spec.ts`, which only globs the top level and would silently miss a spec nested in a subdirectory — the very hole this guard exists to close):
+
+```bash
+# Every e2e spec must start with a known project prefix, or it runs nowhere.
+# find recurses into subdirectories; `ls e2e/*.spec.ts` would miss e2e/<dir>/*.spec.ts.
+known='fixtureA|fixtureB|fixtureC'
+bad=$(find e2e -type f -name '*.spec.ts' | grep -Ev "/($known)[^/]*\.spec\.ts$" || true)
+[ -z "$bad" ] || { echo "specs match no Playwright project:"; echo "$bad"; exit 1; }
+```
+
+<Warning>
+
+The guard script, not the config, is what makes a filename-prefix project split safe. A green Playwright run only proves that the specs which were collected passed — it cannot prove that every spec ran. If a spec falls outside every project's `testMatch` pattern, Playwright drops it silently. The guard is the only thing that catches a spec the config silently skipped.
+
+</Warning>
+
+## A Bad `workers` Value Runs Zero Tests and Exits Green
+
+The guard above catches a spec that no project collects. There is a second route to the same false green, and it survives that guard untouched: every spec matches its project perfectly, and the run still executes nothing — because of the `workers` value alone.
+
+`config.workers` accepts a **number** (`4`) or a **percentage string** (`"50%"`). It does not accept a numeric string: `workers: "3"` errors with `config.workers must be a number or percentage`. That asymmetry is what makes the obvious env-override idiom a footgun:
+
+```typescript
+// playwright.config.ts -- Anti-pattern. Number() is the whole bug.
+export default defineConfig({
+  workers: Number(process.env.PW_WORKERS),
+});
+```
+
+`Number("abc")` is `NaN` — a typo'd or stale env var. `Number("50%")` is **also** `NaN` — Playwright's own native percentage syntax, destroyed by the coercion meant to accept it. And with `NaN` workers, Playwright does not error. It prints no `Running N tests` line, no pass/fail summary, and **exits 0**:
+
+```text
+$ PW_WORKERS=abc npx playwright test
+$ echo $?
+0
+```
+
+That is a gate reporting success having executed nothing.
+
+The failure is asymmetric, which is why it survives casual testing — the values a developer thinks to try are the ones that behave:
+
+| `PW_WORKERS` | `Number()` yields | Playwright's behavior |
+|---|---|---|
+| `4` | `4` | runs normally |
+| `0` | `0` | **errors loudly** -- `config.workers must be a positive number` |
+| `-2` | `-2` | **errors loudly** -- same message |
+| `1.5` | `1.5` | silently rounds; still runs the suite |
+| `50%` | `NaN` | **runs zero tests, exits 0** |
+| `abc` | `NaN` | **runs zero tests, exits 0** |
+
+Validate the override at config load, so a bad value fails at boot instead of at nothing:
+
+```typescript
+// playwright.config.ts
+function resolveWorkers(raw: string | undefined): number | string | undefined {
+  if (raw === undefined) return undefined; // let Playwright pick its default
+  if (/^\d+%$/.test(raw)) return raw;      // pass percentages through as strings
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`PW_WORKERS must be a positive integer or a percentage -- got "${raw}"`);
+  }
+  return n;
+}
+
+export default defineConfig({
+  workers: resolveWorkers(process.env.PW_WORKERS),
+});
+```
+
+Returning `undefined` for the unset case matters: it hands the decision back to Playwright's own default rather than pinning a number the config author guessed.
+
+<Warning>
+
+**Verified against Playwright 1.58.2** — re-check against whatever version you pin, since silent-on-`NaN` is observed behavior rather than a documented guarantee. The rule generalizes past this one key: any runner config value fed from an environment variable through a bare `Number()` can coerce a human-meaningful string into `NaN`, and each runner decides for itself whether `NaN` errors or degrades quietly. Parse and validate every env override at the boundary; never let a coercion result reach a config field unchecked.
+
+</Warning>
+
+This is the same lesson as the filename-prefix guard, one layer down: **a green run proves the tests that ran passed — it never proves any test ran.** The cheapest independent check is to assert the count, not the exit code. A gate that reads its own reporter output for a nonzero test count catches every member of this class at once — the uncollected spec, the `NaN` worker count, and whatever the next mechanism turns out to be. (It is a *collected*-count guard: a suite whose specs all `test.skip` still clears it — that is the separate [pass-by-skip trap](#test-skip-as-a-precondition-—-the-pass-by-skip-trap) below.)
+
+```bash
+# The gate ran green -- but did it collect anything? Fail if the suite collected nothing.
+# Note the report must live OUTSIDE outputDir to survive; see the outputDir section below.
+REPORT=b4push-reports/report.json
+rm -f "$REPORT"  # a stale report from a prior run would satisfy both checks below
+PLAYWRIGHT_JSON_OUTPUT_NAME="$REPORT" npx playwright test --reporter=json
+
+[ -f "$REPORT" ] || { echo "FAIL: no report written -- the run did not reach the reporter"; exit 1; }
+count="$(jq '[.. | objects | select(.tests? and .title?)] | length' "$REPORT")"
+[ "$count" -gt 0 ] || { echo "FAIL: suite collected 0 specs -- the gate is vacuous"; exit 1; }
+```
+
+<Note>
+
+Because a `workers` misconfiguration lives in a gate-defining file, an edit to it falls under [Rule 8 — Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate): the runner config gets a fresh-context review like any other gate file. Rule 8 already names `testMatch` narrowing and `--grep-invert` filters as ways to neutralize a gate without touching an assertion; a `workers` value that resolves to `NaN` neutralizes it more completely than either, and looks like a performance tweak in the diff.
+
+</Note>
+
+## Quarantining Flakes: The Retries-Asymmetry Trap
+
+Beyond the CI-safe vs `@interactive` split, there is a third tag worth knowing: `@flaky`. It exists because of a subtle trap — **CI and your local pre-push gate often run with different retry budgets**, so a test can be green in one and red in the other.
+
+The trap starts here:
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  // CI retries twice; local runs get zero retries.
+  retries: process.env.CI ? 2 : 0,
+});
+```
+
+With `retries: 2` in CI, a test that passes on its second or third attempt is reported **green**. Run the exact same test on a local `b4push` gate with `retries: 0` and it goes **red on the first failure**. The test did not change — only the retry budget did. This is the insight to internalize: **"flaky" is gate-relative.** A test is only as flaky as the strictest gate it has to clear.
+
+When you have a known-flaky test that already lives on `main`, deleting it loses coverage. Instead, tag it `@flaky` in the title and quarantine it from the strict local gate without removing it:
+
+```bash
+# scripts/run-b4push.sh -- exclude @flaky from the strict local gate
+CHROMIUM_INVERT="@interactive|@flaky"
+WEBKIT_INVERT="@flaky"
+
+# Chromium step: skip both @interactive and @flaky
+pnpm test:e2e --project=chromium --grep-invert="$CHROMIUM_INVERT"
+
+# WebKit @interactive step: run @interactive but still drop @flaky
+pnpm test:e2e --project=webkit --grep="@interactive" --grep-invert="$WEBKIT_INVERT"
+```
+
+The Chromium step adds `@flaky` to its `--grep-invert` (alongside `@interactive`), and the WebKit `@interactive` step also excludes `@flaky`. The tests stay in the suite — CI still runs them and tolerates the occasional retry — but they no longer trip the zero-retry local gate.
+
+<Warning>
+
+`@flaky` is a quarantine, not a permanent skip. Tag only tests that are **already** known-flaky on `main`; never tag a brand-new test to make a gate pass. When you fix the underlying race, remove the tag in the same PR — otherwise the list silently grows and you lose real coverage.
+
+And before tagging anything the zero-retry local gate turned red: check whether the SAME spec fails across runs. A failure that lands on a different spec each run — classically a context-teardown timeout at the end of a full-suite run — is [lane over-subscription](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), not a flaky test. Tagging its latest victim suspends healthy coverage and leaves the lane defect to pick a new one.
+
+</Warning>
+
+<Tip>
+
+Keep escape hatches for the local gate so a flaky machine never blocks a push: e.g. `SKIP_E2E_WEBKIT=1` to skip just the WebKit pass, `SKIP_E2E=1` to skip the whole E2E stage, and a `RUN_FLAKY=1` opt-in to run the quarantined tests when verifying a fix.
+
+</Tip>
+
+## `test.skip` as a Precondition — the pass-by-skip Trap
+
+`test.skip` is for genuine environment dependencies: a test that only makes sense on a specific OS, or when a particular service is reachable. Even then, audit that your gold-standard CI hosts **actually run** the spec — a skip that fires on every environment you own is a permanent **pass-by-skip**: the suite reports green because the test never executed, not because the behaviour is correct. The test is **broken, not flaky**.
+
+Preconditions that must always hold belong in hard assertions:
+
+```typescript
+// Anti-pattern: silently skips when user is null, hiding a broken setup
+test.skip(!user, "no user");
+
+// Correct: fails loudly if setup is broken
+expect(user).toBeTruthy();
+```
+
+See [Decision Guide — When to Write a Heavy Test](../decision-guide/heavy-test-decision.mdx) for the Step 0 gate that determines whether the precondition belongs in the test at all.
+
+## Selector Actionability: When the Right-Looking Element Is the Wrong Target
+
+A locator's contract is to resolve to a DOM node. Its contract is _not_ to resolve to the node you can actually act on — and on rich UIs (canvas editors, multi-surface viewports, portalled overlays) those two nodes routinely differ. The element looks right in the inspector, `toBeAttached()` passes, and the click still lands on the wrong surface or times out. Three shapes of this trap recur, and all three share one fix: **make the selector encode the intended active surface or state, then assert actionability on that exact target before acting** — never select on element _type_ or _first match_ and hope the resolved node is the live one.
+
+### `.first()` on Duplicate Surfaces Grabs the Hidden One
+
+**Symptom:** A viewport shows exactly one visible `<canvas>`, yet the test interacts with nothing — a click draws onto a surface that never appears on screen, or a drag lands in empty space. A mid-test screenshot shows the pointer action missing the rendered content entirely.
+
+**Diagnosis:** DOM order is not render order. Frameworks keep more than one surface mounted all the time — a previous slide, an offscreen double-buffer, a `display:none` export canvas — and `page.locator("canvas").first()` returns whichever appears first in _source_, not whichever is painted. Element type (`canvas`) and position (`first`) are the two weakest signals you can select on: neither says anything about which surface is active.
+
+**Fix:** Encode the active surface in the selector — scope to the visible/active container, filter by a state attribute (`[data-active]`, `[aria-hidden="false"]`), or select `canvas:visible` — and assert `toBeVisible()` on the chosen target before touching it:
+
+```typescript
+// Anti-pattern: DOM order != render order. `.first()` returns the first
+// <canvas> in source order — which may be a hidden, offscreen, or torn-down
+// surface the framework has left mounted.
+await page.locator("canvas").first().click();
+
+// Fix: scope to the active container and select the visible surface, then
+// prove you picked the rendered target before acting on it.
+const surface = page.locator('[data-active="true"] canvas:visible');
+await expect(surface).toBeVisible();
+await surface.click();
+```
+
+If the app has no state attribute to scope on, `.filter({ visible: true })` narrows a multi-match locator to the one on screen — but adding a `data-active` / `aria-hidden` marker to the surface container is the durable fix, because it makes the _intended_ surface explicit instead of inferring it from paint state.
+
+### A Label Shared by a Slider and a Text Input Trips Strict Mode
+
+**Symptom:** The test throws before any action runs — the failure is at _resolution_, not interaction:
+
+```
+Error: strict mode violation: getByLabel('Amount') resolved to 2 elements:
+    1) <input type="range" aria-label="Amount"> …
+    2) <input type="text"  aria-label="Amount"> …
+```
+
+**Diagnosis:** A range input and a paired numeric/text input under the same panel both expose the accessible name `Amount` (a slider with a linked value box is the classic case). `getByLabel` matches on accessible name and is role-agnostic, so it selects both, and Playwright's strict mode refuses to guess which one you meant.
+
+**Fix:** The two controls share a _name_ but not a _role_ — disambiguate by role. The range input is a `slider`; the value box is a `textbox` (`type="text"`) or `spinbutton` (`type="number"`). Note a range input is **not** fillable — `fill()` throws `Input of type "range" cannot be filled` — so drive the slider with a role-appropriate action and `fill()` the value box:
+
+```typescript
+// Anti-pattern: name-only, role-agnostic — resolves 2 elements, throws.
+await page.getByLabel("Amount").fill("50");
+
+// Fix: same name, different role — the ambiguity disappears.
+await page.getByRole("textbox", { name: "Amount" }).fill("50"); // value box
+await page.getByRole("slider", { name: "Amount" }).press("ArrowRight"); // nudge the range input
+
+// If both controls genuinely share a role too, scope to the dialog/panel
+// and reach for a test id rather than the shared label:
+await page
+  .getByRole("dialog", { name: "Transfer" })
+  .getByTestId("amount-input")
+  .fill("50");
+```
+
+### An Overlay Intercepts the Click Even Though the Target Is Visible
+
+**Symptom:** The target is visible _and_ enabled, yet `.click()` times out. The call log names a different element than the one you selected:
+
+```
+locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for element to be visible, enabled and stable
+  - element is visible, enabled and stable
+  - scrolling into view if needed
+  - <div class="modal-backdrop">…</div> from <div id="portal-root">…</div> subtree intercepts pointer events
+  - retrying click action
+```
+
+**Diagnosis:** Playwright runs four actionability checks before dispatching a click — the element must be **visible**, **stable** (not mid-animation), **enabled**, and **receiving pointer events** (nothing else sits on top at the click point). A portalled overlay — a modal backdrop, a toast, a dropdown that just opened, a full-viewport loading veil — is layered above the target at those coordinates, so the fourth check never passes even though the first three do. The target is fine; something is on top of it.
+
+**Fix:** Wait for the intercepting layer to leave, or scope to the real interactive layer, then click normally so the actionability checks keep protecting you:
+
+```typescript
+// Fix: wait for the intercepting overlay to go away, then click normally.
+await expect(page.locator(".modal-backdrop")).toBeHidden();
+await page.getByRole("button", { name: "Save" }).click();
+```
+
+<Warning>
+
+Do **not** reach for `{ force: true }` here. `force` skips the "receives pointer events" check and dispatches the click at the target's coordinates regardless — so the **overlay** swallows the event, or nothing does. The test goes green while the control you meant to click was never clicked, and the actionability error that was correctly telling you "something is on top" is silenced. `force: true` is for the rare case where you have _proven_ the interception is a false positive (e.g. a decorative `pointer-events: none` layer Playwright still counts); it is never the fix for a real overlay. When you find yourself adding `force` to make a click land, you are almost always masking the bug, not fixing it.
+
+</Warning>
+
+When Playwright reports a hidden or intercepted target and the selector _looks_ correct, stop guessing and look: capture a screenshot or dump the computed geometry (bounding boxes, `z-index`, `pointer-events`) of both the target and whatever is on top of it. Seeing what actually occupies the click point turns "the click mysteriously times out" into "the toast at these coordinates has a 400ms exit animation." The deterministic computed-style dump plus the screenshot review in [Level 5: Deterministic + Visual Verification](../testing-levels/level-5-visual-verification.mdx) is the tool for exactly this — it shows you the on-top element's geometry that the strict-mode error only hints at.
+
+<Tip>
+
+When an interaction depends on the app being _ready_ rather than merely mounted, wait for an explicit readiness signal the app controls — `await expect(page.locator('[data-ready="true"]')).toBeVisible()`, or a visible readiness marker — not a longer timeout. Bumping `{ timeout: 30000 }` on the click only widens the window in which the wrong surface, an ambiguous label, or an animating overlay can still bite; it treats the symptom. A `data-ready` attribute the app sets once its surfaces are painted and its overlays dismissed collapses all three traps above into a single positive precondition you can assert before you act.
+
+</Tip>
+
+The through-line: select on the intended _active surface or state_, not on element type or source position; assert visibility/actionability on the **actual** target before acting; disambiguate shared labels by role or a panel-scoped test id; and gate readiness-dependent interactions on an explicit signal instead of a fatter timeout.
+
+## Editor Input in E2E
+
+Driving a code editor (CodeMirror, Monaco, ProseMirror, or any `contenteditable`) from Playwright is harder than `page.fill()`. If the editor has a vim mode, `page.keyboard.type("hello")` is a disaster: the leading `h` moves the cursor left, `i` enters insert mode, and the rest is interpreted as commands rather than text.
+
+The reliable approach is to select all existing content via the **DOM Selection API**, then push the new content with `page.keyboard.insertText()`. `insertText` dispatches a synthetic `input` event that the editor handles directly, **bypassing vim-mode command interpretation entirely**:
+
+```typescript
+// e2e/helpers.ts
+import type { Page } from "@playwright/test";
+import { expect } from "@playwright/test";
+import os from "os";
+
+// Platform-aware modifier: Meta on macOS, Control on Linux/Windows
+export const mod = os.platform() === "darwin" ? "Meta" : "Control";
+
+export async function setEditorContent(page: Page, content: string) {
+  const editor = page.locator(".cm-content");
+  await editor.waitFor({ timeout: 5000 });
+  await editor.click();
+
+  // Select all content via the DOM Selection API (works regardless of vim mode)
+  await page.evaluate(() => {
+    const el = document.querySelector(".cm-content");
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  });
+
+  // insertText dispatches an input event the editor handles directly,
+  // bypassing vim-mode command interpretation entirely.
+  await page.keyboard.insertText(content);
+
+  // Wait for the Lezer parse + decoration updates to land before asserting.
+  const firstLine = content.split("\n").find((l) => l.trim()) || content;
+  await expect(page.locator(".cm-content")).toContainText(firstLine.slice(0, 20), {
+    timeout: 5000,
+  });
+
+  // wait-ok: 500ms is the known auto-save debounce constant; split-pane reads
+  // content back from the backend, so the test must wait >= the debounce or it races the persist.
+  await page.waitForTimeout(500);
+}
+```
+
+The platform-aware `mod` helper lets the same spec drive editor shortcuts on macOS (`Meta`) and Linux/Windows (`Control`) without branching in every test.
+
+<Warning>
+
+That `waitForTimeout(500)` is the **legitimate exception** to the usual "never use an arbitrary `waitForTimeout`" rule. An arbitrary wait is acceptable only when it is **keyed to a known application constant** — here, the 500ms auto-save debounce — and you **document why** using the `// wait-ok: <why>` marker. A bare `waitForTimeout(500)` with no rationale is still a flake waiting to happen; tie it to a real constant or replace it with a proper `expect` wait.
+
+A second legitimate class: specs that assert the **absence** of a failure within a time window. For example, guarding against a React "Maximum update depth exceeded" startup loop — you mount the app and assert that no error fires for N ms. Converting that sleep to a condition wait **guts the assertion**: there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep, name the constant, annotate why, and never convert:
+
+```typescript
+const POST_MOUNT_LOOP_SETTLE_MS = 2000;
+
+test("no update-depth errors on startup", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.goto("/");
+
+  // wait-ok: asserting ABSENCE of errors over a time window — no positive
+  // event to poll for; converting to a condition wait would gut the assertion.
+  await page.waitForTimeout(POST_MOUNT_LOOP_SETTLE_MS);
+
+  expect(errors.filter((e) => e.includes("Maximum update depth"))).toEqual([]);
+});
+```
+
+</Warning>
+
+## Ratcheting Down Wait Debt
+
+Every `waitForTimeout` without a `// wait-ok: <why>` annotation is a debt item: it might be correct, but nobody can tell at a glance. The ratchet baseline turns that into a tracked, decreasing count rather than an invisible accumulation.
+
+### The check script
+
+The script greps for unannotated `waitForTimeout` calls — those not preceded by a `// wait-ok:` comment within the two lines above — and compares the per-file count against a committed baseline:
+
+```bash
+#!/usr/bin/env bash
+# scripts/check-wait-debt.sh
+set -euo pipefail
+
+BASELINE_FILE="e2e/wait-debt-baseline.txt"
+SPEC_DIR="e2e"
+
+# Nothing to check until the baseline has been introduced (existence guard).
+[ -f "$BASELINE_FILE" ] || exit 0
+
+# Count waitForTimeout calls that lack a // wait-ok: comment in the 2 lines above.
+count_unannotated() {
+  local path="$1" hits
+  [ -f "$path" ] || { echo 0; return; }
+  hits=$(grep -n "waitForTimeout" "$path" 2>/dev/null || true)
+  [ -n "$hits" ] || { echo 0; return; }
+  printf '%s\n' "$hits" | while IFS=":" read -r lineno _rest; do
+    start=$(( lineno - 2 )); [ "$start" -lt 1 ] && start=1
+    sed -n "${start},$((lineno - 1))p" "$path" | grep -q "wait-ok:" || echo found
+  done | wc -l | tr -d ' '
+}
+
+# Expected count for a path: its baseline line, or 0 if absent (the implicit-zero rule).
+expected_for() {
+  awk -v p="$1" '$2 == p { print $1; found=1 } END { if (!found) print 0 }' "$BASELINE_FILE"
+}
+
+# Check EVERY spec file (so a file absent from the baseline is held to an implicit 0),
+# unioned with the baseline's own paths (to catch a now-deleted file that still has an entry).
+failed=0
+checked=""
+for path in $(find "$SPEC_DIR" -type f -name '*.spec.ts' 2>/dev/null) $(awk '{ print $2 }' "$BASELINE_FILE"); do
+  case " $checked " in *" $path "*) continue ;; esac
+  checked="$checked $path"
+  expected=$(expected_for "$path")
+  actual=$(count_unannotated "$path")
+  if [ "$actual" -gt "$expected" ]; then
+    echo "FAIL $path: $actual unannotated waits (baseline $expected) — annotate new waits with // wait-ok: <why>"
+    failed=1
+  elif [ "$actual" -lt "$expected" ]; then
+    echo "FAIL $path: baseline is stale ($expected → $actual) — shrink the baseline to $actual"
+    failed=1
+  fi
+done
+
+exit "$failed"
+```
+
+### Baseline format
+
+The baseline file records the per-file **count** of unannotated waits — not line numbers, so unrelated edits don't churn it:
+
+```
+2 e2e/editor.spec.ts
+1 e2e/startup.spec.ts
+```
+
+Rules:
+
+- `actual > baseline` — new bare wait added; CI fails.
+- `actual < baseline` — baseline is stale; CI fails with "shrink the baseline to N". The baseline may only **decrease**, never increase without a matching annotation.
+- File absent from baseline — implicit count of 0; any unannotated wait fails immediately.
+
+### Wiring into pre-push and CI
+
+```yaml
+# .github/workflows/e2e.yml (excerpt)
+- name: Check wait debt
+  run: bash scripts/check-wait-debt.sh
+```
+
+```bash
+# scripts/run-b4push.sh (excerpt)
+bash scripts/check-wait-debt.sh
+```
+
+The existence guard (`[ -f "$BASELINE_FILE" ] || exit 0`) means you can introduce the script before the baseline file exists — no breakage during rollout.
+
+### Known tradeoff
+
+The add-one-remove-one case is invisible: if a single file gains one unannotated wait and loses another, the count stays the same and the ratchet does not catch it. This is acceptable for a debt ratchet — the goal is a monotonically shrinking total, not per-line enforcement. Pair with code review for the edge case.
+
+### Generalising to other debt classes
+
+The same pattern applies to any greppable debt: `any` casts without a `// any-ok: <why>` comment, `TODO` comments without an issue reference, disabled lint rules without an expiry. Introduce one baseline file per debt class and wire them all into the same pre-push pass.
+
+## Console Error Monitoring
+
+Extend Playwright's test fixture to automatically fail on console errors:
+
+```typescript
+// e2e/fixtures.ts
+import { test as base, expect } from "@playwright/test";
+
+export const test = base.extend<{ consoleErrors: string[] }>({
+  consoleErrors: async ({ page }, use) => {
+    const errors: string[] = [];
+
+    page.on("console", (msg) => {
+      if (msg.type() === "error") {
+        errors.push(msg.text());
+      }
+    });
+
+    page.on("pageerror", (error) => {
+      errors.push(error.message);
+    });
+
+    await use(errors);
+
+    // Assert no console errors after each test
+    expect(errors).toEqual([]);
+  },
+});
+
+export { expect };
+```
+
+```typescript
+// e2e/app.spec.ts
+import { test, expect } from "./fixtures";
+
+const CONSOLE_SETTLE_MS = 1000;
+
+test("home page has no console errors", async ({ page, consoleErrors }) => {
+  await page.goto("/");
+  await expect(page.locator("h1")).toBeVisible();
+
+  // wait-ok: this test asserts the ABSENCE of console errors, so it must keep
+  // observing past first paint — late console/pageerror events (a failed lazy
+  // chunk, a post-hydration warning) fire after the heading is visible. There is
+  // no positive event to poll for, so hold a bounded settle window before the
+  // fixture teardown asserts. This is the documented absence-window exception.
+  await page.waitForTimeout(CONSOLE_SETTLE_MS);
+  // consoleErrors assertion happens automatically in fixture teardown
+});
+```
+
+<Tip>
+
+Replacing `waitForLoadState("networkidle")` with `expect(...).toBeVisible()` is the right move for asserting that a view *is ready* — `networkidle` is the canonical anti-pattern for SPA navigations that fire no network requests. But a console-error monitor asserts the *absence* of errors over a window, so it also needs the bounded `wait-ok:` settle above to catch errors that fire after first paint — a positive readiness assertion alone would end the test too early and green-light late errors. See [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) for the full catalog, including the absence-window exception.
+
+</Tip>
+
+### Filtering benign errors with a curated allowlist
+
+The `expect(errors).toEqual([])` assertion above works on a pristine app — but real suites quickly hit a wall. There are almost always *benign* errors: framework dev warnings, third-party SDK noise, adapters that fail gracefully outside their real runtime. A strict empty-array assertion turns every one of those into a red test, and the usual reaction — loosening the check until it stops complaining — throws away the regression-catching value entirely.
+
+The fix is an `assertNoConsoleErrors()` that filters a **curated allowlist**. The discipline that keeps it honest: **every allowlist entry carries a why-comment** justifying why that specific message is safe to ignore.
+
+```typescript
+// e2e/helpers.ts
+import { expect } from "@playwright/test";
+
+export function assertNoConsoleErrors(errors: string[]) {
+  const unexpected = errors.filter((msg) => {
+    // React DevTools install nag — dev-only, not an app error.
+    if (msg.includes("Download the React DevTools")) return false;
+    // Favicon 404 — the mock server has no favicon; harmless.
+    if (msg.includes("Failed to load resource") && msg.includes("favicon")) return false;
+    // Tauri listen() fails in browser/mock mode: @tauri-apps/api's transformCallback
+    // is undefined outside the WebView runtime. The error is caught internally and
+    // the mock adapter registers its own in-memory listeners instead.
+    if (msg.includes("Failed to register Tauri event listener")) return false;
+    // React warns on an iframe rendered with src="" — known v1 limitation of the
+    // preview pane when no URL is seeded; the iframe renders harmlessly.
+    if (msg.includes('An empty string ("") was passed to the %s attribute') && msg.includes("src")) {
+      return false;
+    }
+    return true;
+  });
+  expect(
+    unexpected,
+    `Unexpected console errors:\n${unexpected.join("\n")}`,
+  ).toHaveLength(0);
+}
+```
+
+<Warning>
+
+The why-comment on each entry is the load-bearing part, not bureaucratic ceremony. Without a rationale, an allowlist silently rots into "ignore everything": months later nobody remembers whether an entry guards a real known-issue or was added to mute a genuine regression, so the safe move becomes never removing anything. A one-line *why* lets the next reader delete the entry the day its underlying cause is fixed — which is exactly when the allowlist should shrink, not grow.
+
+</Warning>
+
+## CI Image Interception for Speed
+
+In CI, network requests for large images slow down tests. Intercept and replace them with tiny placeholders:
+
+```typescript
+// e2e/fixtures.ts
+export const test = base.extend({
+  page: async ({ page }, use) => {
+    // Intercept image requests in CI
+    if (process.env.CI) {
+      await page.route("**/*.{png,jpg,jpeg,webp,gif}", (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: "image/png",
+          // 1x1 transparent PNG
+          body: Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "base64"
+          ),
+        });
+      });
+    }
+    await use(page);
+  },
+});
+```
+
+<Note>
+
+This image-interception pattern from zzmod removes network latency for image assets; it runs on the `@smoke` lane when `CI=true`.
+
+</Note>
+
+## Production Build Verification
+
+Test against the production build, not the dev server. This catches build-specific issues:
+
+```typescript
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  webServer: {
+    command: "npm run build && npm run preview",
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+  use: {
+    baseURL: "http://localhost:4173",
+  },
+});
+```
+
+```typescript
+// e2e/production.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("production build serves all pages", async ({ page }) => {
+  const urls = ["/", "/docs", "/about", "/contact"];
+  for (const url of urls) {
+    const response = await page.goto(url);
+    expect(response?.status()).toBe(200);
+  }
+});
+
+test("production build has no broken links", async ({ page }) => {
+  await page.goto("/");
+  // Collect hrefs as plain strings before navigating -- .all() locators
+  // re-resolve against whatever page is currently loaded, so navigating away
+  // mid-loop would have iteration 2+ walk hrefs from a random later page.
+  const hrefs = await page.$$eval("a[href^='/']", (els) =>
+    els.map((a) => a.getAttribute("href")),
+  );
+  for (const href of hrefs) {
+    if (href) {
+      const response = await page.goto(href);
+      expect(response?.status()).toBe(200);
+    }
+  }
+});
+```
+
+<Note>
+
+When `webServer` is a list of N entries (one per fixture or app), every inner-loop run must build and boot all N servers — turning seconds into minutes. For the multi-fixture case, see the "Making T0 Real for Multi-Fixture E2E" guidance in [Execution Tiers](../decision-guide/execution-tiers.mdx).
+
+</Note>
+
+## The Bundled-Dep E2E Lane for Monorepo Dev Servers
+
+The production-build lane above verifies build correctness — but many app suites *cannot* run their main e2e volume against the production build: MSW's service-worker setup, dev-only routes, and dev-only test bridges (state exposed on `window` behind an `import.meta.env.DEV` guard) all exist only under the dev server. The lanes are complementary, not competing: **source-serving dev server** for interactive work and HMR, **this bundled-dep lane** for the main CI e2e volume, **production build** for build-specific verification. What forces the middle lane into existence is a hidden per-test tax in pnpm-workspace monorepos.
+
+**The tax:** a workspace package resolved through a `development` export condition —
+
+```json
+"exports": {
+  ".": {
+    "types": "./dist/index.d.ts",
+    "development": "./src/index.ts",
+    "default": "./dist/index.js"
+  }
+}
+```
+
+— is served as **raw source, one HTTP request per module**. That is exactly what you want for interactive dev (HMR into the package's source). But every Playwright test gets a fresh browser context with an empty HTTP cache, so **every test re-downloads the package's whole module graph**. For a heavy package (in the worked case: a pattern-generator registry of ~3,500 modules) that was +10–28s on every test whose flow touched it — enough to push two 15-minute CI shards into `timeout-minutes` kills.
+
+**The middle path — bundle only the heavy, stable dep; keep everything else source-served:**
+
+```typescript
+// vite.config.ts
+const BUNDLED_GENERATORS = process.env.E2E_BUNDLED_GENERATORS === "1";
+const GENERATORS_DIST = fileURLToPath(
+  new URL("../generators/dist/index.js", import.meta.url),
+);
+if (BUNDLED_GENERATORS && !existsSync(GENERATORS_DIST)) {
+  throw new Error(
+    "E2E_BUNDLED_GENERATORS=1 but the bundle is missing — build the package first.",
+  );
+}
+
+export default defineConfig({
+  resolve: {
+    // However your setup enables the `development` condition, preserve
+    // Vite's defaults — a bare `conditions: ["development"]` REPLACES
+    // them (dropping `module`/`browser` and the mode-dependent
+    // production condition) and can change dependency resolution in the
+    // production build. On Vite 6: spread `defaultClientConditions`.
+    conditions: [...defaultClientConditions, "development"],
+    ...(BUNDLED_GENERATORS
+      ? {
+          alias: [
+            // Exact-match so hypothetical subpath imports still resolve normally
+            { find: /^@acme\/generators$/, replacement: GENERATORS_DIST },
+          ],
+        }
+      : {}),
+  },
+});
+```
+
+```yaml
+# CI e2e job: build the heavy package (~15s), then run with the flag
+- name: Build the bundled-dep e2e lane
+  run: pnpm --filter @acme/core build && pnpm --filter @acme/generators build
+
+- name: Run Playwright e2e tests
+  env:
+    E2E_BUNDLED_GENERATORS: '1'
+  run: pnpm exec playwright test
+```
+
+Three properties are load-bearing:
+
+- **The `existsSync` guard throws on a missing bundle.** Note what it cannot do: detect a *stale* one — freshness comes from the CI step building the package immediately before Playwright, not from the guard. Without the guard, a missing `dist` still fails (the alias points imports at a nonexistent file), but as a confusing mid-run module-load error; the guard converts it into an immediate, named boot-time failure.
+- **The flag is opt-in.** Local `pnpm test:e2e` and interactive dev keep source-serving and HMR; only CI (and anyone reproducing CI) pays the ~15s build for the collapsed graph.
+- **Only the heavy, stable package is bundled.** The app's own source — the code under test — is still served live. You are bundling a dependency, not the subject. The alias is exact-match by design: subpath imports (`@acme/generators/foo`) fall through to normal source resolution, so if the package exposes subpath entry points on hot paths, alias each one too.
+
+Worked-case evidence: the two e2e shards went from repeated 15-minute `timeout-minutes` kills with 10–23 failed attempts per run to **6m35s and 8m14s with zero failed attempts** — roughly 2× faster than the suite's best-ever green.
+
+<Note>
+
+How this failure class presents *before* you know to look for it — background module storms starving unrelated waits, and heavy loads relocating between waits when you gate them — is [catalog entry 6 in the Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation), including the poll-past-the-timeout proof and the per-test duration diff.
+
+</Note>
+
+## The Hidden Auxiliary-Socket Port Race
+
+The port-race guidance above, and in [Execution Tiers](../decision-guide/execution-tiers.mdx#making-t0-real-for-multi-fixture-e2e), covers the **application** port: give each fixture its own `port` and the `EADDRINUSE` collisions across N parallel `webServer` entries go away. There is a subtler variant that distinct app ports do not fix.
+
+**Symptom:** N parallel `webServer` entries, each with a correctly distinct app port, still crash intermittently. The failure names a port that appears nowhere in `playwright.config.ts`:
+
+```
+Error: listen EADDRINUSE: address already in use :::9229
+```
+
+**Diagnosis:** the dev-server process each `webServer` entry boots doesn't only open the app port — it also opens an **auxiliary socket**: a devtools inspector, an HMR websocket, or a metrics endpoint, each with its own default port that is independent of the app port you configured. Node's inspector, for example, defaults to `9229` no matter which app port the process serves on. When N fixtures boot in parallel, every instance races to bind that same shared default, and whichever loses dies with `EADDRINUSE` — on a port nobody put in the config. The diagnostic tell: **the crashing port is unfamiliar** — it matches no `port` or `baseURL` value anywhere in the test setup.
+
+**Fix:** configure the auxiliary socket to an OS-assigned port (`0`), the same way you would the app port itself:
+
+```bash
+# Anti-pattern: --inspect binds the fixed default (9229) regardless of app port
+node --inspect ./server.js
+
+# Fix: --inspect=0 binds an OS-assigned port -- no shared default left to race on
+node --inspect=0 ./server.js
+```
+
+The same move applies to any dev-tool's auxiliary channel — an HMR websocket port, a metrics/telemetry port, a bundler's own devtools bridge: whatever config knob it exposes, point it at `0` instead of leaving the tool's built-in default in place.
+
+<Warning>
+
+A boot stagger (delaying each fixture's start by a few seconds) narrows this race but does not close it — it is **mitigation, not a fix**. A 3-second stagger between boots was empirically unreliable, reproducing the collision in roughly 1 of every 2 concurrent boots. The durable fix is pinning the auxiliary socket to port `0`; keep a stagger only as a cheap belt-and-suspenders on top of that, never as the sole defense.
+
+</Warning>
+
+See also the native-suite "Port races (`EADDRINUSE`)" entry in the [Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog) — same root cause, a fixed port shared across parallel processes, here specific to a dev-server's non-obvious secondary socket rather than its primary one.
+
+## Sharded CI Runs
+
+For large test suites, shard across multiple CI runners:
+
+```yaml
+# .github/workflows/e2e.yml
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/4, 2/4, 3/4, 4/4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pnpm install
+      - run: npx playwright install --with-deps
+      - run: npx playwright test --shard=${{ matrix.shard }} --reporter=blob
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blob-report-${{ strategy.job-index }}
+          path: blob-report/
+          retention-days: 1
+
+  merge-reports:
+    if: always()
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: pnpm install
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-blob-reports
+          pattern: blob-report-*
+          merge-multiple: true
+      - run: npx playwright merge-reports --reporter=html ./all-blob-reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14
+```
+
+<Note>
+
+Each shard now writes a `blob` report instead of the default HTML report — HTML reports from separate shards can't be combined, but blob reports can. Two details matter for the failure case, which is exactly when you need the report most: `fail-fast: false` on the matrix stops GitHub Actions from cancelling the other shards the moment one fails, and `if: always()` on the upload step keeps a failed shard's blob report from being skipped (GitHub Actions skips later steps by default once a step exits non-zero). Without both, `merge-reports` — which itself runs `if: always()` — would only ever see the blob reports of shards that passed.
+
+</Note>
+
+## Artifacts You Want to Keep Must Live Outside `outputDir`
+
+Playwright **empties `outputDir` at the start of every run**. The default is `test-results/`, and the wipe is unconditional: it is not scoped to files this run will overwrite, and it does not care what wrote them. Anything sitting in that directory when a run begins is gone.
+
+This is correct behaviour — a trace directory full of last run's failures would be worse than useless — and it is invisible until you try to keep something.
+
+```bash
+# Run 1 -- writes its report into outputDir
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/report-1.json npx playwright test
+
+# Run 2 -- a DIFFERENT filename, so surely both survive?
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/report-2.json npx playwright test
+
+ls test-results/
+# .last-run.json  report-2.json
+#
+# report-1.json is gone. So is anything else that was in there.
+```
+
+<Warning>
+
+**A unique filename does not rescue an artifact.** The instinct on discovering a clobbered report is to make the name unique — a run counter, a timestamp, a git SHA. It does not help, because nothing is being *overwritten*: the whole directory is emptied before the first test starts. Timestamping produces exactly one file, every time, and hides the mechanism behind a name that looks like it should have worked.
+
+</Warning>
+
+The fix is placement, not naming. Write anything you intend to keep or compare to a **sibling directory outside `outputDir`**:
+
+```bash
+# Reports accumulate -- run N leaves run N-1's report untouched
+PLAYWRIGHT_JSON_OUTPUT_NAME=b4push-reports/report-1.json npx playwright test
+PLAYWRIGHT_JSON_OUTPUT_NAME=b4push-reports/report-2.json npx playwright test
+
+ls b4push-reports/
+# report-1.json  report-2.json
+```
+
+`PLAYWRIGHT_JSON_OUTPUT_NAME` resolves relative to the **config directory**, and the JSON reporter creates missing parent directories itself — no `mkdir -p` step is required. Add the sibling directory to `.gitignore`.
+
+<Note>
+
+**Two near-misses worth naming, because both look like the fix:**
+
+- **`preserveOutput` does not prevent the wipe.** The name reads like exactly this control; it is not. It governs whether *per-test artifact subdirectories* (traces, screenshots, videos) are retained for passing tests — it does not make the start-of-run clean skip your file.
+- **A custom `outputDir` "works" for the wrong reason.** Pointing `outputDir` somewhere else relocates the wipe, and takes every trace, screenshot, and video with it. You get a much larger blast radius in exchange for a problem a sibling directory solves outright.
+
+</Note>
+
+### Why this bites the cross-run workflows this site recommends
+
+The hazard is local-first. In CI it is nearly unobservable — each run gets a fresh runner, so the start-of-run wipe finds an empty directory and the artifact-upload step ships the report regardless. It surfaces the moment two runs share a working tree, which is precisely the shape of the local triage this site prescribes: the [per-test duration diff between two runs](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation-the-sequel-trap-—-cost-relocation-not-cost-removal) and any tooling that decides "did this spec fail in *both* runs?" (see [lane over-subscription](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams)). A tool built on "run twice, compare the two JSON reports" is structurally impossible when both reports are written into `test-results/` — and it fails **silently**: the second run finds one report, concludes there is nothing to compare, and reports success.
+
+<Warning>
+
+**A self-test built on in-memory fixtures will certify a tool this bug has already broken.** In the worked case, a cross-run triage script's `--self-test` constructed its report objects in memory, exercised the parser, and passed 100% — while the on-disk workflow it existed to run could never produce a second report to parse. The green self-test read as end-to-end validation and shipped a tool that could not work.
+
+Test the seam that actually matters — *does the artifact survive a second run?* — not just the parser. A fixture built from your assumptions can only ever confirm them.
+
+</Warning>
+
+(Verified against Playwright 1.58.2 by running it: sentinel files placed in `test-results/` were deleted by the next run; two reports written to a sibling directory coexisted.)
+
+## Mock Backend Adapter for Frontend-Only E2E
+
+When testing frontend behavior independently from the real backend:
+
+```typescript
+// e2e/mocks/backend-adapter.ts
+import { Page } from "@playwright/test";
+
+export async function mockBackend(page: Page) {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+
+    const mocks: Record<string, unknown> = {
+      "/api/user": { id: 1, name: "Test User", email: "test@example.com" },
+      "/api/settings": { theme: "dark", language: "en" },
+      "/api/documents": [
+        { id: 1, title: "Doc 1" },
+        { id: 2, title: "Doc 2" },
+      ],
+    };
+
+    const mockData = mocks[url.pathname];
+    if (mockData) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockData),
+      });
+    } else {
+      await route.continue();
+    }
+  });
+}
+```
+
+```typescript
+// e2e/frontend.spec.ts
+import { test, expect } from "@playwright/test";
+import { mockBackend } from "./mocks/backend-adapter";
+
+test.beforeEach(async ({ page }) => {
+  await mockBackend(page);
+});
+
+test("displays user name from mock API", async ({ page }) => {
+  await page.goto("/dashboard");
+  await expect(page.locator(".user-name")).toHaveText("Test User");
+});
+```
+
+<Warning>
+
+Mock backends are great for frontend-focused testing, but they do not replace integration tests against the real API. Use both: mocked for UI behavior, real for data flow.
+
+</Warning>
+
+## See Also
+
+Running these patterns inside a sandboxed container (Claude Code on the web, locked-down WSL) where the Playwright CDN is blocked? See [Browser Verification in Limited Environments](./web-container-browser.mdx) for the seeing-eye fallback to a pre-installed Chromium, `127.0.0.1` dev-server binding, and the PR-preview-URL verification path.

@@ -1,0 +1,708 @@
+---
+title: Vitest Patterns
+description: Unit tests, component tests, and build output tests with Vitest.
+sidebar_position: 1
+---
+
+## Project-Level Vitest Configs
+
+Large projects often need different Vitest configurations for different test types. Define multiple projects inside a single root config with `test.projects`:
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "component",
+          include: ["src/**/*.test.tsx"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "build",
+          include: ["tests/build/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+    ],
+  },
+});
+```
+
+<Tip>
+
+Separate projects let you run fast unit tests independently from slower component or build tests: `vitest --project unit` vs `vitest --project component`.
+
+</Tip>
+
+### Per-Project Timeout Budgets
+
+A common flake source: a test spawns a CLI with `spawnSync`/`execSync` and gives the *child process* a generous `timeout:` (say, 30 seconds), while Vitest's own per-test timeout defaults to 5000ms. Under host CPU contention the tighter deadline wins -- Vitest kills the test at 5s while the subprocess is still running well inside its own 30s budget. The failure reads like a hang ("Test timed out in 5000ms"), but nothing actually hung; the subprocess was merely slow under load and never got the chance to finish before the outer timeout fired.
+
+Patching `testTimeout` per offending `it()` doesn't converge -- new subprocess-heavy tests keep landing in other files with the same 5s default, so the whack-a-mole never ends. Fix it at the config level instead: split `test.projects` so the subprocess-heavy directory gets a project-level `testTimeout` raised to at least 2x its largest child budget, while the pure-unit project keeps the strict 5s default as a guardrail against genuinely hung tests.
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: { /* root-level aliases */ } },
+  test: {
+    server: { deps: { inline: [/* runtime packages needing the alias pipeline */] } },
+    projects: [
+      {
+        extends: true, // projects don't inherit the root config without this
+        test: {
+          name: "unit",
+          include: ["src/**/__tests__/**/*.test.ts"],
+          // default 5s testTimeout stays as the guardrail
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "scripts",
+          include: ["scripts/**/__tests__/**/*.test.ts"],
+          // subprocess-heavy: budget 2x the largest 30s child timeout
+          testTimeout: 60_000,
+        },
+      },
+    ],
+  },
+});
+```
+
+<Tip>
+
+The pure-unit project's default `testTimeout` is doing real work here: raising it project-wide to accommodate the subprocess tests would also let a genuinely hung unit test run for 60 seconds instead of failing fast at 5.
+
+</Tip>
+
+### `extends: true` Is Required
+
+Vitest project configs do **not** inherit the root config by default. Add a project to `test.projects` without `extends: true`, and root-level `resolve.alias` and `test.server.deps.inline` silently stop applying to that project -- no error, no warning, the tests just run against unresolved dependencies. In a Preact-compat repo aliasing `react` to `preact/compat`, that surfaces as every test transitively importing a precompiled React-flavored runtime failing with `Cannot find package 'react'`, because the alias that would have redirected the import never reached that project.
+
+Both projects in the config above need `extends: true` for exactly this reason. Also drop the old root-level `test.include` once projects take over -- left in place, it collects test files independently of the projects and can double-run or mis-scope suites, so the project `include` arrays should be the only collectors.
+
+<Danger>
+
+Missing `extends: true` fails silently. There is no error pointing at the missing key -- only a downstream resolution failure inside the affected project's tests, which looks like a dependency problem, not a config problem.
+
+</Danger>
+
+See the [Vitest projects configuration docs](https://vitest.dev/guide/projects#configuration) for the full inheritance rules.
+
+### Module-Eval Timeout Gap and Child-Process Timeout Hygiene
+
+A subprocess call at **module-eval time** -- for example resolving `git worktree list` at import time, before any `describe`/`it` block runs -- escapes Vitest's per-test timeout entirely, because it executes during collection, not during a timed test run. If that call hangs, there is no 5-second (or 60-second project) backstop; it just hangs the whole collection phase before any test gets a chance to start. This is the same import-time-evaluation hazard as [The module-eval timing trap](#happy-dom-gotchas-the-module-eval-timing-trap-the-key-insight) elsewhere on this page, but for subprocess calls instead of DOM reads -- give it its own child-level `timeout:` explicitly, since the runner-level guardrail cannot reach it:
+
+```typescript
+// setup-doc-skill.test.ts
+import { execSync } from "node:child_process";
+
+// Module-level eval runs before Vitest's per-test timeout applies, so this
+// needs its own explicit child-level timeout.
+const MAIN_WORKTREE_ROOT = execSync("git worktree list | head -1 | awk '{print $1}'", {
+  cwd: PROJECT_ROOT,
+  encoding: "utf-8",
+  timeout: 30_000,
+}).trim();
+```
+
+The same discipline applies inside every `it()`, not just at module scope: give every child-process call an explicit `timeout:` at or below the project's `testTimeout`, so a hung subprocess fails the individual test instead of silently eating the whole budget. And check whether the subprocess is doing real work at all -- a trivial shell-out like `mkdir -p` is pure filesystem I/O with no reason to fork a process:
+
+```typescript
+// Before: forks a process for a one-line filesystem operation
+import { execFileSync } from "node:child_process";
+execFileSync("mkdir", ["-p", fakeBinDir]);
+
+// After: same effect, in-process, nothing left to time out
+import { mkdirSync } from "node:fs";
+mkdirSync(fakeBinDir, { recursive: true });
+```
+
+<Tip>
+
+Converting trivial subprocesses to in-process calls does double duty: it removes one more timeout to budget for, and it is faster, since spawning a process costs more than the filesystem call it wraps.
+
+</Tip>
+
+### Cap Worker Parallelism in the Heavy Local Gate
+
+Vitest runs test files across multiple worker processes by default, sized to the host's core count. On a busy laptop -- other tabs, other dev servers, a second `pnpm build` running in a neighboring worktree -- that many concurrent workers means every test is competing for CPU, which is exactly the contention that turns generous-looking timeouts flaky in the first place. Capping parallelism in the heavy pre-push gate trades wall-clock time for reliability:
+
+```bash
+# --maxWorkers=4 caps vitest parallelism for reliability under host CPU
+# contention over wall-clock, not speed.
+pnpm test:unit --maxWorkers=4
+```
+
+<Note>
+
+Cap this only in the heavy local gate, not everywhere. Keep interactive `pnpm test:unit` uncapped for fast feedback during development, and leave CI runners alone -- they are typically low-core already and self-capping, so an explicit cap there just adds a needless ceiling. And when the cap is fed from an environment variable, validate the value at the boundary — Playwright's analogue, a `workers` value that coerces to `NaN`, [runs zero tests and exits green](./playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green).
+
+</Note>
+
+## jsdom and happy-dom Environments
+
+Choose the right DOM environment for component tests:
+
+```typescript
+// vitest.config.ts for component tests
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom",
+    // Or use happy-dom for faster execution:
+    // environment: "happy-dom",
+    globals: true,
+    setupFiles: ["./test-setup.ts"],
+  },
+});
+```
+
+Per-file environment override when needed:
+
+```typescript
+// @vitest-environment jsdom
+import { describe, it, expect } from "vitest";
+
+describe("DOM-dependent test", () => {
+  it("manipulates the document", () => {
+    document.body.innerHTML = '<div id="app">Hello</div>';
+    expect(document.getElementById("app")?.textContent).toBe("Hello");
+  });
+});
+```
+
+## Vitest Browser Mode: Two-Project Split
+
+Component tests that need to assert a *real* computed style -- `var()` and `oklch()` resolution, actual layout values -- outgrow jsdom's synthetic CSS engine. Vitest's browser mode runs a project's tests inside a real Playwright-driven browser instead, using the same `test.projects` mechanism as above: keep the fast jsdom `unit` project for everything that doesn't touch CSS, and add a `browser` project scoped to a `*.browser.test.ts` naming convention for the handful of tests that do.
+
+```typescript
+// vitest.config.ts -- current Vitest 3.x/4.x browser-mode shape
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "browser",
+          include: ["src/**/*.browser.test.ts"],
+          browser: {
+            enabled: true,
+            provider: "playwright",
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
+    ],
+  },
+});
+```
+
+```bash
+pnpm add -D vitest @vitest/browser playwright
+```
+
+<Tip>
+
+Run just the browser project with `pnpm vitest run --project browser`. The `*.browser.test.ts` suffix is the only thing routing a file into real Chromium instead of jsdom -- keep the naming convention consistent.
+
+</Tip>
+
+<Note>
+
+This is the config-level half of [When jsdom Is Not Enough](../testing-levels/level-2-dom-tests.mdx#when-jsdom-is-not-enough-but-full-e2e-is-too-much) -- same Level 2 ergonomics (component isolation, the vitest API), Level 5-grade CSS observability for library code under test.
+
+</Note>
+
+## Separate Configs for Different Test Types
+
+A pattern from mdx-formatter: separate configurations for unit tests, API tests, and function tests:
+
+```
+vitest.config.ts          # Default: unit tests
+vitest.config.api.ts      # API integration tests
+vitest.config.functions.ts # Cloud function tests
+```
+
+```json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:api": "vitest --config vitest.config.api.ts",
+    "test:functions": "vitest --config vitest.config.functions.ts",
+    "test:all": "vitest && vitest --config vitest.config.api.ts"
+  }
+}
+```
+
+## Contract Testing: Rust Engine via Vitest
+
+From mdx-formatter: the Vitest suite serves as a contract test for the Rust formatting engine. The Node.js wrapper calls the Rust binary, and Vitest verifies the output matches expectations:
+
+```typescript
+// tests/contract.test.ts
+import { describe, it, expect } from "vitest";
+import { execSync } from "child_process";
+
+describe("Rust formatter contract", () => {
+  it("formats basic MDX correctly", () => {
+    const input = "# Hello\nSome   text   here";
+    const result = execSync(`echo '${input}' | ./target/release/formatter`, {
+      encoding: "utf-8",
+    });
+    expect(result.trim()).toBe("# Hello\n\nSome text here");
+  });
+});
+```
+
+<Note>
+
+Contract testing lets you verify a binary's behavior from a higher-level language. The Vitest suite acts as the specification -- if the Rust engine changes behavior, the contract tests catch it.
+
+</Note>
+
+## Idempotency Testing
+
+A powerful invariant for formatters and transformers: applying the operation twice should produce the same result as applying it once.
+
+```typescript
+// tests/idempotency.test.ts
+import { describe, it, expect } from "vitest";
+import { format } from "../src/format";
+import { readFileSync, readdirSync } from "fs";
+import { join } from "path";
+
+const FIXTURES_DIR = join(__dirname, "fixtures");
+
+describe("idempotency", () => {
+  const fixtures = readdirSync(FIXTURES_DIR).filter((f) =>
+    f.endsWith(".mdx")
+  );
+
+  for (const fixture of fixtures) {
+    it(`is idempotent for ${fixture}`, () => {
+      const input = readFileSync(join(FIXTURES_DIR, fixture), "utf-8");
+      const firstPass = format(input);
+      const secondPass = format(firstPass);
+      expect(firstPass).toBe(secondPass);
+    });
+  }
+});
+```
+
+## Miniflare + D1/R2 Integration Tests
+
+From pgen: testing Cloudflare Workers with local D1 database and R2 storage using Miniflare:
+
+```typescript
+// tests/integration.test.ts
+import { describe, it, expect, beforeAll } from "vitest";
+import { Miniflare } from "miniflare";
+
+describe("Worker with D1", () => {
+  let mf: Miniflare;
+
+  beforeAll(async () => {
+    mf = new Miniflare({
+      modules: true,
+      script: `export default { async fetch(req, env) { /* ... */ } }`,
+      d1Databases: ["DB"],
+      r2Buckets: ["STORAGE"],
+    });
+
+    // Run migrations. D1's exec() splits its input on newlines (one
+    // statement per line), so a pretty-printed multi-line CREATE TABLE
+    // throws D1_EXEC_ERROR -- keep the statement on a single line.
+    const db = await mf.getD1Database("DB");
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS patterns (id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL)",
+    );
+  });
+
+  it("stores and retrieves a pattern", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/api/patterns", {
+      method: "POST",
+      body: JSON.stringify({ name: "test", data: "{}" }),
+    });
+    expect(resp.status).toBe(201);
+
+    const getResp = await mf.dispatchFetch("http://localhost/api/patterns");
+    const patterns = await getResp.json();
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0].name).toBe("test");
+  });
+});
+```
+
+<Warning>
+
+**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so a SQL statement pretty-printed across multiple lines throws `D1_EXEC_ERROR: incomplete input` -- D1 tries to run each fragment on its own. Collapse each statement to a single line before calling `exec()`, or split a multi-statement migration file yourself (see [`createTestEnv`](../project-recipes/backend-testing.mdx#cloudflare-functions-with-miniflare) for the multi-statement case). This is a platform quirk, not something recoverable by reading more of your own code.
+
+</Warning>
+
+<Tip>
+
+Miniflare runs the same Workers runtime locally, so integration tests closely match production behavior. Combined with D1 and R2 bindings, you can test full data flows without deploying.
+
+</Tip>
+
+## happy-dom Gotchas
+
+happy-dom is fast, but it has a handful of behaviors you cannot recover by reading more of your own code -- they are framework quirks. From zfb-runtime's client-router suite, here are the escape hatches and the one import-order trap that cost the most time to discover.
+
+### Disable real file loading with a shim
+
+When a test injects `<link rel="stylesheet">` or `<script src>` tags, happy-dom will try to perform real network fetches. Disable them up front so tests stay hermetic, and treat the disabled loads as silent successes so the load events still fire:
+
+```typescript
+// _helpers.ts
+type HappyDOMWindow = Window & {
+  happyDOM: {
+    settings: Record<string, boolean>;
+    waitUntilComplete: () => Promise<void>;
+  };
+};
+
+export function installHappyDomShim(): void {
+  const w = window as unknown as HappyDOMWindow;
+  w.happyDOM.settings["disableJavaScriptFileLoading"] = true;
+  w.happyDOM.settings["disableCSSFileLoading"] = true;
+  w.happyDOM.settings["disableIframePageLoading"] = true;
+  w.happyDOM.settings["handleDisabledFileLoadingAsSuccess"] = true;
+}
+```
+
+<Warning>
+
+Call `installHappyDomShim()` at module top, before any DOM mutation in `describe`/`beforeEach`. The settings must be in place before the first tag insertion, otherwise the very first fetch escapes.
+
+</Warning>
+
+### Drain pending async tasks in `afterEach`
+
+Even with file loading disabled, happy-dom still queues async work (for example, silent stylesheet load events). If that work is still pending when Vitest tears the environment down, you get flaky teardown errors that have nothing to do with your assertions. Drain it explicitly:
+
+```typescript
+// _helpers.ts
+export async function drainHappyDom(): Promise<void> {
+  const w = window as unknown as HappyDOMWindow;
+  await w.happyDOM.waitUntilComplete();
+}
+```
+
+```typescript
+// router.test.ts
+afterEach(async () => {
+  await drainHappyDom();
+});
+```
+
+### Reset the document through the real DOM API
+
+A natural reset between tests is `document.body.innerHTML = ""`. But if a prior test swapped the body element via `replaceWith()`, the shortcut leaves `getElementById` internals stale -- lookups start returning the wrong nodes. Rebuild the body through the standard DOM API instead:
+
+```typescript
+// _helpers.ts
+export function resetDocument(): void {
+  document.head.innerHTML = "";
+  if (document.body) document.body.remove();
+  document.documentElement.appendChild(document.createElement("body"));
+}
+```
+
+<Note>
+
+Recreating the element with `createElement("body")` + `appendChild` resets happy-dom's internal node registry cleanly, which `innerHTML = ""` does not when the body was previously replaced.
+
+</Note>
+
+### The module-eval timing trap (the key insight)
+
+This is the one that is genuinely impossible to reason out from the test alone. Some modules read the live document at **module-eval time** -- the moment they are first imported, not inside a function you call later. The client router checks for an opt-in `<meta>` tag at its top level. If you import the router before injecting that tag, the router has already decided the page is not opted in, and no amount of later DOM setup fixes it.
+
+The fix is to inject the tag first, then `import` the module under test:
+
+```typescript
+// router.test.ts
+import { drainHappyDom, installHappyDomShim, resetDocument } from "./_helpers.js";
+
+installHappyDomShim();
+
+// Inject the opt-in meta tag BEFORE importing the router module, so the
+// module's top-level branch sees the page as opted-in.
+// router.ts reads the live document at module-eval time.
+function enableTransitions(): void {
+  const meta = document.createElement("meta");
+  meta.setAttribute("name", "zfb-view-transitions-enabled");
+  meta.setAttribute("content", "true");
+  document.head.appendChild(meta);
+}
+enableTransitions();
+
+// Dynamic import AFTER the document is primed. A static `import` here
+// would hoist above enableTransitions(), so the router would still see
+// the pre-injection document -- `await import(...)` runs at this exact
+// point in the file instead.
+const { init, navigate } = await import("../../client-router/router.js");
+```
+
+<Danger>
+
+If the module under test reads `document` (or any global) at eval time, a top-of-file static `import` runs that code immediately. Order your setup before the import, or switch to a dynamic `await import(...)` placed after the document is primed. ESM hoists static imports above surrounding statements, so a plain `import` will *not* observe DOM mutations written above it in the file unless those mutations are themselves in earlier-evaluated modules.
+
+</Danger>
+
+### Bonus: mock `startViewTransition` to test both paths
+
+`document.startViewTransition` is a progressive-enhancement API. happy-dom does not implement it, and you want to cover both the View-Transition path and the plain fallback. Assign the method directly on `document` rather than stubbing the whole global -- `vi.stubGlobal("document", { ...document, ... })` spreads `document` into a plain object literal, which loses every prototype-based DOM method (`createElement`, `getElementById`, and so on), breaking anything else the test touches:
+
+```typescript
+// router.test.ts
+afterEach(() => {
+  delete (document as any).startViewTransition;
+});
+
+it("uses the View Transitions path when available", async () => {
+  (document as any).startViewTransition = vi.fn((cb: () => void) => {
+    cb();
+    return { finished: Promise.resolve(), ready: Promise.resolve() };
+  });
+  // ...drive navigate() and assert the transition branch ran
+});
+
+it("falls back to a plain DOM swap when the API is absent", async () => {
+  // happy-dom has no startViewTransition by default -- assert the fallback
+  // ...drive navigate() and assert no transition was started
+});
+```
+
+## Aliasing a Precompiled Runtime (React → Preact)
+
+A Preact/compat project that tests against a precompiled island runtime -- or any dist authored against React -- hits three walls in a row. None of them are recoverable by reading your own code; each lives in how vite and the package manager resolve the *other* side.
+
+### Wall 1: the bare `react` alias swallows `react/jsx-runtime`
+
+Symptom: `Failed to resolve import "react/jsx-runtime"` (or `jsx-dev-runtime`) even though `react` is aliased. In array form, vite's `resolve.alias` is first-match-wins -- order the entries most-specific-first, and note the jsx runtimes map to Preact's own jsx runtimes (`preact/jsx-runtime`, `preact/jsx-dev-runtime`), not `preact/compat`:
+
+```typescript
+// vitest.config.ts -- resolve.alias is TOP-LEVEL vite config, not under `test`
+export default defineConfig({
+  resolve: {
+    alias: [
+      { find: "react/jsx-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-dev-runtime" },
+      { find: "react-dom", replacement: "preact/compat" },
+      // exact-match regex: immune to reordering, never swallows subpaths
+      { find: /^react$/, replacement: "preact/compat" },
+    ],
+  },
+});
+```
+
+### Wall 2: aliases are silently ignored for externalized deps
+
+Symptom: the aliases above work for your own source, but the precompiled dependency still loads the real React -- with no error. This is the trickiest of the three. Vitest externalizes node_modules deps by default, and externalized modules load through Node's native resolver, which bypasses vite's `resolve.alias` entirely. Force the one dependency through vite's transform pipeline with `server.deps.inline` -- this option lives under `test`:
+
+```typescript
+export default defineConfig({
+  test: {
+    server: {
+      deps: {
+        // Inline ONLY the precompiled package (plus at most its small
+        // runtime deps). Inlining everything slows the run and masks
+        // other resolution issues.
+        inline: ["@acme/island-runtime"],
+      },
+    },
+  },
+});
+```
+
+### Wall 3: pinned pnpm store paths rot
+
+Symptom: a test reaches a hoisted-but-unsurfaced peer (say, `preact-render-to-string` pulled in by the runtime) via a hard-coded `node_modules/.pnpm/preact-render-to-string@6.5.0_preact@10.22.0/...` path -- and the path breaks on every `pnpm up preact`, because the version-and-peer hash is part of the directory name. Scan the store dynamically instead (pnpm-specific):
+
+```typescript
+import { readdirSync } from "node:fs";
+import path from "node:path";
+
+// Scoped packages encode as "@scope+name@version" in .pnpm --
+// adjust the prefix accordingly.
+const findPnpmDir = (pkgName: string) => {
+  const store = path.join(process.cwd(), "node_modules", ".pnpm");
+  const hit = readdirSync(store).find((d) => d.startsWith(`${pkgName}@`));
+  if (!hit) throw new Error(`no .pnpm entry for ${pkgName}`);
+  return path.join(store, hit, "node_modules", pkgName);
+};
+
+// Resolves whatever version is currently installed:
+const rtsDir = findPnpmDir("preact-render-to-string");
+```
+
+<Tip>
+
+Prefer declaring the missing peer as a real dependency when you can -- then a plain `import` works and no scan is needed. The dynamic scan is for the narrower case of testing an installed artifact whose peer is hoisted but unsurfaced, where adding the dependency would misrepresent the package's real contract.
+
+</Tip>
+
+## Guard the Single Source of Truth
+
+When one constant lives in a single source file but is consumed through two different import chains -- say a TypeScript ESM entry and a hand-written `.mjs` bin -- the two copies can silently fork if either chain breaks. A tiny "meta" test pins them together. From zfb-adapter-cloudflare, the worker wrapper string is imported once from `src/build.ts` and once via re-export from `bin/cli.mjs`, and a single assertion guards that they never diverge:
+
+```typescript
+// cli.test.ts
+import { WORKER_WRAPPER_SOURCE as TS_WRAPPER } from "../build.js";
+// CLI helper is a sibling .mjs re-exporting the same canonical constant.
+import { WORKER_WRAPPER_SOURCE as MJS_WRAPPER } from "../../bin/cli.mjs";
+
+describe("single source of truth", () => {
+  it("the .mjs bin re-exports the same wrapper as build.ts", () => {
+    // Both ultimately import from the canonical src/worker-wrapper.mjs,
+    // so they must be byte-identical. This catches import-chain breakage.
+    expect(MJS_WRAPPER).toBe(TS_WRAPPER);
+  });
+});
+```
+
+<Tip>
+
+Generalize the pattern: any value shared between two consumers that *should* be one thing can fork silently. One `toBe` catches it. The same shape applies to "this TypeScript enum must match that JSON config," or "this `.d.ts` declaration must match the runtime export." Whenever a value is duplicated across a module boundary -- or between a generated file and its source -- a single equality assertion turns a silent divergence into a failing test.
+
+</Tip>
+
+This guard catches *in-repo* divergence. It does not catch divergence between your parser and an **external tool's real output schema** -- that case needs a captured-artifact fixture rather than a hand-authored one; see [Pin Reporter-Parsing Fixtures to a Real Captured Report](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report).
+
+## The Mirror-Test Anti-Pattern
+
+The guard above pins duplicated *values*. Functions can fork the same way -- and the failure mode has a distinctive shape: a test file **re-implements the function under test instead of importing it**, sometimes announcing itself with a comment like "we re-implement the helper here rather than importing". Such a mirror test passes forever even when the real implementation regresses, because it locks the hand-copied mirror, not production code.
+
+Observed in the wild:
+
+- A suite mirroring helpers from a source file that was itself **dead code** -- no production importer existed, so the tests locked nothing at all.
+- A mirrored copy citing a source path that no longer existed after a refactor.
+- Two sibling scripts -- a CI guard and a telemetry reporter -- each carrying a private copy of the same URL-extraction function, with only one copy unit-tested, yet both must agree for the pipeline to work.
+
+The pattern emerges for a mundane reason: the real function is module-private, lives inside an inline script string, or sits in a file with top-level CLI side effects. Importing it is inconvenient, so copying feels harmless.
+
+**Never re-implement the function under test.** If it is not importable, that is the bug to fix first: extract it into an exported pure module and import it from both production code and the test.
+
+```typescript
+// mytool.test.ts -- BEFORE (the anti-pattern)
+// re-implemented here for testability   <- review red flag, not a justification
+const extractIssueUrl = (line: string) =>
+  line.match(/https:\/\/github\.com\/\S+/)?.[0] ?? null;
+
+// AFTER: one canonical module, imported by production and tests alike
+import { extractIssueUrl } from "../scripts/lib/extract-issue-url.js";
+```
+
+When extraction is genuinely disproportionate -- say the function lives inside a built IIFE string -- fall back to the guard above, generalized to functions: a build-time pin that extracts the embedded source and compares it against the canonical module, so divergence fails loudly. Compare source text against source text (normalizing line endings); do not pin against `fn.toString()`, whose output shifts with formatting and transpilation.
+
+```typescript
+// Meta-test: it guards duplicate-implementation drift, nothing more.
+// Behavioral tests still target the canonical module directly.
+const normalize = (s: string) => s.replace(/\r\n/g, "\n").trim();
+
+it("the built wrapper embeds the canonical parseRoute source", () => {
+  const built = normalize(readFileSync("dist/worker-wrapper.mjs", "utf8"));
+  const canonical = normalize(readFileSync("src/parse-route.mjs", "utf8"));
+  expect(built).toContain(canonical);
+});
+```
+
+Two corollaries close the loop:
+
+- **A "re-implemented here for testability" comment is a review tell.** Treat it as a red flag to fix, never as a justification to accept.
+- **Before extracting, check the mirrored source is even alive.** A mirror of dead code means the tests locked nothing -- retarget them at the live implementation, or delete them.
+
+<Tip>
+
+The mirror test is the SSoT guard's failure case, inverted: where the guard pins two copies together so they cannot fork, the mirror test creates a second copy with no pin at all. If you find yourself copying a function into a test file, either import it (extracting first if needed) or pin it -- never free-float the copy.
+
+</Tip>
+
+## Generator/Host Lockstep Tests
+
+[Guard the Single Source of Truth](#guard-the-single-source-of-truth) above pins one duplicated *value*. The same risk scales up whenever a project ships a generator or scaffolder that must track a *live host implementation* -- the generator's copy of a feature list, an option set, or a whole CLI surface can drift from the host's real exports one release at a time, and nothing fails until a generated project breaks in someone else's hands. Two test shapes close that gap, and they are the test-level complement of a shell-based template-drift guard (see the companion note below).
+
+### Roundtrip Tests: Produce, Re-Parse, Compare
+
+Import **both** sides of the boundary in the same test: the host's live configuration logic, and the generator's real CLI parser (not a hand-copied stub of either). Build a CLI command from live host state, re-parse the command the same way a user's shell would, and assert the roundtrip lands back on the source-of-truth values:
+
+```typescript
+// tests/roundtrip.test.ts
+import { describe, it, expect } from "vitest";
+import { buildFeatureFlags } from "../../host/src/config/feature-flags.js";
+import { buildCliCommand } from "../src/generator.js";
+import { parseCliArgs } from "../src/cli-parser.js";
+
+describe("generator roundtrip", () => {
+  it("re-parsing a generated command reproduces the host's live flags", () => {
+    // Source of truth: the host's real config function, not a copied list.
+    const sourceOfTruth = buildFeatureFlags({ tier: "pro" });
+
+    const command = buildCliCommand(sourceOfTruth);
+    const reparsed = parseCliArgs(command);
+
+    expect(reparsed).toEqual(sourceOfTruth);
+  });
+});
+```
+
+<Tip>
+
+The test imports the generator's *real* parser, not a mock. A roundtrip test that reimplements parsing to make the assertion pass is the mirror-test anti-pattern above, wearing a different hat -- it locks the hand-copied parser, not the one users actually run.
+
+</Tip>
+
+### Sync-List Tests: Pin Enumerations Across the Package Boundary
+
+Roundtrip tests catch a broken conversion. They do not catch an enumeration -- a feature list, a template registry, an option set -- that the generator simply forgot to update. For that, assert the generator's list equals the host's live export directly:
+
+```typescript
+// tests/sync-list.test.ts
+import { describe, it, expect } from "vitest";
+import { AVAILABLE_TEMPLATES } from "../../host/src/config/templates.js";
+import { GENERATOR_TEMPLATE_CHOICES } from "../src/template-choices.js";
+
+describe("generator/host template sync", () => {
+  it("the generator offers exactly the host's live template list", () => {
+    // Whole configuration surface, not a single constant -- this is the
+    // SSoT guard generalized across a package boundary.
+    const hostIds = AVAILABLE_TEMPLATES.map((t) => t.id).sort();
+    const generatorIds = GENERATOR_TEMPLATE_CHOICES.map((c) => c.id).sort();
+
+    expect(generatorIds).toEqual(hostIds);
+  });
+});
+```
+
+<Warning>
+
+Do not exempt template file copies from drift-checking with a blanket allowlist. An allowlist only proves the files it lists were once acknowledged as copies -- it says nothing about whether today's copy still matches today's source, and new copies added later inherit the exemption for free. Prefer a normalized-diff check (strip only the values expected to legitimately vary, such as a package name or version) or, stronger still, running the template's own test suite against the installed package. Either one fails when the copy actually drifts; a blanket allowlist never does.
+
+</Warning>

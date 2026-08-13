@@ -1,0 +1,299 @@
+---
+title: Tauriアプリのテスト
+description: Tauri v2 デスクトップアプリケーション固有のテストパターン。
+sidebar_position: 2
+---
+
+## WebKitファースト: 本番エンジンに合わせる
+
+Tauriのレンダリングエンジンはプラットフォームによって異なり、どこでも同じエンジンというわけではありません：macOSではWKWebView、LinuxではWebKitGTK、Windowsでは（Chromiumベースの）WebView2です。TauriフロントエンドのPlaywright E2Eテストを書く際は、macOS/Linuxの本番エンジンに合わせてWebKitを含め、さらにChromiumも含めてください——ChromiumはWindowsのエンジンそのものと一致し、ヘッドレスCIでもより安定して動作します：
+
+```typescript
+// playwright.config.ts
+import { defineConfig, devices } from "@playwright/test";
+
+export default defineConfig({
+  projects: [
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+    },
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+    },
+  ],
+});
+```
+
+<Warning>
+
+Chromiumで**だけ**テストすると、macOS・Linuxユーザーに対して誤った安心感を与えます——これらのプラットフォームでは本番アプリがWebKit（WKWebView / WebKitGTK）でレンダリングされるため、Chromiumのみのカバレッジは本物のWebKit固有のバグを見逃す可能性があります。
+
+**推奨されるデュアル戦略：**
+
+- **ローカル検証にはWebKit** — macOSとLinuxの本番エンジンに一致します。WebKit固有の挙動（CSSの癖、フォーカス処理、アプリのショートカットエンジン経由のキーボードショートカットなど）を検証するテストにはこちらを使ってください。
+- **CIにはChromium** — ヘッドレスCI環境でより信頼性が高く、Windowsユーザーにとってはトレードオフですらありません。TauriのWindows向けWebView（WebView2）はChromiumベースなので、CIでのChromium実行はWindowsに対する本物のエンジンカバレッジをそのまま提供します。
+
+肝心なルール：macOS/Linuxのカバレッジのためにローカルでは常にWebKitで検証し、Playwrightのプロジェクトマトリクスには両方を残してください。CIでDOM限定のテストにChromiumを使うのは、macOS/Linuxにとっては現実的な妥協であり、Windowsにとっては正真正銘のカバレッジです——どちらにしても手抜きではありません。
+
+</Warning>
+
+## コアクレートパターン
+
+プラットフォーム非依存のビジネスロジックを、Tauri依存のない別のRustクレートに抽出します。このクレートはTauriアプリケーションコンテキストなしで標準的な `cargo test` でテストできます：
+
+```
+src-tauri/
+  Cargo.toml          # depends on core + tauri
+  src/
+    main.rs           # Tauri setup, commands
+    commands.rs       # #[tauri::command] handlers
+core/
+  Cargo.toml          # no Tauri dependency
+  src/
+    lib.rs
+    settings.rs       # pure Rust logic
+    file_ops.rs       # file operations
+    transforms.rs     # data transforms
+```
+
+```toml
+# core/Cargo.toml
+[package]
+name = "myapp-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# No tauri dependency here
+```
+
+```rust
+// core/src/settings.rs
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct Settings {
+    pub theme: String,
+    pub font_size: u32,
+}
+
+impl Settings {
+    pub fn with_theme(mut self, theme: &str) -> Self {
+        self.theme = theme.to_string();
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_with_theme() {
+        let settings = Settings {
+            theme: "light".to_string(),
+            font_size: 14,
+        };
+        let updated = settings.with_theme("dark");
+        assert_eq!(updated.theme, "dark");
+        assert_eq!(updated.font_size, 14);
+    }
+}
+```
+
+<Tip>
+
+コアクレートパターンにより、完全なTauriアプリをビルドせずにCIで `cargo test` を実行できます。高速で信頼性が高く、ロジックバグを早期にキャッチします。
+
+</Tip>
+
+## バックエンドブリッジモックアダプターパターン
+
+Tauriアプリでは、フロントエンドはIPCコマンドを通じてRustバックエンドと通信します。フロントエンドテストでは、このブリッジをモックします：
+
+```typescript
+// src/adapters/backend.ts -- the real adapter
+import { invoke } from "@tauri-apps/api/core";
+
+export interface BackendAdapter {
+  getSettings(): Promise<Settings>;
+  saveSettings(settings: Settings): Promise<void>;
+  readFile(path: string): Promise<string>;
+}
+
+export const tauriBackend: BackendAdapter = {
+  async getSettings() {
+    return invoke<Settings>("get_settings");
+  },
+  async saveSettings(settings) {
+    return invoke("save_settings", { settings });
+  },
+  async readFile(path) {
+    return invoke<string>("read_file", { path });
+  },
+};
+```
+
+```typescript
+// src/adapters/mock-backend.ts -- for testing
+import type { BackendAdapter, Settings } from "./backend";
+
+export function createMockBackend(
+  overrides: Partial<BackendAdapter> = {}
+): BackendAdapter {
+  return {
+    async getSettings() {
+      return { theme: "dark", fontSize: 14 };
+    },
+    async saveSettings() {},
+    async readFile() {
+      return "mock file content";
+    },
+    ...overrides,
+  };
+}
+```
+
+```typescript
+// In the app entry point
+import { tauriBackend } from "./adapters/backend";
+import { createMockBackend } from "./adapters/mock-backend";
+
+// Runtime detection, not build-mode detection: import.meta.env.MODE === "test"
+// only ever fires under Vitest. Playwright drives the built app in a real
+// browser, so the mock must be selected by checking for the Tauri WebView's
+// injected global -- otherwise E2E runs would hit the real IPC bridge.
+const backend =
+  "__TAURI_INTERNALS__" in window ? tauriBackend : createMockBackend();
+```
+
+## 8ステップエスカレーションラダー
+
+Tauriアプリの場合、エスカレーションラダーは標準のテストレベルを超えて拡張されます：
+
+| ステップ | メソッド | キャッチするもの |
+|---------|--------|---------------|
+| 1 | コアクレートの`cargo test` | 純粋なRustロジックバグ |
+| 2 | Vitestユニットテスト | フロントエンドロジックバグ |
+| 3 | Vitest + jsdomコンポーネントテスト | コンポーネント動作バグ |
+| 4 | Playwright WebKit（devサーバー） | フロントエンドレンダリングバグ |
+| 5 | Playwright WebKit（本番ビルド） | ビルド固有のフロントエンドバグ |
+| 6 | verify-ui + headless-browser | フロントエンドのCSS/ビジュアルバグ |
+| 7 | Tauriデブモードの手動テスト | IPC連携バグ |
+| 8 | Tauri本番ビルドの手動テスト | 完全なアプリパッケージングバグ |
+
+<Note>
+
+ステップ1-6は自動化可能でCIに含めるべきです。ステップ7-8は完全なTauriアプリケーションが必要で、通常は手動またはディスプレイサーバーを備えた専用CIが必要です。
+
+</Note>
+
+### ステップバイステップガイド
+
+**ステップ1-3: 高速、自動化可能、ブラウザ不要**
+
+```bash
+# Step 1: Rust core logic
+cd core && cargo test
+
+# Step 2: Frontend unit tests
+pnpm vitest --project unit
+
+# Step 3: Frontend component tests
+pnpm vitest --project component
+```
+
+**ステップ4-6: ブラウザが必要、ただし自動化可能**
+
+```bash
+# Step 4: E2E against dev server (WebKit only)
+# playwright.config.ts's webServer starts `pnpm dev` and waits for it to be
+# ready -- no manual backgrounding, so Playwright can't race an unready server.
+npx playwright test --project=webkit
+
+# Step 5: E2E against production build
+pnpm build
+# webServer's command is `pnpm preview` here (see CI Configuration below);
+# Playwright starts it and waits for port 4173 before any test runs.
+npx playwright test --project=webkit
+
+# Step 6: Visual verification -- extract computed styles + screenshots, then
+# compare the JSON `styles` output against the expected values (verify-ui is
+# a plain Node script, not a CLI with its own --check flag)
+node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
+  "http://localhost:4173" ".app" "./verify-ui-out" "400,800,1200" "light,dark"
+```
+
+**ステップ7-8: 完全なTauriアプリが必要**
+
+```bash
+# Step 7: Tauri dev mode
+pnpm tauri dev
+# Manual testing in the actual Tauri window
+
+# Step 8: Production build
+pnpm tauri build
+# Test the built .dmg / .msi / .AppImage
+```
+
+## Tauriプロジェクトの CI設定
+
+ワークフローのステップ内でビルド+起動チェーンをバックグラウンド化する代わりに、`webServer` をすでにビルド済みのpreviewサーバーに向けてください——これは姉妹関係にあるPlaywrightページの[本番ビルド検証](../tool-patterns/playwright-patterns.mdx#本番ビルド検証)パターンと同じ考え方です：
+
+```typescript
+// playwright.config.ts (excerpt)
+export default defineConfig({
+  webServer: {
+    command: "pnpm preview",
+    port: 4173,
+    reuseExistingServer: !process.env.CI,
+  },
+  // ...projects from "WebKit First: Matching the Production Engine" above
+});
+```
+
+```yaml
+# .github/workflows/test.yml
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd core && cargo test
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+      - run: pnpm vitest run
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+      - run: npx playwright install webkit --with-deps
+      - run: pnpm build
+      - run: npx playwright test --project=webkit
+```
+
+<Warning>
+
+Tauri E2Eテストは、OSにかかわらずWebKitの*ブラウザバイナリ*のインストールが必要です——Playwrightは常に自身がバンドルしたWebKitビルドを操作するのであって、システムのSafariを使うことは決してありません。`npx playwright install webkit` はmacOSを含むすべてのランナーで必要です。Ubuntu固有なのは（WebKitが必要とするLinuxのシステムライブラリをインストールする）`--with-deps` フラグだけです。macOSランナーでは `npx playwright install webkit` だけで十分です。
+
+</Warning>
+
+## セーフティネットとしての定期再試験
+
+Tauriのキーボードショートカットやネイティブプラットフォームのテストは**プラットフォーム非対応**カテゴリに分類されます：実際のWebKit/macOSでのみ信頼できます。上記のCI設定はCIセーフなレイヤー（フロントエンドユニットテストとDOMのみのPlaywrightスペック）をカバーしていますが、薄いネイティブ統合レイヤー — `@interactive`および`@macos-only`タグ付きスペック — にはセーフティネットとして定期的なmacOSジョブが必要です。
+
+ローカルヘビーレーン（`exam`）は便利ですが回避可能です。また環境依存でもあります（同じスイートがLinux/WSL2ホストでは多数のスペックをフォールスレッドします）。**macOSランナー上での定期CI再試験**が、これらのプラットフォーム依存スペックを実際のリグレッションゲートの一部とするペーパートレイルを提供します。
+
+完全なワークフロー（cron + `workflow_dispatch`スケルトン、重複排除されたIssue起票、マージ前オンデマンドディスパッチ）については[定期再試験 & 夜間試験](../ci-operations/scheduled-re-exam.mdx)を参照してください。

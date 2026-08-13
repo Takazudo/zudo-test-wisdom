@@ -122,8 +122,8 @@ For a formatter or any idempotent transform, add the idempotency check (`format(
 
 **Escalation trigger.**
 
-- Ships **platform-specific binaries or an exec bit** → add publish-time pack verification; the three failure modes a plain unit suite cannot see are in [Publishing-Pipeline Verification](../real-world-patterns/publishing-pipeline.mdx).
-- **Consumed by pin across other repos** → add a scheduled registry drift net (**T3**) so a breaking publish is caught before consumers hit it — see [Scheduled Re-exam](../real-world-patterns/scheduled-re-exam.mdx).
+- Ships **platform-specific binaries or an exec bit** → add publish-time pack verification; the three failure modes a plain unit suite cannot see are in [Publishing-Pipeline Verification](../ci-operations/publishing-pipeline.mdx).
+- **Consumed by pin across other repos** → add a scheduled registry drift net (**T3**) so a breaking publish is caught before consumers hit it — see [Scheduled Re-exam](../ci-operations/scheduled-re-exam.mdx).
 - **Emits a browser runtime** (a generator that ships a client router, islands, view transitions) → it is no longer just a library. The test surface follows the *emitted artifact*: cover the runtime with L2 DOM tests, per [the CLI-shaped-generator note](./execution-tiers.mdx#which-tiers-does-a-project-need).
 
 ## Archetype: Monorepo App + Functions Backend
@@ -150,7 +150,7 @@ it("POST /api/login returns a session token", async () => {
 });
 ```
 
-Mock the binding, not the runtime — the setup patterns are in [Backend & Node.js Testing](../real-world-patterns/backend-testing.mdx#mock-the-binding-not-the-runtime).
+Mock the binding, not the runtime — the setup patterns are in [Backend & Node.js Testing](../project-recipes/backend-testing.mdx#mock-the-binding-not-the-runtime).
 
 **Skip — and why.**
 
@@ -187,7 +187,7 @@ it("shows the opened file path from the bridge", async () => {
 });
 ```
 
-The core-crate and backend-bridge-mock patterns are in [Tauri App Testing](../real-world-patterns/tauri-testing.mdx#backend-bridge-mock-adapter-pattern).
+The core-crate and backend-bridge-mock patterns are in [Tauri App Testing](../project-recipes/tauri-testing.mdx#backend-bridge-mock-adapter-pattern).
 
 **Skip — and why.**
 
@@ -212,7 +212,7 @@ const BASE = process.env.TARGET_URL ?? "http://localhost:8788";
 export const url = (path: string) => new URL(path, BASE).toString();
 ```
 
-Guard anything that mutates prod behind an explicit destructive-test guard — see the environment-based URL switching and destructive-test-guard patterns in [HTTP API Testing](../real-world-patterns/backend-testing.mdx#http-api-testing).
+Guard anything that mutates prod behind an explicit destructive-test guard — see the environment-based URL switching and destructive-test-guard patterns in [HTTP API Testing](../project-recipes/backend-testing.mdx#http-api-testing).
 
 **Skip — and why.**
 

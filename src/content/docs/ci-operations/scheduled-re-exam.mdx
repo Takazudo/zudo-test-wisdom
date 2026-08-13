@@ -1,0 +1,831 @@
+---
+title: Scheduled Re-exam & Night Exam
+description: Operating heavy, platform-bound test lanes on a schedule -- the CI re-exam workflow, deduped failure issues, on-demand dispatch, and the local night exam.
+sidebar_position: 3
+---
+
+## Why a Local-Only Heavy Lane Fails as the Safety Net
+
+Some test lanes can never run on PR CI: pixel assertions that need a hardware GPU, keyboard-shortcut delivery that is only trustworthy on a real OS. The [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) covers how a test gets classified that way; this page covers what to do operationally once it has. The tempting answer is "run those lanes on the developer's machine before pushing" -- the local heavy lane, [tier T4](../decision-guide/execution-tiers.mdx). As a convenience, that is fine. As the *only* safety net, it fails in three ways:
+
+- **It is bypassable.** A local gate is a script someone may or may not run. Under deadline pressure, on a borrowed machine, or behind a `--no-verify`, it silently does not happen.
+- **It is machine-dependent.** Consider a Tauri text-editor app whose keyboard-shortcut e2e specs are only trustworthy on real WebKit/macOS: on a Linux/WSL2 host the same suite false-reds dozens of specs, while a real macOS machine is the gold standard. Whether the local gate even *means anything* depends on whose machine ran it.
+- **It leaves no paper trail.** Nobody can answer "when did this lane last pass, and on what hardware?" A green that only ever existed in one terminal's scrollback is not a regression gate.
+
+<Note>
+
+**AI agents are "the other contributors".** Every argument above used to be about teammates; now it is also about coding agents. An agent working in a sandbox, in CI, or on a Linux host is exactly the contributor who cannot run your macOS-only lane -- and it will bypass the local gate without malice, every time. A safety net that requires the right person on the right machine to remember a step is not a net.
+
+</Note>
+
+The fix is not to abandon the local lane -- it is to stop asking it to be the enforcement layer. Keep it for speed and convenience, and add a **scheduled CI re-exam**: the heavy lanes re-run on capable hardware on a schedule, with a paper trail and automatic issue filing.
+
+## Two Commands, Two Budgets: b4push and exam
+
+Before building the scheduled tier, split the local commands. The pre-push convenience pass and the whole-regression heavy run are different jobs and need different names and different time budgets:
+
+| Command  | Contents                                                          | Budget             | Who runs it                                                              |
+| -------- | ----------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------ |
+| `b4push` | lint gates, typecheck, affected unit tests, build, CI-safe smoke   | bounded, 5--10 min | everyone, before every push, on any machine                              |
+| `exam`   | the whole-regression heavy run: GPU, WebKit/macOS, long flows      | open-ended         | opt-in and platform-gated: scheduled CI, or the capable machine at night |
+
+The split prevents a specific failure mode: one command slowly accreting both jobs. The moment the pre-push pass exceeds its budget, people -- and agents -- start skipping it, and then *nothing* runs before push. `exam` is allowed to be slow precisely because nobody sits waiting for it; `b4push` stays trusted precisely because it is fast.
+
+The name is deliberate. The project periodically re-takes its whole exam, instead of pretending every push can afford to.
+
+### When b4push exceeds its budget
+
+If `b4push` creeps past its budget, trim it in this order -- and require per-step timing output so the gate stays observable, not aspirational:
+
+1. **Full e2e → `@smoke` subset.** Keep only the critical journeys plus the suites that cover areas the current diff touches. Criteria: if a full e2e pass takes more than a minute or two, scope it down; the scheduled exam is the backstop for everything else.
+2. **Full unit run → affected-only.** Use turborepo/nx affected or per-package filters to run only the packages the diff reaches. A broad unit pass that reruns every package on every push is the most common accretion pattern.
+3. **Docs/site builds → CI-only.** Drop the local docs build from `b4push`; let PR CI own it. A docs build that nobody waits on locally still contributes to budget creep.
+
+Require `--reporter=verbose` (or equivalent) at each step so timing is visible in the log. If the trimmed `b4push` still exceeds its budget, resist the temptation to just rename the time limit upward. An enforced 25-minute gate beats an aspirational 10-minute one that gets skipped -- but if the gate is genuinely 25 minutes, name it honestly and measure it. The real failure mode is a budget that exists only in the README.
+
+#### Heavy-compile / native (cargo, Rust, ...) projects
+
+The cut-order above subsets **tests** -- it assumes the cost scales with how many specs run. For a native project where the dominant pre-push cost is **compilation**, that axis is the wrong one. A Rust workspace embedding V8 takes 15--30 min for the first cold `cargo` build; *any* compiling step (`cargo clippy`, `cargo test`) blows the budget on a cold tree, and there is no turborepo/nx "affected" for cargo to subset along. Trimming test count does not help when the budget is bounded by compile time, not spec count.
+
+The native analogue of the cut-order moves the cut along the compilation axis instead:
+
+1. **The bounded budget presumes a warm incremental tree.** It only holds when the prior build's artifacts are still on disk; on a cold tree no test-subsetting recovers it.
+2. **Keep the full compiling suite in CI**, not `b4push`. CI is the authoritative T1 gate (see [Execution Tiers](../decision-guide/execution-tiers.mdx)) and runs the full `cargo clippy` / `cargo test` on a warm cache. `b4push` is not the place to pay first-cold-compile cost.
+3. **`b4push` runs only the non-compiling fast checks** -- `fmt`, format, typecheck, JS tests -- **plus warm-tree lint** (a `cargo clippy` that reuses the incremental tree, which is cheap when warm and the budget-buster when cold).
+4. **Gate the full local compile/test behind an opt-in env flag**, e.g. `B4PUSH_FULL=1`, so the contributor who wants the full local pass can ask for it while the default stays bounded and CI remains the enforcement layer.
+
+<Tip>
+
+Same principle as the JS cut-order, different axis: there the cut is by test count, here it is by compilation. The default `b4push` stays fast and trusted; the cold-compile cost lives in CI, which is the gate that actually blocks the merge.
+
+</Tip>
+
+## Guard-Manifest Parity Between b4push and CI
+
+### The Failure Mode: Guard-Set Drift
+
+The split above treats `b4push` and CI as two budgets for the same job -- but it says nothing about *which lightweight gates* each one actually runs. In practice they drift independently: someone adds a new lint rule to the pre-push script under deadline pressure and forgets to mirror it in the CI workflow, or a CI job gets renamed and the corresponding `b4push` step quietly stops matching anything. Neither side is wrong on its own -- the pre-push script still runs, the CI workflow still passes -- so nothing looks broken. The gate that silently went missing is bypassable from that point on: locally it never ran (nobody re-adds the b4push line), and in CI it was never required (nobody re-adds the workflow step). The fix is not a bigger pre-push script or a bigger workflow file; it is a mechanism that treats "wired into both surfaces" as a checkable invariant instead of a manual habit.
+
+### One Manifest Entry, Two Surfaces
+
+Each lightweight guard gets exactly one entry in a manifest, and the entry carries **two matchable forms**: a `ciNeedle` -- a substring searched for in the CI workflow YAML -- and a `scriptToken` -- a substring searched for inside the pre-push script's marked guards region (below). The manifest is the single source of truth for "this guard must exist on both surfaces"; the two forms exist because a workflow step and a script line are different kinds of text, and the meta-check needs a literal substring to search for on each side.
+
+```bash
+# scripts/guard-manifest.sh -- one line per guard: id | ciNeedle | scriptToken
+# ciNeedle is matched against .github/workflows/*.yml; scriptToken against the
+# guards region of scripts/b4push.sh. Both must be present for a guard to be wired.
+GUARD_MANIFEST=(
+  "lint|pnpm lint|pnpm lint"
+  "typecheck|pnpm check|pnpm check"
+  "format|pnpm format:md -- --check|pnpm format:md -- --check"
+)
+```
+
+### The Marked Guards Region
+
+`b4push` is a hand-maintained script that also contains setup, logging, and steps that are not part of the parity contract (the heavy build step below, for instance). Rather than scan the whole file, the meta-check only looks inside an explicitly marked region:
+
+```bash
+#!/usr/bin/env bash
+# scripts/b4push.sh
+set -euo pipefail
+
+# >>> guards:begin -- every scriptToken in scripts/guard-manifest.sh must appear here
+pnpm lint
+pnpm check
+pnpm format:md -- --check
+# >>> guards:end
+
+pnpm build
+```
+
+The markers keep the contract narrow: a step outside `guards:begin`/`guards:end` is free to exist without a manifest entry, and the meta-check never has to guess which lines count.
+
+### The Meta-Check Runs on Both Surfaces
+
+A meta-check script reads the manifest, greps the CI workflow files for each `ciNeedle` and the guards region for each `scriptToken`, and fails the moment either side is missing an entry that is not explicitly allowlisted (next section). It runs as **both** a `b4push` step and a required CI job -- so drift is caught wherever it was introduced, not only on the side someone remembered to test:
+
+```bash
+#!/usr/bin/env bash
+# scripts/guard-parity-check.sh -- fails if a manifest guard is missing from either surface
+set -euo pipefail
+
+source scripts/guard-manifest.sh
+source scripts/guard-allowlist.sh
+
+GUARDS_REGION="$(sed -n '/# >>> guards:begin/,/# >>> guards:end/p' scripts/b4push.sh)"
+CI_YAML="$(cat .github/workflows/*.yml)"
+
+FAIL=0
+for entry in "${GUARD_MANIFEST[@]}"; do
+  IFS='|' read -r id ci_needle script_token <<< "$entry"
+
+  if ! grep -qF -- "$script_token" <<< "$GUARDS_REGION"; then
+    echo "::error::guard '$id' is in the manifest but missing from b4push's guards region"
+    FAIL=1
+  fi
+
+  is_allowed=0
+  for allowed in "${GUARD_CI_ALLOWLIST[@]}"; do
+    [ "$allowed" = "$id" ] && is_allowed=1
+  done
+
+  if [ "$is_allowed" -eq 0 ] && ! grep -qF -- "$ci_needle" <<< "$CI_YAML"; then
+    echo "::error::guard '$id' is in the manifest but missing from CI, and not allowlisted"
+    FAIL=1
+  fi
+done
+
+exit "$FAIL"
+```
+
+Wiring it into both surfaces is two one-line additions: inside the `guards:begin`/`guards:end` region of `b4push.sh` (so a dirty checkout still catches the drift locally), and as its own step in the CI workflow:
+
+```yaml
+# .github/workflows/ci.yml (excerpt)
+- name: Guard-manifest parity check
+  run: bash scripts/guard-parity-check.sh
+```
+
+### The Allowlist Needs a Reason
+
+A guard can legitimately have no CI equivalent -- a script-only convenience check, say -- but that has to be a decision someone made, not an omission nobody noticed. The allowlist is a separate file, and every entry carries a mandatory `# reason:` comment directly above it. An allowlist without a reason is indistinguishable from the drift the whole mechanism exists to catch, so treat a bare entry the same as a missing one:
+
+```bash
+# scripts/guard-allowlist.sh -- guards intentionally exempt from the CI surface
+# Every entry MUST carry a "# reason:" comment on the line above it --
+# an allowlist entry without one is the same silent hole this mechanism exists to close
+GUARD_CI_ALLOWLIST=(
+  # reason: covered by CI's separate full-install `build` job (see below),
+  # not a substring-matchable script step
+  "build"
+)
+```
+
+<Warning>
+
+**A reason-less allowlist entry defeats the whole mechanism.** The allowlist exists to make CI-exemption a recorded decision, not a workaround. If the meta-check itself does not enforce the `# reason:` comment, add that as a second, cheap check inside `guard-parity-check.sh` -- an allowlist that anyone can extend with a bare id is drift wearing a disguise.
+
+</Warning>
+
+### Heavy Steps Stay Outside the Manifest, by Design
+
+The manifest only covers **lightweight, substring-matchable guards** -- lint, typecheck, format checks, the kind of step that is a single command on both surfaces. `build`, full test runs, and validation legitimately run as separate full-install CI jobs rather than pure-script steps: they need their own dependency install, their own timeout, sometimes their own runner. Forcing them into the manifest's `ciNeedle`/`scriptToken` shape would be the wrong contract -- a CI job is not a substring inside a YAML file the way a workflow step's `run:` line is. This asymmetry is intentional, which is exactly what the `build` allowlist entry above documents: it is not missing from the manifest by oversight, it is excluded because heavy steps are a different kind of thing.
+
+<Tip>
+
+This pattern is purely additive to the `b4push`/`exam` split above: it does not change what either command runs, only guarantees that the lightweight gates the split assumes both surfaces share do not quietly drift apart.
+
+</Tip>
+
+## Ignored-Test-Manifest Parity: A Sibling Inventory Contract
+
+The exclusion just above is narrower than it first looks. Heavy lanes stay out of the guard manifest because the heavy _jobs_ -- the build, the full test run, the platform-gated exam -- are not substring-matchable script steps. But a heavy lane also has a **membership list**: the set of tests it is supposed to run. That list is not a job; it is exactly the substring-matchable inventory the meta-check was built for. It earns its own parity contract -- a _sibling_ of the guard manifest, not a new row folded inside it.
+
+The trap is specific to a scheduled exam that selects its tests by **exact name**. In a cargo/nextest project the T3 exam runs the ignored set through an exact-name `-E` filterset -- `-E 'test(=crate::e2e::foo) + test(=crate::e2e::bar)'` -- and an exact-name filterset is an **allowlist**: a test runs in the exam only if its fully-qualified name is spelled out there. So a brand-new heavy `#[ignore]` e2e defaults to running in **no CI lane at all**. T1 skips it because it is `#[ignore]`d; the exam never selects it because nobody added its name. The test is homeless, and nothing goes red to say so.
+
+This is not hypothetical. `dev_sibling_watch_1678_e2e` -- the headline acceptance test of its epic wave -- landed with a correct taxonomy tag, a correct row in the ignored-test manifest table, and correct `e2e-heavy` group membership, yet was simply absent from the exam-lane filterset. It had **zero** ongoing regression protection from the moment it merged, and the gap surfaced only because two independent reviewers each happened to diff the filterset by hand. The same audit turned up the identical failure mode on the manifest itself: the table's header claimed 33 ignored tests while the tree held 34 -- a row silently dropped in an earlier merge. Both are doc/inventory surfaces that only a human ever reconciles, so both drift.
+
+The cure is the guard-parity mechanism pointed at a second manifest. A script enumerates every `#[ignore = "..."]` test in the tree and requires **bidirectional set equality** against two surfaces: the rows of the ignored-test manifest table, and the exact-name needles in the scheduled lane's filterset. Bidirectional is the point -- a stale manifest row or a dangling filterset needle fails the check exactly as loudly as a newly-homeless test, so neither surface can rot in either direction. (The tree-versus-manifest half is also what catches the 33-vs-34 drift: a dropped row shows up as a tree test with no matching row.) An allowlist-with-reason exempts the tests that run in no exam lane _by design_ -- a `pending-feature:`-ignored test has no gate until its feature ships -- following the same discipline as the guard allowlist above: a bare exemption is drift wearing a disguise.
+
+```bash
+#!/usr/bin/env bash
+# scripts/ignored-manifest-parity.sh
+# The #[ignore]d tests in the tree, the manifest table's rows, and the exam's
+# exact-name filterset must name the SAME set. Equality is bidirectional -- a
+# stale row or a dangling needle fails just like a newly-homeless test does.
+set -euo pipefail
+
+source scripts/ignored-allowlist.sh   # IGNORED_EXAM_ALLOWLIST -- tests that run in no exam lane BY DESIGN (e.g. pending-feature:)
+
+# The tree's ignored set. A raw grep of `#[ignore = "` finds the attribute but
+# not the module path; nextest resolves both. --workspace so every member is
+# listed, not just the default set. A #[cfg(target_os = "...")] + #[ignore]
+# test only compiles on its own platform, so no single run sees the whole tree:
+# either union every platform's inventory before the diff, or partition the
+# manifest and filterset by platform so each job checks only its own rows.
+# The issue-numbered naming keeps testcase paths unique tree-wide; in a
+# workspace where two suites can share a path, key by binary and pair each
+# needle with binary_id(=...) so the two do not collapse.
+tree_names() {
+  # --run-ignored ignored-only still lists non-ignored testcases as
+  # filter-mismatch entries, so select on .value.ignored -- keys[] alone
+  # would emit every test name, not just the ignored ones.
+  cargo nextest list --workspace --run-ignored ignored-only --message-format json \
+    | jq -r '."rust-suites"[].testcases | to_entries[] | select(.value.ignored) | .key' | sort -u
+}
+
+# Both the manifest table and the workflow spell each test as an exact-name
+# needle -- test(=fully::qualified::name) -- so one extractor serves both.
+needles() { grep -oE 'test\(=[^)]+\)' "$1" | sed -E 's/test\(=(.+)\)/\1/' | sort -u; }
+
+TREE="$(tree_names)"
+ALLOW="$(printf '%s\n' "${IGNORED_EXAM_ALLOWLIST[@]}" | sort -u)"
+
+# A stale exemption is as silent a hole as a bare one: every allowlisted name
+# must still name a live ignored test (each entry's mandatory "# reason:" is
+# enforced exactly as in the guard allowlist above).
+STALE="$(comm -13 <(echo "$TREE") <(echo "$ALLOW"))"
+[ -z "$STALE" ] || { echo "::error::allowlist names a test that no longer exists: $STALE"; exit 1; }
+
+# tree <-> manifest: every ignored test has a row, and every row a live test
+# (this half is also what catches a header count of 33 against a tree of 34)
+diff <(echo "$TREE") <(needles docs/ignored-test-manifest.md) \
+  || { echo "::error::ignored-test tree and manifest table disagree (diff above)"; exit 1; }
+
+# (tree - allowlist) <-> filterset: every non-exempt ignored test is selected,
+# and no needle points at a test that no longer exists
+diff <(comm -23 <(echo "$TREE") <(echo "$ALLOW")) <(needles .github/workflows/exam.yml) \
+  || { echo "::error::exam filterset out of sync with the ignored-test tree (diff above)"; exit 1; }
+```
+
+Wire it into **both** surfaces, exactly as the guard-parity check is: a `b4push` step for local pre-push feedback, and a required CI job -- the enforcing surface that blocks the merge. It then fails the moment a new `#[ignore]` test is homeless, instead of waiting for two reviewers to diff the filterset by eye. Keep the filter exact -- nextest's exact-name form is `test(=fully::qualified::name)`; a substring filter (`test(foo)`) would silently widen the lane and defeat the "one named test, one allowlist decision" contract.
+
+<Tip>
+
+Keep this a sibling of the guard manifest, not an extension of it. The guard manifest answers "is this lightweight gate wired into both b4push and CI?"; the ignored-test manifest answers "does every heavy test the tree defines actually run in some lane?" Same meta-check shape, same allowlist-with-reason discipline, two different inventories -- folding them together would force one contract's scoping statement to bend to cover the other.
+
+</Tip>
+
+## The Scheduled CI Re-exam Workflow
+
+<Note>
+
+Scheduled rich CI is a **T3 / post-cutover** concern: build it at the cutover point when the project's test suite is mature enough to justify a dedicated nightly runner. Until then, the local exam lane described here is the interim. See [Execution Tiers](../decision-guide/execution-tiers.mdx) for where this fits in the full maturity arc.
+
+</Note>
+
+A complete skeleton. It runs on a schedule *and* accepts manual dispatch, executes only the tagged heavy lanes (`@gpu`, `@interactive`, `@macos-only` -- see the tag taxonomy on [Execution Tiers](../decision-guide/execution-tiers.mdx)), and files a deduped issue on failure:
+
+```yaml
+# .github/workflows/exam.yml
+name: exam
+
+on:
+  schedule:
+    # Off-minute on purpose: GitHub delays -- and under load, DROPS -- runs
+    # queued at the top of the hour. Nightly ~03:43 UTC.
+    - cron: "43 3 * * *"
+  # On-demand runs for pre-merge escalation (see below)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  exam:
+    # GitHub-hosted macOS runners are Apple silicon from macos-14 onward
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps webkit
+
+      # Run only the tagged heavy lanes -- everything else already ran on PR CI
+      # The json reporter feeds file-exam-issue.sh below; list keeps the live log readable
+      - name: Run heavy lanes
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report/report.json
+        run: pnpm test:e2e --grep "@gpu|@interactive|@macos-only" --reporter=list,json
+
+      - name: File or update the failure tracking issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh
+
+      - name: Close the tracking issue on green
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/file-exam-issue.sh --green
+```
+
+### Runner Notes
+
+In a release-round branch topology, point this nightly schedule at the accumulation branch (e.g. `develop`) rather than at production -- see [Release Rounds: A develop→main Branch Strategy § A nightly heavy lane pointed at develop](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch-a-nightly-heavy-lane-pointed-at-develop) for why a nightly aimed at a rarely-moving production branch learns nothing new between rounds.
+
+- **GitHub-hosted macOS runners are Apple silicon** (`macos-14` and later): real WebKit, Metal-backed rendering. For a canvas/GPU-heavy web app whose pixel-level specs fail on software-rendering CI runners, this alone can be the difference between false-red and trustworthy.
+- **Third-party hosted macOS providers** exist for when the GitHub-hosted pool is too slow or too expensive for the suite.
+- **A self-hosted runner on your own hardware is an escalation, not a default.** If you do escalate: schedule-only on `main`, never PR-triggered on a public repo, and pair it with offline detection -- e.g. a companion job on a hosted runner that alerts when the self-hosted job has not reported within N hours -- so a sleeping machine is visible rather than silently green-by-absence.
+- **Runner shapes, pricing, and sizing rules live elsewhere.** See [CI Runner Sizing](./ci-runner-sizing.mdx) for the label matrix, macOS cost multipliers, and the four rules for when a bigger or different runner actually helps.
+
+<Warning>
+
+**Never let PRs trigger a self-hosted runner on a public repository.** A PR-triggered self-hosted runner executes code from anyone who opens a pull request, on your machine. Keep self-hosted exam jobs schedule-only on `main`.
+
+</Warning>
+
+## T3 as an External-Dependency Drift Net
+
+Everything above assumes T3 exists to reach hardware or a platform the PR runner cannot provide. A second, unrelated trigger lands a test in the same tier for a different reason: **the project's core dependencies are external packages that move independently of the repo** -- published npm packages consumed by pin, where the registry can ship a breaking change on a schedule the repo never controls. The PR gate cannot catch this by construction: it installs from the lockfile, so it can never see what changed in the registry since that lockfile was generated. This shape needs no GPU, no macOS, no special hardware -- the runner should match T1 (plain ubuntu), because the trigger is external drift, not platform capability.
+
+### Two Lanes: Same-Suite Re-run and Registry-Integration
+
+The pattern splits into two lanes with different jobs:
+
+1. **Nightly same-suite re-run.** Re-run the exact CI-safe suite the PR gate runs, unchanged. No new tests are written for this lane -- its only value is as a main-branch drift net, catching whatever regresses between merges for reasons unrelated to any single PR.
+2. **Registry-integration lane.** A real `pnpm install` from the registry, followed by a full build of a scaffolded project that consumes the published packages the way an end user would. This is the lane that actually exercises the external world: the PR gate's lockfile-pinned install can never observe a missing export, a packaging bug, or an unresolvable dependency on a minimal scaffold, because those only surface when the install resolves against the live registry.
+
+The registry-integration lane is the scheduled cousin of a set of [publish-time gates](./publishing-pipeline.mdx): for a CLI shipped as a meta package plus per-platform binaries via `optionalDependencies`, those gates verify the publish pipeline itself -- tarball propagation, file modes, idempotent publish -- once per release, across every platform. This lane catches a registry-side regression nightly and on one platform; those gates catch a publish-side one immediately and on all of them.
+
+```yaml
+# .github/workflows/drift-net.yml
+name: drift-net
+
+on:
+  schedule:
+    # Off-minute on purpose: GitHub delays -- and under load, DROPS -- runs
+    # queued at the top of the hour. Nightly ~04:29 UTC.
+    - cron: "29 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  same-suite-rerun:
+    # Matches T1's runner -- the trigger is external drift, not platform capability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:ci # the exact PR-gate suite, no new tests
+
+  registry-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # GitHub Actions sets CI=true, which flips pnpm's --frozen-lockfile default to true --
+      # override it explicitly so this install doesn't silently become the frozen one
+      - run: pnpm install --no-frozen-lockfile
+      # This is the step that genuinely resolves against the live registry: `pnpm create`
+      # scaffolds a fresh project with no lockfile of its own, unlike the repo install above
+      - run: pnpm create my-scaffold ./scaffold-under-test
+      - run: pnpm --dir ./scaffold-under-test build
+```
+
+<Warning>
+
+**`pnpm install` alone does not guarantee a live-registry resolve.** GitHub Actions sets `CI=true` for every job, and pnpm's `--frozen-lockfile` default flips to `true` whenever `CI=true` is set -- so a bare `pnpm install` in this lane would be the frozen install, not a resolve against the live registry. `--no-frozen-lockfile` overrides that default, but even then, an up-to-date lockfile leaves nothing new to resolve. The `pnpm create` step above is what actually exercises the registry: it scaffolds a lockfile-free project from scratch.
+
+</Warning>
+
+Both lanes file into the same one-tracking-issue-per-workflow pattern described below -- they do not need a separate issue-filing scheme of their own.
+
+<Tip>
+
+**Runner reconciliation.** The macOS skeleton above is for the heavy/platform-bound trigger; it does not apply here. An external-dependency drift net runs on the same plain-`ubuntu` runner as T1 -- see [Execution Tiers](../decision-guide/execution-tiers.mdx) for how this reads as a third T3 trigger alongside heavy and platform-bound.
+
+</Tip>
+
+### One Month of Telemetry: Where the Signal Landed
+
+One month of production telemetry from a downstream project running this exact pattern settled which lane earns its keep: **all 5** scheduled-exam failures that month came from the registry-integration lane -- a missing package export, a packaging bug, and an unresolvable dependency on a minimal scaffold, among others -- and **zero** came from the same-suite re-run lane. Each failure was fixed within 1-2 days of the nightly catching it.
+
+The asymmetry follows from what each lane can structurally see. The same-suite re-run lane runs the identical suite the PR gate already ran, against the identical lockfile -- it can only catch main-branch drift the PR gate itself would also have caught, which is rare once T1 is healthy. The registry-integration lane is the only one that resolves against the live registry, so it is the only one positioned to see a registry-side regression at all. That does not make the re-run lane worthless -- it is nearly free to add, since it needs zero new tests -- but the registry-integration lane is where the actual catches are.
+
+## One Tracking Issue, Never One Per Run
+
+A nightly job that stays red for a week must not file seven issues. Per-run filing buries the signal under duplicates and trains everyone to ignore the label. The rule: **one open tracking issue per workflow** -- comment on it while the failure persists, close it when the exam goes green, and let the next failure open a fresh one.
+
+The `if: failure()` step in the skeleton above calls this script:
+
+```bash
+#!/usr/bin/env bash
+# scripts/file-exam-issue.sh -- one tracking issue per workflow, never one per run
+set -euo pipefail
+
+LABEL="exam-failure"
+# Workflow name goes in the issue title so the dedup query matches THIS
+# workflow's issue, not another workflow's -- two jobs can share the label
+WORKFLOW_NAME="${GITHUB_WORKFLOW}"
+TITLE="exam: ${WORKFLOW_NAME} scheduled heavy run is failing"
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+# DRY_RUN=1: echo the gh command instead of running it -- safe to test against a fixture report.json
+run_gh() {
+  if [ "${DRY_RUN:-}" = "1" ]; then
+    echo "+ gh $*"
+  else
+    gh "$@"
+  fi
+}
+
+# Find the open tracking issue for THIS workflow: the label narrows the
+# candidates, the title match keeps a second workflow that reuses this
+# script (and label) from appending to the wrong issue
+find_existing() {
+  gh issue list --label "$LABEL" --state open --json number,title \
+    | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | .[0].number // empty'
+}
+
+# --green path: close the tracking issue if one is open, then exit.
+# Must come BEFORE reading report.json -- green runs produce no failure report.
+if [ "${1:-}" = "--green" ]; then
+  EXISTING="$(find_existing)"
+  if [ -n "$EXISTING" ]; then
+    run_gh issue comment "$EXISTING" --body "Exam green: ${RUN_URL}"
+    run_gh issue close "$EXISTING"
+  fi
+  # No open issue -- nothing to do
+  exit 0
+fi
+
+# Failure path: collect failing spec names from the reporter's output
+# (example: Playwright's JSON reporter written to playwright-report/report.json)
+FAILED_SPECS="$(jq -r '.. | objects | select(.ok == false) | .file? // empty' \
+  playwright-report/report.json | sort -u)"
+
+BODY="Scheduled exam failed.
+
+Run: ${RUN_URL}
+
+Failing specs:
+
+\`\`\`
+${FAILED_SPECS}
+\`\`\`"
+
+# Is there already an open tracking issue for THIS workflow?
+EXISTING="$(find_existing)"
+
+if [ -n "$EXISTING" ]; then
+  # Yes: append this run to it -- do NOT open a duplicate
+  run_gh issue comment "$EXISTING" --body "$BODY"
+else
+  # No: create the single tracking issue with the fixed label and title
+  run_gh issue create \
+    --title "$TITLE" \
+    --label "$LABEL" \
+    --body "$BODY"
+fi
+```
+
+Every report carries the things a fix session needs: the fixed label plus the workflow name in the title (so the dedup query finds *this* workflow's issue, not a different workflow's), the failing spec names, and the run URL.
+
+<Note>
+
+Commit the script's executable bit before the first run: `git update-index --chmod=+x scripts/file-exam-issue.sh`. To test the script locally without touching real issues, run it with `DRY_RUN=1` -- the `run_gh()` wrapper echoes the intended `gh` command instead of executing it, so you can verify both paths against a fixture `report.json`.
+
+</Note>
+
+### Pin Reporter-Parsing Fixtures to a Real Captured Report
+
+The script above parses Playwright's JSON reporter output. If you write a unit test for that parser (or for any script that consumes a tool's machine-generated output), the fixture used in the test must be a **real artifact captured from the tool itself** -- not a hand-authored shape that matches your assumption of the schema.
+
+The rule: when you unit-test a script that parses a tool's machine output -- a test runner's JSON reporter, a coverage JSON, a bundler stats file -- commit a trimmed sample of the tool's actual output as the fixture. The concrete recipe:
+
+1. Run the tool once under real conditions.
+2. Save its JSON output, trimmed to a representative subset, as `__fixtures__/real-report.json`.
+3. Write the parser's unit test against that file.
+
+When the tool changes its schema in a future version, the test fails loudly -- instead of agreeing forever with a fabricated structure that no longer matches reality.
+
+**The tell that this trap is in play:** the parser's unit tests are green, but the script produces empty or garbage output when run against real data from a fresh tool invocation. This is the classic signature of a fixture that matches the assumption rather than reality.
+
+<Warning>
+
+Synthetic fixtures are safe only when **you own the contract**. For a third-party tool's output you cannot author truth -- you can only capture it. Hand-authored fixtures are the right choice when the reader owns the schema being tested: for example, mdast tree factories in [remark/rehype plugin tests](../project-recipes/remark-rehype-plugin-testing.mdx) (you own the mdast contract) or synthetic inner-bundle objects in [level-3 build-output tests](../testing-levels/level-3-build-output.mdx) (you own the bundle shape). For a tool like Playwright, Jest, or Vite whose output schema is theirs to change, capturing a real artifact is the only way to stay honest.
+
+</Warning>
+
+## Flake Telemetry Mechanics
+
+Two rules stated elsewhere on this site are policy, not mechanism: [Execution Tiers](../decision-guide/execution-tiers.mdx) says pass-on-retry is a triage signal, not a success, and the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) says a quarantined `@flaky` test still runs allowed-to-fail in the scheduled tier so fresh failure data keeps flowing into its tracking issue. Neither page says how a passed-after-retry test gets detected, or how that data actually reaches an issue. What follows is the mechanics a downstream project built and hardened to make both rules real.
+
+### Retry-Pass Detection
+
+Playwright's JSON reporter marks a test `"status": "flaky"` when it failed at least once and then passed within the retry budget. Trust that field as the primary signal, but do not trust it exclusively -- fall back to the structural shape (more than one entry in `results[]`, with the last one `"status": "passed"`) for the edge cases where a reporter wrapper or an older Playwright version drops the field:
+
+```bash
+#!/usr/bin/env bash
+# scripts/annotate-flaky.sh -- detect retry-passes, annotate, then feed each into its own tracking issue
+set -euo pipefail
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+# Playwright marks a retry-pass "flaky" -- fall back to the structural shape
+# (more than one result, the last one "passed") for reporters that drop the field.
+# Emit identity, not just title -- two specs may share a title
+# (see deflaking-recipe.mdx#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title)
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)        # a "spec" node: has a title and per-project test runs
+  | . as $spec
+  | .tests[]
+  | select(
+      .status == "flaky"
+      or ((.results // []) | length > 1 and (.[-1].status == "passed"))
+    )
+  | "\(.projectName // "default")\t\($spec.file)\t\($spec.title)"
+' playwright-report/report.json |
+while IFS=$'\t' read -r PROJECT FILE TITLE; do
+  echo "::warning file=${FILE}::[${PROJECT}] ${TITLE} -- passed only after retry, record and schedule the fix"
+
+  # The annotation above is decoration until something reads it --
+  # file or append to a deduped tracking issue, one per test, not one per run.
+  # Key the tracking issue on project + file + title. Keyed on title alone, two specs
+  # sharing a name collect telemetry into one issue that neither fix closes.
+  FLAKY_TITLE="flaky: [${PROJECT}] ${FILE} › ${TITLE}"
+  EXISTING="$(gh issue list --label "flaky" --state open --json number,title \
+    | jq -r --arg t "$FLAKY_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')"
+
+  if [ -n "$EXISTING" ]; then
+    gh issue comment "$EXISTING" --body "Retry-pass warning: ${RUN_URL}"
+  else
+    # Best-effort: a fork-originated PR's read-only GITHUB_TOKEN cannot create
+    # issues -- log and move on, the annotation above still stands either way
+    gh issue create --title "$FLAKY_TITLE" --label "flaky" --body "Retry-pass warning: ${RUN_URL}" \
+      || echo "::warning::could not file the tracking issue (read-only token?) -- see the annotation above"
+  fi
+done
+```
+
+Each matching line becomes a GitHub Actions annotation on the run summary -- visible without opening the raw JSON.
+
+### Warnings Need a Consumer
+
+<Warning>
+
+**An emitted annotation is not a filed issue.** Annotations render on the run summary page and nowhere else -- no subscription, no notification, nothing that surfaces them unless someone happens to open that specific run. This is the operational trap a downstream project hit directly: a script like the one above shipped, retry-pass warnings accumulated in run logs for months, and not one of them ever reached the quarantine pipeline's tracking issues -- because nothing consumed them. An annotation is decoration until something reads it and acts on it, which is why the script above pairs every `::warning::` with the deduped-issue call in the same loop iteration, not as a follow-up nobody got to.
+
+</Warning>
+
+### Quarantine-Lane Telemetry
+
+The mandatory inline comment above every `@flaky` test (the paper-trail rule from the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky)) is also a machine-readable pointer: extract each test's tracking-issue URL from it and post that test's pass/fail on every scheduled run. The fix/demote/delete deadline decision becomes data-driven instead of a guess at whether the flake is still happening:
+
+```bash
+#!/usr/bin/env bash
+# scripts/quarantine-telemetry.sh -- post pass/fail to each @flaky test's own tracking issue
+set -euo pipefail
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+# spec.file is relative to the report's config.rootDir (usually the testDir),
+# not the repo root -- resolve it before grepping or every lookup misses.
+ROOT_DIR="$(jq -r '.config.rootDir' playwright-report/report.json)"
+
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)
+  | select(.title | test("@flaky"))
+  | . as $spec
+  | .tests[]
+  | "\(.status)\t\($spec.file)\t\($spec.title)"
+' playwright-report/report.json |
+while IFS=$'\t' read -r STATUS FILE TITLE; do
+  # The tracking-issue URL sits in the mandatory inline comment directly above test().
+  # Scope to the one resolved file, not all of e2e/ -- head -1 across the tree picks
+  # the wrong issue whenever two specs share a title.
+  ISSUE_URL="$(grep -n -B1 -F "\"${TITLE}" "${ROOT_DIR}/${FILE}" 2>/dev/null \
+    | grep -oE 'https://github\.com/\S+/issues/[0-9]+' | head -1)" || true
+  [ -z "$ISSUE_URL" ] && continue  # missing paper trail -- caught separately by the tag-to-issue guard
+  ISSUE_NUM="${ISSUE_URL##*/}"
+  VERDICT="$([ "$STATUS" = "expected" ] && echo "pass" || echo "fail")"
+  gh issue comment "$ISSUE_NUM" --body "Quarantine telemetry: **${VERDICT}** -- ${RUN_URL}"
+done
+```
+
+### Allowed-to-Fail Is an Exit-Code You Capture, Not `continue-on-error`
+
+The quarantine lane is _supposed_ to be red-tolerant -- a `@flaky` test failing is expected, and the lane's whole job is to record that failure into the tracking issue, not to block anything. The obvious way to say "this step is allowed to fail" is `continue-on-error: true`, and it is a trap.
+
+<Warning>
+
+**`continue-on-error: true` paired with `if: failure()` is a dead filing step.** Step-level `continue-on-error` preserves the step's `steps.<id>.outcome` as `failure` but rewrites its `conclusion` to `success`. The job then concludes success, so a downstream `if: failure()` can never be true -- the filing step is dead code and the lane rots while showing green.
+
+</Warning>
+
+```yaml
+# BROKEN: the job concludes success, so `if: failure()` can never be true --
+# the filing step below is dead code and the lane rots while showing green
+- name: Run quarantine lane
+  continue-on-error: true
+  run: pnpm test:e2e --grep "@flaky" --pass-with-no-tests
+
+- name: File or update the tracking issue
+  if: failure()          # never fires
+  run: bash scripts/file-exam-issue.sh
+```
+
+Capture the exit code instead, drive the filing path from _that_, then end the step green on purpose:
+
+```yaml
+- name: Run quarantine lane (allowed-to-fail BY DESIGN)
+  id: quarantine
+  env:
+    PLAYWRIGHT_JSON_OUTPUT_NAME: playwright-report/report.json
+  run: |
+    set +e
+    pnpm test:e2e --grep "@flaky" --pass-with-no-tests --reporter=list,json
+    rc=$?
+    set -e
+    echo "rc=$rc" >> "$GITHUB_OUTPUT"
+    # Deliberate: this lane is green-by-design. The captured rc -- not the
+    # job status -- drives the filing step below.
+    exit 0
+
+- name: Post per-test telemetry (pass AND fail)
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: bash scripts/quarantine-telemetry.sh
+
+- name: File or update the lane tracking issue
+  if: steps.quarantine.outputs.rc != '0'
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: bash scripts/file-exam-issue.sh
+```
+
+Three rules keep this honest:
+
+- **Name the semantics you are relying on.** Step-level `continue-on-error` keeps `steps.<id>.outcome` at `failure` but sets `conclusion` to `success`, and `if: failure()` reads job status (which follows `conclusion`). So there is a YAML-native alternative to the exit-code capture: keep `continue-on-error: true`, give the step an `id`, and key the downstream step on `if: steps.<id>.outcome == 'failure'`. Either works -- the trap is specifically `continue-on-error` **paired with** `failure()`. (Job-level `continue-on-error` does keep `if: failure()` working, but it paints a red ✗ on every run of a lane that is meant to be red-tolerant -- noisy enough that people learn to ignore it.)
+- **Green-by-design must be a recorded decision.** The inline comment on the `exit 0` -- "allowed-to-fail BY DESIGN, rc drives the filing step" -- is mandatory. A bare `exit 0` right after a test run otherwise reads as a bug, and someone will eventually "fix" it by deleting the line that keeps the lane green.
+- **Prove the filing path fires -- once.** Break a quarantined test on a branch, `gh workflow run` the lane (the skeleton already has `workflow_dispatch`), and confirm the tracking issue actually gets its comment. A filing path that has never fired is decoration -- the same trap as the unread annotation above.
+
+### Tag-to-Issue Guard
+
+The paper-trail rule ("`@flaky` is only valid with an inline issue URL right next to it") is only real if something enforces it mechanically. A CI or pre-push script that fails on a missing comment turns the rule from a convention an agent might forget into a gate it cannot skip:
+
+```bash
+#!/usr/bin/env bash
+# scripts/guard-flaky-paper-trail.sh -- fail the gate if a @flaky test lacks its inline issue URL
+set -euo pipefail
+
+MISSING=0
+while IFS=: read -r FILE LINE _; do
+  ABOVE="$(sed -n "$((LINE - 1))p" "$FILE")"
+  if ! echo "$ABOVE" | grep -qE '// quarantined: https://github\.com/\S+/issues/[0-9]+'; then
+    echo "::error file=${FILE},line=${LINE}::@flaky test is missing its inline tracking-issue comment"
+    MISSING=1
+  fi
+done < <(grep -rn 'test(.*@flaky' --include='*.spec.ts' e2e/)
+
+exit "$MISSING"
+```
+
+### Two Small Fixes for a Trustworthy Lane
+
+<Tip>
+
+**Empty-lane ergonomics.** The healthy end state for the quarantine lane is zero `@flaky` tests. Without `--pass-with-no-tests`, a `--grep` that matches nothing turns Playwright's exit code non-zero and reds out the scheduled run for having *nothing left to quarantine* -- the opposite of what should happen:
+
+```bash
+pnpm test:e2e --grep "@flaky" --pass-with-no-tests
+```
+
+</Tip>
+
+<Note>
+
+**Runner quirk: the JSON reporter redirect.** The `--reporter=json:<path>` colon syntax that older examples sometimes show was never valid Playwright CLI syntax -- `--reporter` has only ever accepted a bare reporter name or a comma-separated list of names, so this is not a version-specific regression. `PLAYWRIGHT_JSON_OUTPUT_NAME`, already used in the exam workflow skeleton above, is the supported redirect for the JSON reporter's output path.
+
+</Note>
+
+### Pair the Retry Budget with Trace Capture
+
+A test that passes only on retry is a triage signal -- but a signal with no artifact wastes the triage session. Pair the retry budget (see [Retry Budgets](../decision-guide/execution-tiers.mdx#retry-budgets)) with trace capture on the retry that actually reveals the flake:
+
+```ts
+// playwright.config.ts
+export default defineConfig({
+  retries: process.env.CI ? 2 : 0,
+  use: {
+    trace: "on-first-retry",
+  },
+});
+```
+
+<Warning>
+
+**The trace lands in the runner's `outputDir`, not `playwright-report/`.** Playwright's default `outputDir` is `test-results/` -- traces, screenshots, and videos from failed and retried attempts are written there. `playwright-report/` is a separate directory that summarizes results: in the exam workflow above it holds the JSON reporter's output (`report.json`, via `PLAYWRIGHT_JSON_OUTPUT_NAME`); with the `html` reporter configured instead, it would hold the HTML report. Either way, it does not bundle the raw trace files. An artifact-upload step that only grabs `playwright-report/` silently drops every trace:
+
+```yaml
+- uses: actions/upload-artifact@v4
+  if: failure()
+  with:
+    name: exam-artifacts
+    path: |
+      playwright-report/
+      test-results/
+```
+
+The placement cuts the other way too: `outputDir` (`test-results/`) is **emptied at the start of every run**, so anything you park there to keep across runs is deleted by the next one — see [Artifacts You Want to Keep Must Live Outside `outputDir`](../tool-patterns/playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
+
+</Warning>
+
+## On-Demand Dispatch: The Pre-Merge Escalation
+
+The standing objection to scheduled testing is feedback latency: a regression merged this morning is invisible until tomorrow. `workflow_dispatch` bounds that objection. When a change touches code that only the scheduled tier covers, do not merge on hope -- dispatch the exam against the branch and wait for the verdict:
+
+```bash
+# The change touches code covered only by scheduled-tier tests?
+# Run the exam on the branch BEFORE merging -- do not wait for tonight's cron.
+gh workflow run exam.yml --ref my-feature-branch
+
+# Follow the run to its verdict
+gh run watch "$(gh run list --workflow=exam.yml --limit 1 \
+  --json databaseId --jq '.[0].databaseId')"
+```
+
+This turns the scheduled tier's main weakness into a bounded cost: the *default* feedback loop is nightly, and the changes that genuinely cannot wait get a manual escape hatch.
+
+## The Night Exam: A Project-Scope Agent Skill
+
+The scheduled CI job is deliberately thin: run, report, file. The richer version of the same idea runs where the tests are most trustworthy -- on the gold-standard machine itself, overnight, with an agent doing the parts plain CI cannot.
+
+Define it as a **project-scope agent skill**: a slash-command-style entry point checked into the repository's agent configuration, so the procedure is versioned, reviewable, and identical every night. Invoked manually before sleep:
+
+```bash
+# Before sleep, on the gold-standard machine
+/exam          # run heavy lanes, triage failures, file deduped issues
+/exam --fix    # ...and additionally pick up to 3 issues and fix them in-session
+```
+
+The skill's pipeline:
+
+1. **Preflight** -- refuse to start unless the tree is clean, the branch is `main`, and it is up to date with the remote
+2. **Keep-awake wrapper** -- run under `caffeinate -i` so the machine does not sleep mid-suite
+3. **Run the platform-gated heavy lanes** -- the same tags the CI exam runs
+4. **Agent triage** -- cluster the failures, then separate known environment-noise signatures from real regressions
+5. **Deduped issues per failure cluster** -- one issue per cluster, not one per spec and not one per run
+6. **`--fix` mode** -- pick up to N of the filed issues and fix them in-session, fixes ready for morning review
+7. **Morning summary** -- one message: what ran, what failed, what was noise, what was filed, what was fixed
+
+The first two steps are plain shell:
+
+```bash
+# Preflight -- refuse to run on a dirty or stale tree
+git status --porcelain | grep -q . && { echo "dirty tree"; exit 1; }
+[ "$(git branch --show-current)" = "main" ] || { echo "not on main"; exit 1; }
+git pull --ff-only
+
+# Keep the machine awake for the whole run (macOS)
+caffeinate -i pnpm test:e2e --grep "@gpu|@interactive|@macos-only"
+```
+
+The triage step is the reason this is an agent skill and not a cron script. On the gold-standard machine a red is *probably* real, but every long-lived heavy suite accumulates known noise signatures: a first-run font-cache warning, a timing-sensitive first frame after cold boot. The agent clusters the failures, matches them against the noise signatures recorded in the project's agent instructions, and files issues only for the remainder. That judgment call -- "these three reds are one regression, that fourth red is Tuesday's known noise" -- is exactly what a plain CI job cannot do.
+
+<Note>
+
+**Keep the scheduled CI job anyway.** The night exam depends on a human remembering to run it and a machine staying awake -- exactly the failure modes that disqualify local-only lanes. The pairing is the point: the night exam is the rich lane with triage and fixes; the scheduled CI re-exam is the thin backstop that runs even when nobody remembered.
+
+</Note>
+
+## Scoped Heavy Runs at Implementation Time
+
+Both the cron and the night exam are after-the-fact: they catch the regression hours after the change landed. While *implementing* a change that touches code covered only by heavy-lane tests, do not wait for tonight -- run the related heavy specs now, scoped to the change, on the capable host:
+
+```bash
+# The change touched the shortcut engine -- run just its heavy specs,
+# on the capable host, before declaring the work done
+pnpm test:e2e --grep "@interactive" e2e/shortcuts-*.spec.ts
+```
+
+The hard part is not running the specs -- it is knowing *which* specs a change implicates. That requires a change-to-spec mapping, kept mechanical with two conventions:
+
+- **Issue-numbered spec filenames** -- a name like `e2e/issue-123-shortcut-paste.spec.ts` ties the spec to the change that motivated it and makes it greppable
+- **A module-to-spec table in the project's agent instructions** -- so an agent (or a person) can look up which heavy specs a change implicates:
+
+```markdown
+<!-- In the project's agent instructions: change-to-spec mapping -->
+
+| When a change touches... | Run these heavy specs first            |
+| ------------------------ | -------------------------------------- |
+| src/shortcuts/**         | e2e/shortcuts-*.spec.ts (@interactive) |
+| src/render/gpu/**        | e2e/render-*.spec.ts (@gpu)            |
+| src/export/video/**      | e2e/export-video.spec.ts (@gpu)        |
+```
+
+<Tip>
+
+Make the scoped run a stated requirement in the agent instructions, not folklore: "when a change touches code covered only by heavy-lane tests, run the mapped specs on a capable host (or dispatch the exam workflow on the branch) before declaring the work done."
+
+</Tip>
+
+## The Layered Result
+
+| Surface                  | Runs                                  | When                            | On failure                              |
+| ------------------------ | ------------------------------------- | ------------------------------- | --------------------------------------- |
+| `b4push` (local)         | fast bounded pass                     | before every push               | fix before pushing                      |
+| PR CI                    | CI-safe gates                         | every PR                        | merge blocked                           |
+| Scheduled exam (CI)      | tagged heavy lanes on a macOS runner  | nightly cron + manual dispatch  | deduped tracking issue                  |
+| Night exam (local skill) | heavy lanes + agent triage            | manually, before sleep          | issues per cluster, optional `--fix`    |
+| Scoped heavy run (local) | only the specs related to the change  | during implementation           | fix before declaring done               |
+
+No single surface is the safety net; the layering is. Which tests belong in the heavy lanes at all is decided by the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx), and the tier vocabulary (T0--T4) used throughout is defined on [Execution Tiers](../decision-guide/execution-tiers.mdx).

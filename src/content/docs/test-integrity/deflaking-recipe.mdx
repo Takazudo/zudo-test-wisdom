@@ -1,0 +1,595 @@
+---
+title: Flake Root-Cause Catalog & Deflaking Recipe
+description: "The three rules that govern flaky tests, the root-cause catalog behind them, a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating them, and the gate operator's playbook for red CI you don't own."
+sidebar_position: 1
+---
+
+## The three rules
+
+Everything below is machinery. These are the rules the machinery serves — read them first, and if you only remember one page of this guide, remember this one.
+
+### Rule 1 — "Flaky" is not a diagnosis. It is an admission you have not diagnosed it yet.
+
+Never accept a randomly-pass/fail test. **Prove it first.** The word "flaky" is a thought-terminating label: it silently converts _"I don't know why this fails"_ into _"it's fine,"_ and those are not the same sentence.
+
+The proof obligation is cheap and mechanical, so there is no excuse to skip it — **diff the product's input on a failing run against a passing run:**
+
+- Inputs **identical**, only timing differs → a real flake. Work the catalog below.
+- Inputs **differ** → a **product bug**. Stop. Fix the product. See [The impostor](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
+
+### Rule 2 — "It's OK, it's just flaky" is never acceptable. Every accepted flake devalues red.
+
+The obvious cost is re-running CI forever. That is the **cheap** part. The expensive part:
+
+> Once "just re-run it" is normal, you have trained the team — and every agent working in the repo — **not to believe red.**
+
+Then a real regression that fails 100% gets re-run three times before anyone takes it seriously, and a real bug that fails 30% of the time becomes **literally invisible** — it looks exactly like the usual flake.
+
+The entire value of a test suite is that **red means something.** Flake tolerance is an attack on that property, and it compounds. This is why **pass-on-retry is a triage signal, not a success**: record it, never celebrate it.
+
+Everything on this page downstream of this rule is written for the test's author. If the red you are holding is on a test you *don't* own — you are operating a merge gate, not authoring a fix — the rule still binds you, and there is a dedicated procedure: [the gate operator's playbook](#red-ci-you-don-t-own-—-the-gate-operator-s-playbook).
+
+<Note>
+
+Quarantine is not the enemy — using it as an *answer* is. It is **a pipeline with an exit, not a parking lot.** Legitimate only when ALL of: you have **proven** the nondeterminism is in the test and not the product ([Step 0.5](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky)); a linked issue exists; it still runs allowed-to-fail somewhere; and it has a deadline. And you accept that **while quarantined, the product behavior is unguarded.**
+
+</Note>
+
+### Rule 3 — If a test seems irreducibly probabilistic, you are asserting the wrong thing.
+
+Genuinely nondeterministic systems exist (GC pauses, network latency, thread scheduling). The escape hatch is **not** "accept randomness" — it is to **assert the invariant that IS deterministic**, rather than a point value:
+
+```
+assert(elapsed == 43ms)     // probabilistic — asserts a sample
+assert(elapsed < budget)    // deterministic — asserts the property you actually care about
+```
+
+A probabilistic assertion is almost always a sign you picked a convenient **proxy** instead of the real invariant. Fix the assertion, not the tolerance.
+
+---
+
+## Red CI you don't own — the gate operator's playbook
+
+Everything else on this page is written for the test's **author**: how to diagnose a flake and eliminate it. This section is for a different role. You are the **gate operator** — the human or autonomous agent holding a merge gate when a required check goes red on a test the diff never touched. You did not write the test, you cannot fix it inside this merge window, and Rule 2 has already told you what not to normalize. What Rule 2 does not give you is a decision procedure for the next 30 minutes. This is it.
+
+The role boundary is the point: **the author's job is to make red mean something; the operator's job is to act as if red means something — especially when this particular red probably doesn't.** The moment operators start making private exceptions, Rule 2's compounding failure is underway — not because any single exception was wrong, but because each one goes unrecorded, and the next operator inherits a gate that is already negotiable.
+
+### The procedure
+
+1. **Pin down what you are holding before touching anything.** Confirm the red belongs to the current head SHA, then classify it: an **infrastructure failure** (checkout died, the runner vanished) routes to the infra owner and gets no test-identity issue; a **lane failure** (the roaming teardown signature of [entry 7](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams)) routes to the lane's owner; only a **test failure** continues below. One special case is a gate defect, not a failure at all: a validly quarantined `@flaky` test showing up red in a *required* check means the quarantine and the gate wiring disagree — a quarantined test has no business in a required gate ([Required Behavior Rule 7](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-7-—-red-checks-block-the-author)); route that to the CI owner.
+2. **Test the "unrelated" claim with evidence, not vibes.** "Unrelated to my diff" carries the same proof obligation as Rule 1. The actual exoneration is **history**: the same identity failing *with the same signature* before this diff existed, or concurrently on the base branch. The signature has to match — an identity that used to time out in teardown and now fails an assertion is a different failure wearing a familiar name, and its history exonerates nothing. A [twin leg](#part-1-—-root-cause-catalog-the-twin-leg-comparison-same-commit-same-suite-one-leg-red) on the same commit is the fastest, cheapest narrowing evidence — an *equivalent* sibling leg passing proves the failure is intermittent on head — but it cannot clear the diff by itself: an intermittent race the diff just *introduced* produces the identical green/red pair. Complete the check with a transitive diff-scope pass (shared fixtures, config, dependencies, global setup — not just the failing spec's own files). If you cannot exonerate the diff, stop reading: this is an ordinary red build, and the diff's author owns it.
+3. **Record the occurrence before any rerun.** One tracking issue per failing identity — keyed on [test identity, never bare title](#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title), matrix leg included — **find and update it; never open one per occurrence.** Append: run URL, commit, workflow/job/leg, attempt number, failure phase, artifact links. Preserve the logs and traces *first* — a rerun can overwrite or expire exactly the artifacts that made this occurrence diagnosable. This is Rule 2's "record it, never celebrate it" made operational, and the accumulating history is what later separates an identity that roams (a lane property) from one that repeats (a per-spec fix candidate). A rerun *without* a record is exactly the rerun culture Rule 2 warns about — the retry that quietly eats the evidence.
+4. **Rerun the failed leg, once.** Rerun only the failed job or leg, never the whole workflow — a full rerun burns compute to reproduce green you already have. And the bound is one operator-initiated rerun per head SHA by default: it answers "was that transient?", which is the only question a merge window needs a rerun for. A second requires a specific stated reason — the first rerun's artifacts went missing, a confirmed infrastructure incident just resolved — not "another chance at green." (This bound governs *operator-initiated* reruns; the suite's own per-test retries are a separate, pre-budgeted mechanism — see [Retry Budgets](../decision-guide/execution-tiers.mdx#retry-budgets) — whose pass-on-retry telemetry lands on the same tracking issue.) More reruns *would* estimate failure frequency, but that is diagnosis — burn-in work that belongs to the test's owner on their own time, not to a merge gate holding everyone else's work.
+5. **At the bound, leave the PR blocked and escalate.** Stop initiating reruns. Route by the classification from step 1 — repeating identity to the test's owner, roaming identity to the lane/CI owner — and hand over the tracking issue: the evidence, the rerun count, the identity's history. Merging past red is not on the operator's menu at any evidence level — see below. Quarantine is likewise not an operator unblocking move: it is the owner's decision, downstream of [the product-vs-test proof obligation](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
+
+### Why merge-on-red is never the operator's call
+
+Two reasons — one epistemic, one structural.
+
+The epistemic one: even at its best, your evidence exonerates **the diff**, and the diff is not the only thing the gate protects. The failing identity may be [the impostor](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug) — a real product bug that fails 30% of the time — and "unrelated to this diff" is fully compatible with "live defect in the product you are about to ship on top of." Exonerating the diff answers *whose* problem the red is; it does not answer whether the red is a problem.
+
+The structural one is Rule 2 applied to yourself: an operator who merges past red on private judgment — however good the judgment — has demonstrated that red is negotiable given a sufficiently confident operator, and every future operator (and every agent trained on the precedent) inherits that. The gate's value is precisely that it does not bend to in-context confidence.
+
+So the line is an **authority boundary, not a judgment call**: the gate operator cannot bypass a red required check — the PR stays blocked, and the evidence goes up. If the repository has a break-glass path at all, it is a documented policy invoked by a named authority, with the exact SHA, the evidence links, an explicit risk acceptance, compensating verification, and a follow-up issue all on the record — not an operator improvising with a confident rationale.
+
+<Note>
+
+**For an autonomous agent, this is a hard rule.** An agent operating a merge gate never expands its own authority mid-incident. Record, rerun within the bound, then leave the PR blocked and surface everything. "I proved it was unrelated and merged anyway" is the wrong ending even when the proof was correct — the proof belongs in the escalation, not in a merge rationale.
+
+</Note>
+
+---
+
+## Part 1 — Root-Cause Catalog
+
+Every E2E flake has a cause. The seven below cover the overwhelming majority of cases in practice, and each has a deterministic fix.
+
+<Note>
+
+**These seven are browser-specific; native suites flake for different reasons.** The catalog below (`waitForTimeout`, `networkidle`, animations, hydration races) is the E2E/browser shape of flakiness. A native suite — a Rust/cargo project, a Go service, any non-browser test runner — flakes for a parallel set of causes:
+
+- **Non-deterministic scheduling** — tests that depend on thread/task interleaving (the native analogue of a hydration race).
+- **Fixed `sleep`/timeout deadlines** — a hard-coded `sleep(N)` waiting for async work is the same guess as a bare `waitForTimeout(N)`; poll the real condition or await the completion signal instead.
+- **Port races (`EADDRINUSE`)** — two parallel tests binding the same fixed port; bind to port `0` (OS-assigned) or serialize the tests that need a real port. The same failure mode also hides in a process's **auxiliary** sockets (inspector, HMR, metrics) even when the app ports are all distinct — see [The Hidden Auxiliary-Socket Port Race](../tool-patterns/playwright-patterns.mdx#the-hidden-auxiliary-socket-port-race).
+- **Shared global / process state** — a static, a singleton, or an env var mutated by one test and read by another; the native analogue of test-order coupling. Isolate per-test state.
+- **Package-manager environment-variable leakage (`INIT_CWD`, `npm_config_*`)** — not native-specific; any nested build or test tool invoked through a package-manager script inherits these. Under a package-manager-run script, pnpm exports `INIT_CWD=<invocation root>`. A nested fixture build's tool that resolves a relative path (e.g. `--content-dir`) against `INIT_CWD` instead of its own `cwd` will silently scan the wrong directory — producing deterministically-empty data that reproduces only in CI, where the invocation root differs from a developer's local shell. Fix: pin the working directory explicitly for nested builds rather than trusting `INIT_CWD` or `npm_config_*`.
+- **Filesystem ordering** — relying on directory-listing order or a shared temp path; use a unique temp dir per test and never assume `read_dir` order.
+- **Two independent deadlines** — a test that `spawnSync`/`execSync`s a CLI with a generous child-level `timeout:` (e.g. 30s) but relies on the runner's default per-test timeout (vitest: 5000ms) is flaky under host CPU load: the tighter deadline wins, and the failure ("Test timed out in 5000ms") reads like a hang when the subprocess was merely slow-under-load and would have succeeded inside its own budget. A post-reboot load-average storm (load 59 on a 10-core machine) produced 4 consecutive local-gate failures, each on a different test file, including trivial `--help` tests that never touch the network. Fix: align the deadlines at the config level, not per-test — scope a raised `testTimeout` to the subprocess-heavy project via a projects split; see [per-project timeout budgets](../tool-patterns/vitest-patterns.mdx#project-level-vitest-configs-per-project-timeout-budgets).
+- **Sequential-stage budgets that sum past the runner's kill deadline** — the same trap one level up: not one child deadline racing the runner, but a chain of individually-sane stage deadlines whose _sum_ overruns the runner's per-test budget. A dev-server e2e with sequential stages — 3×120s boot deadlines, 3×60s scenario deadlines, plus setup/teardown — totals ~630s worst-case against a per-test kill deadline of 600s (in a nextest `e2e-heavy` group that deadline is `slow-timeout`'s `period × terminate-after`, not a single duration field — `terminate-after` is an integer count of `period` intervals). Two consequences, both nasty: in the pathological all-stages-slow-but-still-passing run the runner terminates a test that _would have passed_; and because that kill fires from outside the test, runner termination can preempt the test's own diagnostic panic and log flush — so the session logs the test carefully attaches to its panic message are lost on exactly the runs that most need them. (nextest's timeout termination is _graceful_ — it signals first and only force-kills after the configured grace period, default 10s — so this is preemption of a slow panic's flush, not necessarily an instant `SIGKILL`.) Every wait here was event-keyed and every stage deadline individually reasonable, so none of the rules above fire — only budget arithmetic across stages catches it, the same shape as this doc's observation that a CI `timeout-minutes` kill preempts the HTML reporter's `onEnd` hook. **Headroom heuristic** (a rule of thumb, not an exact law): sum the worst-case of _every_ sequential deadline in the test — setup and teardown included — and keep the total under ~75% of the runner's effective per-test kill deadline, so the test's own diagnostic failure always fires before the runner's kill. Cheap review tell: any test that reuses one large shared deadline constant (`BOOT_DEADLINE` and friends) for several sequential waits earns the arithmetic check.
+- **Platform-varied input shape** — the odd one out, and the only cause on this list where **the test is not the problem at all**. See [below](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
+
+For how to quarantine a native flake mechanically (`#[ignore]` + `cargo test -- --ignored`), see [the Rust/cargo note in the quarantine pipeline](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky).
+
+One CI-first failure shape does **not** belong in this catalog at all: a string-absence assertion tripped by the test's own fixture payload is fully deterministic — it just first *surfaces* in CI and masquerades as a product regression. Before treating such a failure as a flake or a real bug, see [Negative Assertions vs. Their Own Fixture Data](./negative-assertion-fixtures.mdx).
+
+</Note>
+
+### The impostor: when the "flake" is a real product bug
+
+Every cause above is nondeterminism in the **test's own machinery** — its scheduling, its sleeps, its ports, its shared state. There is one more shape, and it is categorically different:
+
+> **The platform nondeterministically varies the _shape of the input_ it hands the product, and the product mishandles one of the shapes.**
+
+The test is then perfectly deterministic *given its input*. It is not flaky. It is **correctly failing, intermittently, because it is sampling a real bug** — one that is live in production for every user on that platform, and that no amount of test-side deflaking will fix.
+
+This matters because **the quarantine pipeline actively harms you here.** Quarantine suspends *product* coverage, and the product is the broken thing. `#[ignore]`-ing the test buries a proven defect behind a paper trail that looks responsible.
+
+**Step 0 of quarantine does not catch it.** "Prove the test has ever genuinely passed" passes trivially — the test *does* pass, most of the time. That is exactly the failure mode.
+
+<Warning>
+
+**Diagnostic — do this before you quarantine anything, it takes minutes.** Log the **product's input** on a failing run and diff it against a passing run.
+
+- If the inputs are **identical** and only the timing differs → a real flake. Work the catalog above.
+- If the inputs **differ** → you have a product bug. Stop. Fix the product.
+
+</Warning>
+
+Worked case: a Rust static-site builder's dev-server test asserted that editing one content file re-renders only that file's route, not its siblings. It failed ~2-3 runs in 4 on macOS and never on Linux CI. The filed issue — correctly following the quarantine pipeline — recommended `#[ignore = "flaky: <url>"]` as step 1.
+
+Enabling the product's own existing tick instrumentation took one run:
+
+```
+# failing run
+tick(): kinds=[alpha.mdx:Created]  fan_out_safe=false   # -> narrowing OFF, full re-render
+
+# passing run
+tick(): kinds=[alpha.mdx:Modified] fan_out_safe=true    # -> narrowing ON, one route
+```
+
+Same test, same code, **different OS-delivered input**: macOS FSEvents coalesces an in-place edit of an *existing* file into a `Created` event, which failed the product's all-`Modified` gate and silently disabled an optimization for every macOS user on every content edit. The test was right. Quarantining it would have hidden the bug it had just caught.
+
+The tell is generic even when the mechanism is not: **a failure that correlates with the platform rather than with load or ordering is a product-bug smell, not a timing smell.** A test that fails only on one OS, only on one filesystem, only under one watcher backend, or only on one CPU architecture is telling you the product treats that environment differently — which is a claim worth checking before you silence it.
+
+### 1. Timing waits (bare `waitForTimeout`)
+
+A bare `waitForTimeout(N)` is a guess: "I think N milliseconds will be enough." It is wrong on a slow CI runner, wrong after a deploy that made the app faster, and wrong after one that made it slower. The fix is a **web-first assertion or an event-keyed wait** that resolves the moment the app reaches the state you actually need — not after an arbitrary delay.
+
+```typescript
+// Anti-pattern
+await page.waitForTimeout(2000);
+await expect(page.locator(".result")).toBeVisible();
+
+// Fix: resolve on the real condition
+await expect(page.locator(".result")).toBeVisible({ timeout: 10_000 });
+```
+
+See also: the deflaking recipe in [Part 2](#part-2-—-the-deflaking-recipe) for the case where an app event rather than a DOM state is the right signal.
+
+### 2. `networkidle` on client-side navigations that fire no requests
+
+`waitForLoadState("networkidle")` resolves when there are no pending network requests for 500ms. On a client-side SPA navigation — routing handled in JavaScript, no new network request — that condition can resolve immediately after the navigation **begins**, not after the new view has rendered. The navigation fires no requests, so `networkidle` never blocks.
+
+The fix is to key the wait to the real completion signal: a URL change, a stable DOM element, or an app-level event.
+
+```typescript
+// Anti-pattern: resolves before the view is ready on SPA navigations
+await page.waitForLoadState("networkidle");
+
+// Fix: wait for the real completion signal
+await page.waitForURL("/dashboard");
+await expect(page.locator("h1")).toBeVisible();
+```
+
+### 3. Animation or transition in flight
+
+Asserting the computed style or position of an element while a CSS transition or animation is in progress produces nondeterministic values — the element is mid-flight. Two fixes:
+
+- **Disable animations in the test environment** via `page.emulateMedia({ reducedMotion: "reduce" })` or a CSS override.
+- **Assert the settled state** by waiting for the transition to end (e.g. using `toHaveCSS` on a stable post-transition value) rather than testing mid-transition.
+
+```typescript
+// At fixture setup — forces prefers-reduced-motion on all tests
+await page.emulateMedia({ reducedMotion: "reduce" });
+```
+
+### 4. Shared state / test-order coupling
+
+A test that relies on state left by a previous test — a database row, a cookie, a localStorage key, a global variable — passes when the suite runs in order and fails when it does not. Test order is not guaranteed.
+
+The fix is to isolate per-test state: set up what the test needs in its own `beforeEach` / `test.beforeEach`, tear it down after, and never rely on another test having run first.
+
+```typescript
+test.beforeEach(async ({ page }) => {
+  // Reset to a known clean state before every test
+  await page.evaluate(() => localStorage.clear());
+  await page.goto("/");
+});
+```
+
+### 5. Hydration races
+
+Asserting that an interactive element is functional before the JavaScript island that controls it has hydrated produces a race: the assertion passes visually (the DOM element is present) but the behavior is not yet wired up. A click fires before the handler is attached.
+
+The fix is to wait on an **interactivity signal**, not a sleep:
+
+```typescript
+// Anti-pattern: element is visible but not yet interactive
+await expect(page.locator(".submit-btn")).toBeVisible();
+await page.locator(".submit-btn").click();
+
+// Fix: wait for the app to signal readiness
+await page.waitForFunction(() => document.querySelector(".submit-btn")?.dataset.hydrated === "true");
+await page.locator(".submit-btn").click();
+```
+
+### 6. In-app background work starving unrelated waits (connection starvation)
+
+The five causes above are nondeterminism in the test's own machinery. This one lives in the **app's** machinery: background work the app kicks off at boot competes with the interactive work the test is waiting on — and under a dev server, it can win.
+
+Worked case: a viewer app idle-prefetched a lazily-loaded editor chunk at boot. Under the Vite dev server (which is also what the Playwright `webServer` runs), a workspace `development` export condition served that package as raw TS source — so the "one chunk" expanded to **~3,500 individual module requests** that monopolized the browser's per-host connection pool (six connections in the observed HTTP/1.1 dev-server case — a property of that setup, not a universal browser constant) for seconds after every page load. An *unrelated* lazy import — a Settings dialog, in tests that never open the editor — took 2–9.4s to mount instead of ~380ms and consistently missed a correctly event-keyed 5s wait. In a production build the same prefetch is a handful of bundled-chunk requests; the starvation is a dev/e2e-only amplification.
+
+The tells, none of which look like a normal flake:
+
+- **No error anywhere.** No pageerror, no console error, no failed request — the wait just times out.
+- **The awaited element eventually appears.** Poll past the timeout and it mounts seconds late, rather than never.
+- **The failing tests are unrelated to the change under test.** They fail because they share a page load with the storm, not because they exercise the changed code.
+- **Failure correlates with what the app does at boot,** not with what the test does.
+- **The network waterfall shows same-origin requests stalled in queue while CPU sits idle.** This is the tell that separates connection starvation from CPU starvation — the latency A/B below proves the background work *caused* the slowdown; the stalled-while-idle waterfall is what pins the binding constraint on connections rather than compute.
+
+The proof is mechanical (Rule 1 — prove it before you call it flaky). First, measure when the element *actually* appears:
+
+```typescript
+const t0 = Date.now();
+await settingsMenuItem.click();
+let appearedAt: number | null = null;
+for (let i = 0; i < 200; i++) {
+  if (await page.locator(".settings-dialog-overlay").count()) {
+    appearedAt = Date.now() - t0;
+    break;
+  }
+  await page.waitForTimeout(100);
+}
+console.log(`overlay appeared after: ${appearedAt ?? "NEVER"}ms`);
+```
+
+Then A/B the suspected background work — a window flag set before the app boots, honored by a *temporary* guard in the app effect (revert it after measuring):
+
+```typescript
+// In the debug spec, before page.goto():
+await page.addInitScript(() => {
+  (window as any).__AB_DISABLE_PREFETCH = true;
+});
+```
+
+```typescript
+// TEMP A/B guard in the app's prefetch effect — revert after measuring
+useEffect(() => {
+  if ((window as any).__AB_DISABLE_PREFETCH) return;
+  const id = requestIdleCallback(() => prefetchHeavyChunk());
+  return () => cancelIdleCallback(id);
+}, []);
+```
+
+Worked-case numbers: **2046 / 9384 / 8861 / 7459 ms** to mount with the prefetch on; **383 / 363 / 385 / 365 ms** with it off. That is causation, not correlation.
+
+**The fix hierarchy: gate the background work at source before touching any timeout.** Here the prefetch became prod-only (`if (import.meta.env.DEV) return;`) — production keeps the optimization where it is cheap, dev/e2e load the graph on demand inside the flow that needs it. Raising the flaky wait's timeout first is the anti-pattern: it papers over the starvation for one wait while every other lazy import in the suite stays marginal.
+
+<Warning>
+
+**This looks like CPU starvation and is not.** Specs timing out under load usually route to "give the runner more cores" ([runner-sizing Rule 3](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-3-diagnose-the-failure-mode-before-resizing)). Connection starvation presents identically but has a different binding constraint — the browser's per-host connection pool, which does not grow with vCPU. Resizing the runner does not fix it; the fix is at the app/serving layer.
+
+</Warning>
+
+#### The sequel trap — cost relocation, not cost removal
+
+Gating the background work does not delete its cost; it moves the cost into whatever wait now covers the on-demand load. In the worked case, the prod-only gate fixed the starved Settings tests *and* pushed the ~3,500-module download into the editor's first-mount waits — **+10–28s on every editor-opening test** — so a locally-proven fix still left CI red on the 15-minute shard cap.
+
+The technique that catches relocation is a **per-test duration diff between two CI runs**. Playwright's list reporter prints one line per finished test with its duration; extract them from a green run's log and the broken run's log, key by `spec.ts:line:col`, drop retries, and diff the common tests:
+
+```bash
+# One run's log → "<file:line:col>\t<duration>" pairs.
+# Drop retry lines BEFORE the sed — it rewrites each line to key+duration,
+# which destroys the "(retry #N)" marker a later grep would need.
+grep -E "  ✓ " run.log |
+  grep -v "retry #" |
+  sed -E 's/.*› ([^ ]+\.spec\.ts:[0-9]+:[0-9]+) › .*\(([0-9.]+m?s?)\)$/\1\t\2/' > run.times
+# Repeat for the other run, then compare the common keys.
+```
+
+In the worked case, 50 tests shared by both shards went **710s → 1054s** of completed test-seconds — the regression was invisible in any single test (each still passed on retry) and unmistakable in the aggregate. Three honesty caveats keep the numbers meaningful:
+
+- **The list reporter must be configured on CI.** Playwright's CI default is `dot`, which prints no per-test lines — `reporter: [["list"], ["html"]]` (or similar) has to already be in the config for this salvage to exist.
+- **`file:line` keys drift; bare titles fuse.** Line numbers are only stable across nearby commits, so if the spec files shifted between the two runs, drop the line and key by **project + file + title** — not by title alone. See [Key cross-run triage on test identity, not on test title](#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title). Report how many tests matched vs didn't.
+- **The sums are completed test-seconds, not wall-clock.** Parallel workers overlap, and tests killed mid-flight by the timeout never print a line — the broken run's total *understates* its true cost.
+
+This is incident salvage, not telemetry. If you want per-test durations routinely, a ten-line custom reporter emitting structured records from `onTestEnd` beats log parsing — keep the grep for the runs where that reporter didn't exist yet.
+
+<Note>
+
+**Why the job log is the only artifact here:** a CI `timeout-minutes` kill terminates the runner before Playwright's HTML reporter reaches its `onEnd` hook, so the report artifact never uploads on exactly the runs you most need to triage. The list-reporter lines streamed into the job log survive; parse those.
+
+Rebuilding the same diff **locally** from two JSON reports instead? Both reports must be written outside Playwright's `outputDir` — the start-of-run wipe deletes run 1's report before run 2 begins, and the comparison becomes structurally impossible. See [Artifacts You Want to Keep Must Live Outside `outputDir`](../tool-patterns/playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
+
+</Note>
+
+The end-state fix for the relocated cost — stop serving thousands of source modules per test at all — is the [bundled-dep e2e lane](../tool-patterns/playwright-patterns.mdx#the-bundled-dep-e2e-lane-for-monorepo-dev-servers) in Playwright Patterns.
+
+### 7. Lane over-subscription (the failure whose identity roams)
+
+Entry 6 is the app's machinery starving the test's. This one is neither: the **lane itself** is over-subscribed, and the failure lands on whichever spec happened to be holding a resource when the budget ran out. Nothing about that spec caused it — it was standing in the wrong place.
+
+The signature is specific enough to recognize on sight:
+
+```
+Tearing down "context" exceeded the test timeout of 30000ms.
+```
+
+Read the phase, not the number. This fires in **fixture teardown**, after the test body finished — there is no failed assertion, no failed locator, no failed wait. The spec's own work was already done; closing its browser context is what missed the budget. A per-spec explanation cannot account for a per-spec-agnostic phase.
+
+The tells, in the order you will meet them:
+
+- **It appears at the END of a local full-suite run,** as the lane's aggregate load peaks — not when the spec runs early.
+- **It hits a DIFFERENT spec on each run.** This is the discriminating tell; everything below is corroboration.
+- **Every affected spec is green when rerun focused.** The spec is fine. It was always fine.
+- **No assertion failed.** Compare entry 6, where a real wait really does time out.
+- **It reproduces on `retries: 0` locally and never in CI,** where `retries: 2` absorbs it — see [the retries-asymmetry trap](../tool-patterns/playwright-patterns.mdx#quarantining-flakes-the-retries-asymmetry-trap).
+
+<Warning>
+
+**Do not quarantine the spec that happened to lose the race.** It is an existing test on `main` that genuinely went red on the zero-retry gate, so it clears the "never tag a brand-new test" guard on [`@flaky`](../tool-patterns/playwright-patterns.mdx#quarantining-flakes-the-retries-asymmetry-trap) — and tagging it is still wrong. You would suspend coverage of a spec that has no defect, leave the lane defect fully intact, and hand it a fresh victim next run. Repeat that three runs running and you have quarantined three healthy specs and fixed nothing.
+
+**The rule: identity that roams is a lane property; only identity that REPEATS is a per-spec fix candidate.** Rule 1's proof obligation applies unchanged — you have not diagnosed anything until you know which of the two you are holding.
+
+</Warning>
+
+**The diagnostic is one run at lower concurrency.** Lane over-subscription is a function of the load, so removing the load removes the failure — cleanly, not marginally:
+
+```bash
+# If the full suite fails on a roaming spec but --workers=1 is green,
+# the binding constraint is the lane, not any spec it landed on.
+pnpm test:e2e --workers=1
+```
+
+Confirm across runs rather than by eye. Two runs' JSON reports, diffed on failing tests, answer the only question that matters — did the same test fail twice?
+
+<Warning>
+
+**Key the diff on test identity — `file:line` plus title — never on the bare title.** Two specs can share a title ("closes with Escape" in a dialog spec and a menu spec), and a title-keyed diff fuses them into a phantom repeat offender. That inverts this entry's decision: you quarantine a spec that never repeated. See [Key cross-run triage on test identity, not on test title](#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title).
+
+Reports must also be written **outside** Playwright's `outputDir`: it is emptied at the start of every run, so run 2 deletes run 1's report and the comparison is structurally impossible. Point `PLAYWRIGHT_JSON_OUTPUT_NAME` at a sibling directory (`b4push-reports/`), not `test-results/` — see [Artifacts You Want to Keep Must Live Outside `outputDir`](../tool-patterns/playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
+
+</Warning>
+
+Once confirmed, the lever is the lane's own budget — worker count first, then trace retention and per-test timeout. This is the Playwright analogue of [capping vitest parallelism in the heavy local gate](../tool-patterns/vitest-patterns.mdx#project-level-vitest-configs-cap-worker-parallelism-in-the-heavy-local-gate), and for the same reason: a heavy local gate buys reliability with wall-clock, because a gate that reds out on a healthy spec is worth less than a gate that takes two more minutes.
+
+<Note>
+
+**Three presentations, three binding constraints, and only one of them is a test problem at all.**
+
+| Presentation | Binding constraint | Lever |
+|---|---|---|
+| Specs time out on a 2-vCPU CI runner | Cores | 2→4 vCPU ([runner-sizing Rule 3](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-3-diagnose-the-failure-mode-before-resizing)) |
+| A real wait times out; same-origin requests stall while CPU idles | Per-host connection pool | App/serving layer ([entry 6](#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation)) |
+| Teardown times out on a roaming spec, locally, at full load | The lane's own budget | Cap workers — **not** a `@flaky` tag |
+
+The local row has no runner to resize: on your own machine, worker count *is* the vCPU dial. Reaching for `@flaky` because "the gate is red and I cannot buy cores" is how a lane defect gets laundered into a test defect.
+
+</Note>
+
+Worked case: a Tauri app's local `b4push` lane failed on a context-teardown timeout across several consecutive runs — a different spec each time, including specs untouched by the change under review, each green when rerun focused. The proposed fix, arrived at by faithfully following the quarantine pipeline, was to tag the most recent victim `@flaky`. The actual cause was the lane: default workers plus the dev server plus trace retention plus `retries: 0`, all on one loaded laptop. `--workers=1` was green. Nothing about any spec was ever wrong.
+
+The roams-vs-repeats rule itself transfers to hosted CI unchanged: consecutive runs of a hosted matrix failing on a different identity each time is the same lane signature, just wearing CI clothes. The levers do **not** map 1:1 — worker caps and trace retention still exist on a CI runner, but they are no longer the whole dial, because hosted CI adds levers a laptop does not have: the runner's shape and the matrix topology itself. Diagnose the leg's binding constraint before resizing anything, per [runner-sizing Rule 3](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-3-diagnose-the-failure-mode-before-resizing). And when the CI runs in question share a commit, you are also holding a [twin-leg comparison](#part-1-—-root-cause-catalog-the-twin-leg-comparison-same-commit-same-suite-one-leg-red) — use it before paying for any extra run.
+
+### Key cross-run triage on test identity, not on test title
+
+Every cross-run comparison on this page — the duration diff above, [lane over-subscription](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), the retry-pass telemetry in [Scheduled Re-Exam](../ci-operations/scheduled-re-exam.mdx#flake-telemetry-mechanics-retry-pass-detection), any "did this fail twice?" triage — joins two runs on a key. **That key must be the test's identity: project + file + title.** A bare test title is not an identity, and using one corrupts the comparison silently.
+
+Nothing stops two spec files from containing the same `test()` name:
+
+```typescript
+// e2e/settings-dialog.spec.ts
+test("closes with Escape", async ({ page }) => { /* ... */ });
+
+// e2e/command-palette.spec.ts
+test("closes with Escape", async ({ page }) => { /* ... */ });
+```
+
+Run 1 fails the settings one. Run 2 fails the palette one. Keyed on title, triage sees `closes with Escape` fail in **both** runs and reports a repeat offender — a spec that does not exist. Two independent one-off failures have fused into one phantom.
+
+<Warning>
+
+**A phantom repeat offender inverts the fix-vs-quarantine decision.** "Repeats across runs" is the rule that separates a real per-spec flake (fix it, or quarantine it through the pipeline) from a lane-level resource-contention signature (fix the lane — cap workers, cut trace retention — and quarantine nothing). Title-fusion manufactures the "repeats" evidence out of two failures that repeat nothing. The outcome is the worst available: an innocent spec goes into quarantine with its behavior now unguarded, and the lane problem that actually produced both failures stays live and keeps hitting new specs.
+
+</Warning>
+
+The key is already in the artifact — most triage scripts just throw it away. Playwright's JSON reporter puts `file`, `line`, and `title` on the same spec node, so keying correctly costs one jq field:
+
+```bash
+# WRONG -- bare title. Two specs named "closes with Escape" fuse into one key.
+jq -r '.. | objects | select(.tests? and .title?) | .title'
+
+# RIGHT -- project + file + line + title is a real identity.
+jq -r '
+  .. | objects
+  | select(.tests? and .title?)
+  | . as $spec
+  | .tests[]
+  | "\(.projectName // "default")\t\($spec.file):\($spec.line)\t\($spec.title)"
+'
+```
+
+Two rules keep the key honest across the two ways it can fail:
+
+- **Drop the line number, never the file.** The line is what drifts when spec files shift between commits; the file is what disambiguates. Degrading from `project + file + line + title` to `project + file + title` stays correct — degrading to `title` does not. One caveat when you drop the line: `$spec.title` is the _leaf_ title, and two `describe` blocks in the same file may declare the same leaf — if your suites nest, key on the full title path (suite chain › leaf), not the leaf alone.
+- **When you cannot recover the file, report the ambiguity instead of guessing.** If a log line or a legacy artifact only carries a title, count how many specs in the tree declare that title. More than one, and the row is unusable for repeat detection — say so in the triage output rather than letting it vote.
+
+<Note>
+
+**The same key governs issue filing.** A tracking issue titled `flaky: closes with Escape` is one issue collecting telemetry from two unrelated specs, and neither spec's fix will ever close it cleanly. Title issues with the identity — `flaky: e2e/settings-dialog.spec.ts › closes with Escape` — so the dedup query matches one spec and only that spec (and when the same spec runs under several Playwright projects, put the project in the title too). This is the same discipline as the workflow-name-in-the-title rule for [deduped exam issues](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run): the dedup key has to be as specific as the thing it identifies.
+
+</Note>
+
+### The twin-leg comparison: same commit, same suite, one leg red
+
+Every comparison above joins runs across **time** — this run against an earlier run, durations drifting, identities repeating. There is a sharper comparison available whenever the pipeline runs the same suite more than once on the same commit: a required check plus an identical sibling matrix leg, a re-triggered workflow, two runs of the same workflow. One leg passes everything; the other fails one test. Same tree, same suite, same moment — and it costs zero extra runs, because the pipeline already paid for both.
+
+One precondition gates everything the pair can tell you: **the legs must be equivalent** — same OS, same runtime, same browser, same configuration, differing only in which runner instance executed them. A green/red split across *non*-equivalent legs (an Ubuntu leg vs a macOS leg, Node 20 vs Node 22) proves only that the failure is **leg-specific** — which is a different and equally valuable signal: a deterministic, environment-specific failure, possibly a regression this very diff introduced for that platform. A failure that correlates with the platform is [the impostor's tell](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug), not intermittency, and it earns a reproduction run rather than an exoneration note.
+
+Given equivalent legs, what the pair proves is immediate and cheap: **the failure is intermittent on this commit.** One execution of this exact tree under these exact conditions produced green and another produced red, so the hypothesis "the diff deterministically broke this test" is dead on arrival — no reproduction run needed, no bisect. For a [gate operator](#red-ci-you-don-t-own-—-the-gate-operator-s-playbook) mid-incident, that is the fastest possible narrowing of the question.
+
+Two limits keep it honest. First, **twin legs classify intermittency, not causality.** The pair does not clear the diff: an intermittent race the diff just *introduced* produces exactly the same green/red split, and even equivalent legs are not a laboratory control group — cache state, external services, and timing still differ between them. Exoneration needs history on top: the same identity failing *the same way* before the diff existed, or concurrently on the base branch, plus a transitive diff-scope check (shared fixtures, config, dependencies, global setup). Second, the pair says nothing about the failing identity's behavior *across* runs — whether it roams (a lane property — [entry 7](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), including its hosted-CI variant) or repeats (a per-spec fix candidate, or the impostor) still requires the identity-keyed cross-run history above.
+
+In short: the twin leg answers "is this deterministic on head?" — not "is merging safe?" Record it on the identity's tracking issue and let it vote there, alongside the history that carries the exoneration.
+
+---
+
+## Part 2 — The Deflaking Recipe
+
+Apply these four steps in order. Each step is mechanical — no judgment required. Step 5 below is the escalation for when none of the four leaves you anything to wait on.
+
+### Step 1 — Replace timing waits with event-keyed waits, listener installed before trigger
+
+For navigations or transitions signaled by an app-level event (a framework lifecycle hook, a custom DOM event, a flag on `window`), the only reliable pattern is:
+
+1. Install the listener.
+2. Trigger the action.
+3. Await the signal.
+
+**The ordering is load-bearing.** A listener installed _after_ the action fires can miss the event entirely — the event already fired before the listener was attached. Always install the listener first.
+
+```typescript
+// Install the listener BEFORE the action
+await page.evaluate(() => {
+  window.__navDone = false;
+  addEventListener("framework:after-swap", () => {
+    window.__navDone = true;
+  });
+});
+
+// Then trigger the navigation
+await page.click("a[href='/about']");
+
+// Then await the signal — using Playwright's own timeout, never an in-page setTimeout
+await page.waitForFunction(() => window.__navDone);
+```
+
+<Warning>
+
+Never use an in-page `setTimeout` as a fallback. It runs inside the browser's own event loop and is subject to timer throttling, page freeze, and tab backgrounding. Playwright's `waitForFunction` polls from outside the page using its own timeout mechanism — it is the correct tool here.
+
+</Warning>
+
+#### Hardened variant: atomic listener + click in a single `evaluate`
+
+The install-then-trigger pattern above still leaves a narrow gap: between `page.evaluate()` resolving and `page.click()` firing, an unrelated event of the same name could land and flip the flag before the click that is supposed to cause it. For most navigations this window is negligible, but when it isn't, register the listener **and** perform the click inside a single `page.evaluate` call, so both happen synchronously in the page's own event loop with no round-trip in between:
+
+```typescript
+// Hardened: listener + click atomic in a single page.evaluate call
+await page.evaluate(() => {
+  window.__navDone = false;
+  addEventListener("framework:after-swap", () => {
+    window.__navDone = true;
+  });
+  document.querySelector('a[href="/about"], a[href="/about/"]')?.click();
+});
+
+await page.waitForFunction(() => window.__navDone);
+```
+
+<Warning>
+
+Two caveats to this hardened variant:
+
+- **It bypasses actionability checks.** An in-page `element.click()` skips the visibility, stability, hit-target, and enabled checks that `page.click()` performs before clicking. Use it only for chrome-level elements already known to be attached and visible — not for arbitrary UI under test.
+- **Match hrefs trailing-slash-tolerantly.** Different SSG builds emit `/about` and `/about/` inconsistently. A selector like `'a[href="/about"], a[href="/about/"]'` matches both; an exact single-value match is a recurring papercut in static-site E2E suites.
+
+</Warning>
+
+### Step 2 — Don't wait on `networkidle` for navigations that fire no network requests
+
+Client-side navigations in SPAs do not fire network requests. `networkidle` resolves the moment no requests are in flight — which for a client-side nav is immediately after the route change starts, not after the new view renders.
+
+Replace `waitForLoadState("networkidle")` with a wait on the actual completion signal: `waitForURL`, a web-first assertion on a stable element, or an event-keyed wait from Step 1.
+
+### Step 3 — Never swallow a fallible wait
+
+A `.catch(() => null)` on a wait expression turns a real timeout into a silent green:
+
+```typescript
+// Anti-pattern: a timeout becomes a silent success
+await page.waitForSelector(".result", { timeout: 5000 }).catch(() => null);
+// Test continues as if the element appeared
+
+// Fix: let it fail, or assert the post-condition explicitly
+await expect(page.locator(".result")).toBeVisible({ timeout: 5000 });
+```
+
+If the wait genuinely might not resolve (optional element, conditional UI), assert the actual post-condition instead of swallowing the timeout. The test should fail loudly when the thing it depends on does not happen.
+
+### Step 4 — Positive completion waits: the only legitimate `waitForTimeout`
+
+For **positive completion waits** (waiting for something to appear or become true), the only acceptable `waitForTimeout` is one that is:
+
+1. Keyed to a **documented application constant** (a known debounce value, a polling interval defined in the source).
+2. Annotated with a `// wait-ok: <why>` comment explaining the constant.
+
+See the `// wait-ok:` exception documented in the [Editor Input section of Playwright Patterns](../tool-patterns/playwright-patterns.mdx#editor-input-in-e2e) for the canonical example.
+
+<Note>
+
+There is a second, distinct legitimate class of `waitForTimeout`: asserting the **absence** of a failure over a time window (e.g., "no console errors fire in the first 2000ms after mount"). Converting that sleep to a condition wait guts the assertion — there is no positive event to poll for, so a poll resolves instantly and stops observing the window. Keep the sleep for absence-window assertions; scope this step to positive completion waits only. See the `POST_MOUNT_LOOP_SETTLE_MS` example in [Playwright Patterns](../tool-patterns/playwright-patterns.mdx#editor-input-in-e2e) for the full pattern.
+
+</Note>
+
+### Step 5 — Escalation: add the missing signal to production code
+
+Steps 1-4 all presume the signal to wait on already exists — a framework event, a hydration flag, a stable DOM state. Sometimes it doesn't. When there is no observable state transition to key a wait to, the fix is not a cleverer wait in the test — it's a one-line addition to the **production code**:
+
+- A data attribute flipped when the work finishes (`el.dataset.ready = "true"`).
+- A custom event dispatched after a transition (`dispatchEvent(new CustomEvent("app:ready"))`).
+- A flag set on `window` after async initialization (`window.__appReady = true`).
+
+The `dataset.hydrated` flag used in [Hydration races](#part-1-—-root-cause-catalog-5-hydration-races) above is exactly this kind of signal: it is not a Playwright or browser primitive, it is application code deliberately set once an island's hydration runtime finishes wiring up its event handlers. The same convention shows up as `data-hydrated` on `[data-island]` in [the hydration mis-nesting variant](../decision-guide/common-failure-pattern.mdx#the-hydration-mis-nesting-variant) elsewhere in this guide — one island-lifecycle attribute, read by two different tests for two different purposes.
+
+An untestable wait is a product-code observability gap, not a spec problem. Once the signal exists, wait on it the same way as Step 1: install the listener or poll before triggering the action, trigger, then await.
+
+<Note>
+
+**Closing invariant: every wait must be keyed to an observable state transition, not a duration.** If a wait cannot be tied to a signal the production code emits, the fix belongs in the production code — not in a longer timeout. And a correctly event-keyed wait can still time out when the signal itself is resource-starved — that is [catalog entry 6](#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation), an app/serving problem, not a wait problem.
+
+</Note>
+
+---
+
+## Before / After — Putting It Together
+
+A common flaky test combines both anti-patterns at once:
+
+```typescript
+// BEFORE — flaky: timing guess + networkidle on a SPA nav
+test("navigates to dashboard", async ({ page }) => {
+  await page.goto("/");
+  await page.click("a[href='/dashboard']");
+  await page.waitForLoadState("networkidle"); // resolves before the view renders
+  await page.waitForTimeout(500); // timing guess
+  await expect(page.locator("h1")).toHaveText("Dashboard");
+});
+```
+
+```typescript
+// AFTER — deterministic: event-keyed + web-first assertion
+test("navigates to dashboard", async ({ page }) => {
+  await page.goto("/");
+
+  // Install listener BEFORE the action
+  await page.evaluate(() => {
+    window.__navDone = false;
+    addEventListener("framework:after-swap", () => {
+      window.__navDone = true;
+    });
+  });
+
+  await page.click("a[href='/dashboard']");
+
+  // Await the app's own signal using Playwright's timeout
+  await page.waitForFunction(() => window.__navDone);
+
+  // Web-first assertion as the final guard
+  await expect(page.locator("h1")).toHaveText("Dashboard");
+});
+```
+
+---
+
+See also: [Playwright Patterns](../tool-patterns/playwright-patterns.mdx) for the full Playwright setup patterns, and [Execution Tiers](../decision-guide/execution-tiers.mdx) for when a flaky test is a topology problem rather than a timing problem.
