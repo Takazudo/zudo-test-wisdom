@@ -1,7 +1,7 @@
 ---
 title: Tauriアプリのテスト
 description: Tauri v2 デスクトップアプリケーション固有のテストパターン。
-sidebar_position: 4
+sidebar_position: 2
 ---
 
 ## WebKitファースト: 本番エンジンに合わせる
@@ -242,7 +242,7 @@ pnpm tauri build
 
 ## Tauriプロジェクトの CI設定
 
-ワークフローのステップ内でビルド+起動チェーンをバックグラウンド化する代わりに、`webServer` をすでにビルド済みのpreviewサーバーに向けてください——これは姉妹関係にあるPlaywrightページの[本番ビルド検証](./playwright-patterns.mdx#本番ビルド検証)パターンと同じ考え方です：
+ワークフローのステップ内でビルド+起動チェーンをバックグラウンド化する代わりに、`webServer` をすでにビルド済みのpreviewサーバーに向けてください——これは姉妹関係にあるPlaywrightページの[本番ビルド検証](../tool-patterns/playwright-patterns.mdx#本番ビルド検証)パターンと同じ考え方です：
 
 ```typescript
 // playwright.config.ts (excerpt)
@@ -296,4 +296,4 @@ Tauriのキーボードショートカットやネイティブプラットフォ
 
 ローカルヘビーレーン（`exam`）は便利ですが回避可能です。また環境依存でもあります（同じスイートがLinux/WSL2ホストでは多数のスペックをフォールスレッドします）。**macOSランナー上での定期CI再試験**が、これらのプラットフォーム依存スペックを実際のリグレッションゲートの一部とするペーパートレイルを提供します。
 
-完全なワークフロー（cron + `workflow_dispatch`スケルトン、重複排除されたIssue起票、マージ前オンデマンドディスパッチ）については[定期再試験 & 夜間試験](./scheduled-re-exam.mdx)を参照してください。
+完全なワークフロー（cron + `workflow_dispatch`スケルトン、重複排除されたIssue起票、マージ前オンデマンドディスパッチ）については[定期再試験 & 夜間試験](../ci-operations/scheduled-re-exam.mdx)を参照してください。

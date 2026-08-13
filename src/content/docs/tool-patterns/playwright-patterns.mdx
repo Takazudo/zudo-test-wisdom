@@ -1,7 +1,7 @@
 ---
 title: Playwright Patterns
 description: E2E testing patterns with Playwright for CI and production verification.
-sidebar_position: 3
+sidebar_position: 2
 ---
 
 ## CI-Safe vs @interactive Test Split
@@ -213,7 +213,7 @@ The Chromium step adds `@flaky` to its `--grep-invert` (alongside `@interactive`
 
 `@flaky` is a quarantine, not a permanent skip. Tag only tests that are **already** known-flaky on `main`; never tag a brand-new test to make a gate pass. When you fix the underlying race, remove the tag in the same PR — otherwise the list silently grows and you lose real coverage.
 
-And before tagging anything the zero-retry local gate turned red: check whether the SAME spec fails across runs. A failure that lands on a different spec each run — classically a context-teardown timeout at the end of a full-suite run — is [lane over-subscription](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), not a flaky test. Tagging its latest victim suspends healthy coverage and leaves the lane defect to pick a new one.
+And before tagging anything the zero-retry local gate turned red: check whether the SAME spec fails across runs. A failure that lands on a different spec each run — classically a context-teardown timeout at the end of a full-suite run — is [lane over-subscription](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), not a flaky test. Tagging its latest victim suspends healthy coverage and leaves the lane defect to pick a new one.
 
 </Warning>
 
@@ -561,7 +561,7 @@ test("home page has no console errors", async ({ page, consoleErrors }) => {
 
 <Tip>
 
-Replacing `waitForLoadState("networkidle")` with `expect(...).toBeVisible()` is the right move for asserting that a view *is ready* — `networkidle` is the canonical anti-pattern for SPA navigations that fire no network requests. But a console-error monitor asserts the *absence* of errors over a window, so it also needs the bounded `wait-ok:` settle above to catch errors that fire after first paint — a positive readiness assertion alone would end the test too early and green-light late errors. See [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) for the full catalog, including the absence-window exception.
+Replacing `waitForLoadState("networkidle")` with `expect(...).toBeVisible()` is the right move for asserting that a view *is ready* — `networkidle` is the canonical anti-pattern for SPA navigations that fire no network requests. But a console-error monitor asserts the *absence* of errors over a window, so it also needs the bounded `wait-ok:` settle above to catch errors that fire after first paint — a positive readiness assertion alone would end the test too early and green-light late errors. See [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) for the full catalog, including the absence-window exception.
 
 </Tip>
 
@@ -766,7 +766,7 @@ Worked-case evidence: the two e2e shards went from repeated 15-minute `timeout-m
 
 <Note>
 
-How this failure class presents *before* you know to look for it — background module storms starving unrelated waits, and heavy loads relocating between waits when you gate them — is [catalog entry 6 in the Flake Root-Cause Catalog](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation), including the poll-past-the-timeout proof and the per-test duration diff.
+How this failure class presents *before* you know to look for it — background module storms starving unrelated waits, and heavy loads relocating between waits when you gate them — is [catalog entry 6 in the Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation), including the poll-past-the-timeout proof and the per-test duration diff.
 
 </Note>
 
@@ -800,7 +800,7 @@ A boot stagger (delaying each fixture's start by a few seconds) narrows this rac
 
 </Warning>
 
-See also the native-suite "Port races (`EADDRINUSE`)" entry in the [Flake Root-Cause Catalog](./deflaking-recipe.mdx#part-1-—-root-cause-catalog) — same root cause, a fixed port shared across parallel processes, here specific to a dev-server's non-obvious secondary socket rather than its primary one.
+See also the native-suite "Port races (`EADDRINUSE`)" entry in the [Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog) — same root cause, a fixed port shared across parallel processes, here specific to a dev-server's non-obvious secondary socket rather than its primary one.
 
 ## Sharded CI Runs
 
@@ -910,7 +910,7 @@ ls b4push-reports/
 
 ### Why this bites the cross-run workflows this site recommends
 
-The hazard is local-first. In CI it is nearly unobservable — each run gets a fresh runner, so the start-of-run wipe finds an empty directory and the artifact-upload step ships the report regardless. It surfaces the moment two runs share a working tree, which is precisely the shape of the local triage this site prescribes: the [per-test duration diff between two runs](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation-the-sequel-trap-—-cost-relocation-not-cost-removal) and any tooling that decides "did this spec fail in *both* runs?" (see [lane over-subscription](./deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams)). A tool built on "run twice, compare the two JSON reports" is structurally impossible when both reports are written into `test-results/` — and it fails **silently**: the second run finds one report, concludes there is nothing to compare, and reports success.
+The hazard is local-first. In CI it is nearly unobservable — each run gets a fresh runner, so the start-of-run wipe finds an empty directory and the artifact-upload step ships the report regardless. It surfaces the moment two runs share a working tree, which is precisely the shape of the local triage this site prescribes: the [per-test duration diff between two runs](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation-the-sequel-trap-—-cost-relocation-not-cost-removal) and any tooling that decides "did this spec fail in *both* runs?" (see [lane over-subscription](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams)). A tool built on "run twice, compare the two JSON reports" is structurally impossible when both reports are written into `test-results/` — and it fails **silently**: the second run finds one report, concludes there is nothing to compare, and reports success.
 
 <Warning>
 

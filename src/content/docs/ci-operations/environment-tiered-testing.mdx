@@ -1,7 +1,7 @@
 ---
 title: Environment-Tiered Testing Against Deployed Targets
 description: One contract suite pointed at local, a preview deploy, and production -- what belongs in each tier, how to reach gated previews, and why a prod failure is an incident, not a test run.
-sidebar_position: 15
+sidebar_position: 1
 ---
 
 Most of this guide tests code before it ships: unit suites, build-output reads, a browser driven against a local dev server. A separate layer tests the thing that actually shipped -- the **same suite pointed at a deployed URL**. Three portfolio repos run this as a first-class lane: zmod and zzmod fire their preorder-API contract suite at a local dev server, at a preview deploy, and at production; takazudo-auth drives logged-in flows against the same tiers. This page is about running one suite across many environments without forking your test command three ways -- and without ever mutating production.
@@ -166,7 +166,7 @@ e2e/.auth/
 
 ## Post-Deploy Smoke as the Final Tier
 
-The last tier is a cheap, fast, alarm-only pass that runs the moment a deploy goes live: hit a handful of real endpoints, assert they answer, page a human if they do not. It is deliberately read-only and shallow -- it catches misconfigured secrets, missing migrations, and binding errors that no pre-deploy test can see, not logic bugs. The mechanics (a self-cleaning shell script, the `trap EXIT` cleanup, the local-first / remote-after wiring) are already covered in [Backend & Node.js Testing § Post-Deploy Smoke Testing](./backend-testing.mdx#post-deploy-smoke-testing-with-shell-scripts); the environment-tiered view just adds where it sits -- production, read-only, alarm on red.
+The last tier is a cheap, fast, alarm-only pass that runs the moment a deploy goes live: hit a handful of real endpoints, assert they answer, page a human if they do not. It is deliberately read-only and shallow -- it catches misconfigured secrets, missing migrations, and binding errors that no pre-deploy test can see, not logic bugs. The mechanics (a self-cleaning shell script, the `trap EXIT` cleanup, the local-first / remote-after wiring) are already covered in [Backend & Node.js Testing § Post-Deploy Smoke Testing](../project-recipes/backend-testing.mdx#post-deploy-smoke-testing-with-shell-scripts); the environment-tiered view just adds where it sits -- production, read-only, alarm on red.
 
 ## Failure Semantics per Environment
 
@@ -182,7 +182,7 @@ A local contract failure just fails your PR; you fix it before merge and nobody 
 
 ## Where to Go Next
 
-- [Backend & Node.js Testing](./backend-testing.mdx) -- the HTTP-API base-URL switch, destructive-test guards, and the post-deploy smoke script this page builds on
+- [Backend & Node.js Testing](../project-recipes/backend-testing.mdx) -- the HTTP-API base-URL switch, destructive-test guards, and the post-deploy smoke script this page builds on
 - [Execution Tiers](../decision-guide/execution-tiers.mdx) -- the T0-T4 vocabulary that decides where each environment lane runs
-- [Playwright Patterns](./playwright-patterns.mdx) -- CI-safe vs environment-heavy test splitting, the mock-backend adapter, and console-error monitoring for these live runs
+- [Playwright Patterns](../tool-patterns/playwright-patterns.mdx) -- CI-safe vs environment-heavy test splitting, the mock-backend adapter, and console-error monitoring for these live runs
 - [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) -- running the heaviest environment-bound lanes on a schedule with deduped failure issue filing

@@ -1,7 +1,7 @@
 ---
 title: Tauri App Testing
 description: Testing patterns specific to Tauri v2 desktop applications.
-sidebar_position: 4
+sidebar_position: 2
 ---
 
 ## WebKit First: Matching the Production Engine
@@ -242,7 +242,7 @@ pnpm tauri build
 
 ## CI Configuration for Tauri Projects
 
-Point `webServer` at the already-built preview server instead of backgrounding a build+boot chain in the workflow step — this mirrors the [Production Build Verification](./playwright-patterns.mdx#production-build-verification) pattern from the sibling Playwright page:
+Point `webServer` at the already-built preview server instead of backgrounding a build+boot chain in the workflow step — this mirrors the [Production Build Verification](../tool-patterns/playwright-patterns.mdx#production-build-verification) pattern from the sibling Playwright page:
 
 ```typescript
 // playwright.config.ts (excerpt)
@@ -296,4 +296,4 @@ Tauri keyboard-shortcut and native-platform tests fall into the **platform-incap
 
 The local heavy lane (`exam`) is convenient but bypassable; it is also machine-dependent (the same suite false-reds dozens of specs on a Linux/WSL2 host). A **scheduled CI re-exam on a macOS runner** provides the paper trail that makes these platform-bound specs part of a real regression gate.
 
-See [Scheduled Re-exam & Night Exam](./scheduled-re-exam.mdx) for the complete workflow: the cron + `workflow_dispatch` skeleton, deduped failure issue filing, and on-demand pre-merge dispatch.
+See [Scheduled Re-exam & Night Exam](../ci-operations/scheduled-re-exam.mdx) for the complete workflow: the cron + `workflow_dispatch` skeleton, deduped failure issue filing, and on-demand pre-merge dispatch.

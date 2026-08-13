@@ -1,7 +1,7 @@
 ---
 title: Vitest Patterns
 description: Unit tests, component tests, and build output tests with Vitest.
-sidebar_position: 2
+sidebar_position: 1
 ---
 
 ## Project-Level Vitest Configs
@@ -360,7 +360,7 @@ describe("Worker with D1", () => {
 
 <Warning>
 
-**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so a SQL statement pretty-printed across multiple lines throws `D1_EXEC_ERROR: incomplete input` -- D1 tries to run each fragment on its own. Collapse each statement to a single line before calling `exec()`, or split a multi-statement migration file yourself (see [`createTestEnv`](./backend-testing.mdx#cloudflare-functions-with-miniflare) for the multi-statement case). This is a platform quirk, not something recoverable by reading more of your own code.
+**D1's `exec()` splits on newlines, not semicolons.** Each line of the input string is executed as a separate statement, so a SQL statement pretty-printed across multiple lines throws `D1_EXEC_ERROR: incomplete input` -- D1 tries to run each fragment on its own. Collapse each statement to a single line before calling `exec()`, or split a multi-statement migration file yourself (see [`createTestEnv`](../project-recipes/backend-testing.mdx#cloudflare-functions-with-miniflare) for the multi-statement case). This is a platform quirk, not something recoverable by reading more of your own code.
 
 </Warning>
 
@@ -594,7 +594,7 @@ Generalize the pattern: any value shared between two consumers that *should* be 
 
 </Tip>
 
-This guard catches *in-repo* divergence. It does not catch divergence between your parser and an **external tool's real output schema** -- that case needs a captured-artifact fixture rather than a hand-authored one; see [Pin Reporter-Parsing Fixtures to a Real Captured Report](./scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report).
+This guard catches *in-repo* divergence. It does not catch divergence between your parser and an **external tool's real output schema** -- that case needs a captured-artifact fixture rather than a hand-authored one; see [Pin Reporter-Parsing Fixtures to a Real Captured Report](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report).
 
 ## The Mirror-Test Anti-Pattern
 

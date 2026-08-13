@@ -1,7 +1,7 @@
 ---
 title: remark/rehypeプラグインのテスト
 description: ASTプラグインを2つの相補的なレイヤーでテストする -- ユニット制御のための手組みツリーファクトリと、パイプライン全体の一致を保証するゴールデンフィクスチャ群。
-sidebar_position: 7
+sidebar_position: 3
 ---
 
 remarkやrehypeのプラグインは、構文木（markdownならmdast、HTMLならhast）を走査して書き換えるだけの関数です。それゆえ、markdownを`remark-parse`に通して結果を目視で確認する、というテストをやりたくなります。しかし検証すべきものは大きく2つに分かれ、それぞれ別の手法を必要とします：

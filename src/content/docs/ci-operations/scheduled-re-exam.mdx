@@ -1,7 +1,7 @@
 ---
 title: Scheduled Re-exam & Night Exam
 description: Operating heavy, platform-bound test lanes on a schedule -- the CI re-exam workflow, deduped failure issues, on-demand dispatch, and the local night exam.
-sidebar_position: 8
+sidebar_position: 3
 ---
 
 ## Why a Local-Only Heavy Lane Fails as the Safety Net
@@ -315,7 +315,7 @@ In a release-round branch topology, point this nightly schedule at the accumulat
 - **GitHub-hosted macOS runners are Apple silicon** (`macos-14` and later): real WebKit, Metal-backed rendering. For a canvas/GPU-heavy web app whose pixel-level specs fail on software-rendering CI runners, this alone can be the difference between false-red and trustworthy.
 - **Third-party hosted macOS providers** exist for when the GitHub-hosted pool is too slow or too expensive for the suite.
 - **A self-hosted runner on your own hardware is an escalation, not a default.** If you do escalate: schedule-only on `main`, never PR-triggered on a public repo, and pair it with offline detection -- e.g. a companion job on a hosted runner that alerts when the self-hosted job has not reported within N hours -- so a sleeping machine is visible rather than silently green-by-absence.
-- **Runner shapes, pricing, and sizing rules live elsewhere.** See [CI Runner Sizing](../tools-reference/ci-runner-sizing.mdx) for the label matrix, macOS cost multipliers, and the four rules for when a bigger or different runner actually helps.
+- **Runner shapes, pricing, and sizing rules live elsewhere.** See [CI Runner Sizing](./ci-runner-sizing.mdx) for the label matrix, macOS cost multipliers, and the four rules for when a bigger or different runner actually helps.
 
 <Warning>
 
@@ -500,7 +500,7 @@ When the tool changes its schema in a future version, the test fails loudly -- i
 
 <Warning>
 
-Synthetic fixtures are safe only when **you own the contract**. For a third-party tool's output you cannot author truth -- you can only capture it. Hand-authored fixtures are the right choice when the reader owns the schema being tested: for example, mdast tree factories in [remark/rehype plugin tests](./remark-rehype-plugin-testing.mdx) (you own the mdast contract) or synthetic inner-bundle objects in [level-3 build-output tests](../testing-levels/level-3-build-output.mdx) (you own the bundle shape). For a tool like Playwright, Jest, or Vite whose output schema is theirs to change, capturing a real artifact is the only way to stay honest.
+Synthetic fixtures are safe only when **you own the contract**. For a third-party tool's output you cannot author truth -- you can only capture it. Hand-authored fixtures are the right choice when the reader owns the schema being tested: for example, mdast tree factories in [remark/rehype plugin tests](../project-recipes/remark-rehype-plugin-testing.mdx) (you own the mdast contract) or synthetic inner-bundle objects in [level-3 build-output tests](../testing-levels/level-3-build-output.mdx) (you own the bundle shape). For a tool like Playwright, Jest, or Vite whose output schema is theirs to change, capturing a real artifact is the only way to stay honest.
 
 </Warning>
 
@@ -725,7 +725,7 @@ export default defineConfig({
       test-results/
 ```
 
-The placement cuts the other way too: `outputDir` (`test-results/`) is **emptied at the start of every run**, so anything you park there to keep across runs is deleted by the next one — see [Artifacts You Want to Keep Must Live Outside `outputDir`](./playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
+The placement cuts the other way too: `outputDir` (`test-results/`) is **emptied at the start of every run**, so anything you park there to keep across runs is deleted by the next one — see [Artifacts You Want to Keep Must Live Outside `outputDir`](../tool-patterns/playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
 
 </Warning>
 

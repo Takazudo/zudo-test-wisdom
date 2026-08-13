@@ -1,12 +1,12 @@
 ---
 title: CI Runner Sizing
 description: Provider choice by repo visibility, Blacksmith runner shapes and pricing, the default-small stance, and the four rules for when a bigger or different runner actually helps.
-sidebar_position: 2
+sidebar_position: 6
 ---
 
 ## The Gap This Page Fills
 
-The rest of this guide talks about "CI runners" as if they were a single, fixed thing. [Execution Tiers](../decision-guide/execution-tiers.mdx) assumes a PR gate runs "under 10 minutes"; the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) sends environment-incapable tests to "capable hardware"; [Scheduled Re-exam](../real-world-patterns/scheduled-re-exam.mdx) puts platform-bound specs on "hosted macOS." Every one of those pages quietly assumes a two-vCPU Linux runner exists, is cheap, and is the thing you reach for by default.
+The rest of this guide talks about "CI runners" as if they were a single, fixed thing. [Execution Tiers](../decision-guide/execution-tiers.mdx) assumes a PR gate runs "under 10 minutes"; the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) sends environment-incapable tests to "capable hardware"; [Scheduled Re-exam](./scheduled-re-exam.mdx) puts platform-bound specs on "hosted macOS." Every one of those pages quietly assumes a two-vCPU Linux runner exists, is cheap, and is the thing you reach for by default.
 
 None of them documents the layer underneath: **what runner shapes exist, how they are priced, and the decision rules for when a bigger or different runner actually helps.** That knowledge usually lives in a comment at the top of one project's workflow file and dies there — never written down where the next project can find it. This page is that missing layer, written against [Blacksmith](https://www.blacksmith.sh/), the runner provider these strategies are tuned for.
 
@@ -84,7 +84,7 @@ Worked example: a nightly 45-minute Mac exam costs `45 × $0.08 ≈ $3.6/night �
 
 </Danger>
 
-There is an upside hiding in that math. The predictable ~$110/month figure is what finally makes a **scheduled real-GPU heavy lane feasible** for a project whose Metal/WebGL coverage currently runs only on a developer's local Mac. This is exactly the "environment-incapable" and "platform-incapable" case from the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#classify-by-why-it-is-heavy): tests that need a real GPU or real macOS move to a **scheduled T3 tier on capable hardware**. Hosted Apple-silicon runners are what make that tier a bounded monthly cost instead of "hope someone runs it locally before release." See [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) for how the scheduled macOS job itself is wired.
+There is an upside hiding in that math. The predictable ~$110/month figure is what finally makes a **scheduled real-GPU heavy lane feasible** for a project whose Metal/WebGL coverage currently runs only on a developer's local Mac. This is exactly the "environment-incapable" and "platform-incapable" case from the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#classify-by-why-it-is-heavy): tests that need a real GPU or real macOS move to a **scheduled T3 tier on capable hardware**. Hosted Apple-silicon runners are what make that tier a bounded monthly cost instead of "hope someone runs it locally before release." See [Scheduled Re-exam and Night Exam](./scheduled-re-exam.mdx) for how the scheduled macOS job itself is wired.
 
 ## The Four Runner-Sizing Rules
 
@@ -129,7 +129,7 @@ The actual fix is to **bound the per-process file count** so memory is reclaimed
 vitest --shard=1/4
 ```
 
-Sharding caps how many test files a single worker process loads before the run rolls to a fresh process, which keeps peak heap under the ceiling regardless of the machine's total RAM. Note that `--shard=1/4` runs only the *first* of four shards — a CI lane must run all four (`1/4` through `4/4`, in a matrix or in sequence) or three-quarters of the suite silently goes unrun. The flag bounds per-process memory; it does not by itself execute the whole suite. (Evidence: zudo-pattern-gen #1912 — a heap-OOM lane that survived the 2→4vCPU upgrade and only went green once `--shard` bounded the per-process file count.) See [Vitest Patterns](../real-world-patterns/vitest-patterns.mdx) for the surrounding worker- and timeout-budget configuration.
+Sharding caps how many test files a single worker process loads before the run rolls to a fresh process, which keeps peak heap under the ceiling regardless of the machine's total RAM. Note that `--shard=1/4` runs only the *first* of four shards — a CI lane must run all four (`1/4` through `4/4`, in a matrix or in sequence) or three-quarters of the suite silently goes unrun. The flag bounds per-process memory; it does not by itself execute the whole suite. (Evidence: zudo-pattern-gen #1912 — a heap-OOM lane that survived the 2→4vCPU upgrade and only went green once `--shard` bounded the per-process file count.) See [Vitest Patterns](../tool-patterns/vitest-patterns.mdx) for the surrounding worker- and timeout-budget configuration.
 
 <Warning>
 
@@ -141,7 +141,7 @@ Sharding caps how many test files a single worker process loads before the run r
 
 Rule 2 says a bigger runner does not fix memory problems — but it genuinely *does* fix a different problem that looks almost identical from the outside.
 
-**CPU starvation:** on a two-vCPU runner, e2e workers and the dev server contend for the same two cores. Under contention, specs miss their timing budgets and fail as timeouts — which reads, on the surface, exactly like a flaky or under-resourced test. Here, moving to four vCPU **is** the fix: giving the dev server and the test workers their own cores removes the contention. (Evidence: zudo-pattern-gen #3321 — spec timeouts under two-core contention, resolved by four vCPU.) If the resize leads you to tune worker counts through an environment variable, validate the value at the boundary — a Playwright `workers` override that coerces to `NaN` [runs zero tests and exits green](../real-world-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green), a false green worse than the timeouts you started with.
+**CPU starvation:** on a two-vCPU runner, e2e workers and the dev server contend for the same two cores. Under contention, specs miss their timing budgets and fail as timeouts — which reads, on the surface, exactly like a flaky or under-resourced test. Here, moving to four vCPU **is** the fix: giving the dev server and the test workers their own cores removes the contention. (Evidence: zudo-pattern-gen #3321 — spec timeouts under two-core contention, resolved by four vCPU.) If the resize leads you to tune worker counts through an environment variable, validate the value at the boundary — a Playwright `workers` override that coerces to `NaN` [runs zero tests and exits green](../tool-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green), a false green worse than the timeouts you started with.
 
 This fix has a ceiling that Rule 1's cancellation does not. The mechanism is relieving **contention at a fixed worker count** — not adding parallelism — and it saturates: roughly once the pinned workers and the dev server each have a core of their own, further vCPU buys nothing. With `workers: 2` pinned, a 4→8 vCPU bump hands two workers and one dev server more idle cores than they can use — wall-clock ~unchanged, bill doubled, which is Rule 1's pinned-workers trap entered from the other side. Treat the core count as a heuristic, not a formula (browsers spawn subprocesses, and the OS takes its share); the real stopping condition is that the contention timeouts are gone and one more size step no longer moves wall-clock. Size up to that point, then stop.
 
@@ -162,7 +162,7 @@ The rule that follows: **diagnose the binding constraint before you resize, and 
 
 <Note>
 
-A third failure mode presents identically and answers to **neither** lever: **connection starvation** — the browser's per-host connection pool (6 per host in the HTTP/1.1 case) exhausted by a dev-server module storm, so waits time out while CPU sits idle. Idle CPU alone is not enough to take this branch (remote I/O, a blocked lock, or a hung dependency looks the same) — require the network-waterfall evidence: same-origin requests stalled in queue. The pool does not grow with vCPU; the fix is at the app/serving layer. See [catalog entry 6 in the Flake Root-Cause Catalog](../real-world-patterns/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation).
+A third failure mode presents identically and answers to **neither** lever: **connection starvation** — the browser's per-host connection pool (6 per host in the HTTP/1.1 case) exhausted by a dev-server module storm, so waits time out while CPU sits idle. Idle CPU alone is not enough to take this branch (remote I/O, a blocked lock, or a hung dependency looks the same) — require the network-waterfall evidence: same-origin requests stalled in queue. The pool does not grow with vCPU; the fix is at the app/serving layer. See [catalog entry 6 in the Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation).
 
 </Note>
 
@@ -174,8 +174,8 @@ A heavy lane on an eight-vCPU runner that fires on every topic PR costs far more
 
 Gate expensive lanes by two things:
 
-1. **PR base branch.** Run the heavy suite only on release/round PRs — those whose base is `main` — not on every topic-branch PR feeding into an integration branch. Most PRs in an agent-driven flow are topic PRs; keeping the heavy lane off them removes the bulk of the cost. See [Release Rounds § Gating Heavy CI by Base Branch](../real-world-patterns/release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch) for the concrete branch topology and CI workflow this rule assumes.
-2. **A nightly `schedule:`.** Back the base-branch gate with a scheduled full run so nothing that skipped the topic PRs goes unverified for long. This is the T3 [scheduled re-exam](../real-world-patterns/scheduled-re-exam.mdx) tier doing its job.
+1. **PR base branch.** Run the heavy suite only on release/round PRs — those whose base is `main` — not on every topic-branch PR feeding into an integration branch. Most PRs in an agent-driven flow are topic PRs; keeping the heavy lane off them removes the bulk of the cost. See [Release Rounds § Gating Heavy CI by Base Branch](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch) for the concrete branch topology and CI workflow this rule assumes.
+2. **A nightly `schedule:`.** Back the base-branch gate with a scheduled full run so nothing that skipped the topic PRs goes unverified for long. This is the T3 [scheduled re-exam](./scheduled-re-exam.mdx) tier doing its job.
 
 Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger design to make a lane *cheaper* (Rule 4). Conflating the two — trying to save money by downsizing a per-PR heavy lane instead of moving it off per-PR entirely — optimizes the rounding error and ignores the bill.
 
@@ -200,4 +200,4 @@ The through-line: **a runner label is a two-token edit, but choosing it well mea
 - [Blacksmith pricing](https://www.blacksmith.sh/pricing) — per-minute rates by shape (verified 2026-07-05).
 - [Execution Tiers](../decision-guide/execution-tiers.mdx) — the T0–T4 model these sizing rules serve.
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) — how environment- and platform-incapable tests reach the scheduled macOS tier.
-- [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) — how the scheduled (T3) macOS job is actually built.
+- [Scheduled Re-exam and Night Exam](./scheduled-re-exam.mdx) — how the scheduled (T3) macOS job is actually built.

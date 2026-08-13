@@ -1,7 +1,7 @@
 ---
 title: Publishing-Pipeline Verification for Platform-Binary npm Packages
 description: Publish-time gates for the esbuild-style meta + per-platform optionalDependencies layout -- three failure modes the nightly registry drift net cannot see.
-sidebar_position: 12
+sidebar_position: 5
 ---
 
 A CLI shipped the esbuild way -- one meta package plus a set of per-platform binary packages resolved through `optionalDependencies` -- has a verification surface that neither the PR gate nor the nightly registry drift net can see: **the publish pipeline itself**. The PR gate installs from a lockfile, so it never resolves against the live registry. The [nightly drift net](./scheduled-re-exam.mdx) does resolve against the registry, but it runs once a day, on one platform, and it only ever exercises install-and-build. Between them sits an unverified gap -- `pack`, `publish`, and CDN propagation -- where three distinct failure modes live, each silent, each a property of the npm registry and client rather than of any one project.

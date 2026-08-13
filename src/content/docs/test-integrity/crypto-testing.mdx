@@ -1,7 +1,7 @@
 ---
 title: Crypto & Hash Testing
 description: Known-answer testing for hash, HMAC, and signature functions.
-sidebar_position: 6
+sidebar_position: 3
 ---
 
 ## The "Same Input, Same Output" Trap
@@ -170,7 +170,7 @@ The round-trip confirms `verifyToken` accepts what `createToken` signs; the nega
 
 <Note>
 
-This page covers JWTs only from the known-answer / signature-vector angle -- the part that shares its discipline with hash testing. Time-based behavior such as token expiry (tested with `vi.setSystemTime`) is a clock-control concern and lives on the [Backend & Node.js Testing](./backend-testing.mdx) page.
+This page covers JWTs only from the known-answer / signature-vector angle -- the part that shares its discipline with hash testing. Time-based behavior such as token expiry (tested with `vi.setSystemTime`) is a clock-control concern and lives on the [Backend & Node.js Testing](../project-recipes/backend-testing.mdx) page.
 
 </Note>
 

@@ -1,7 +1,7 @@
 ---
 title: Post-Deploy Smoke Tests
 description: The only tier that can see a deploy-time failure -- a wrong DNS record, an unattached domain, an expired certificate -- plus the skip-path discipline that stops such a test from quietly passing through the outage it exists to catch.
-sidebar_position: 18
+sidebar_position: 2
 ---
 
 A build can be green, the unit suite green, the built output validated, and the site still be unreachable -- because the failure happened at *deploy* time. A custom domain never got attached, a route bound to the wrong Worker, a certificate expired, a binding resolved to an empty resource. None of those live in the repository, so nothing that runs against the repository can see them. The only test that can is one that talks to the deployed origin over the public network, after the deploy.
@@ -10,7 +10,7 @@ This page is about that tier: what to assert, and -- the part that actually deci
 
 ## What Only This Tier Can See
 
-[Level 3 build-output tests](../testing-levels/level-3-build-output.mdx) read `dist/` on disk, and [site-integrity gates](./site-integrity-checks.mdx) crawl a *locally served* build. Both stop at the artifact. A post-deploy smoke test starts where they end:
+[Level 3 build-output tests](../testing-levels/level-3-build-output.mdx) read `dist/` on disk, and [site-integrity gates](../project-recipes/site-integrity-checks.mdx) crawl a *locally served* build. Both stop at the artifact. A post-deploy smoke test starts where they end:
 
 - **The hostname resolves, and to the right thing.** A route can be created against a Worker that is never deployed -- for example a custom domain attached at the top level of a wrangler config while production actually deploys with `--env ai` to a differently-named Worker. Everything upstream is green; the domain serves nothing.
 - **TLS is valid for this host.** Certificates expire on already-working domains. No build-time check will ever notice.

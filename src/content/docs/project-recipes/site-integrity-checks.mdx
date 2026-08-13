@@ -1,7 +1,7 @@
 ---
 title: Built-Site Integrity Gates
 description: Deterministic gates over the built site -- link check, html-validate, full-site crawl smoke, and 404/OGP/image-health sweeps -- the failures no unit or component test can structurally see.
-sidebar_position: 13
+sidebar_position: 4
 ---
 
 A content-heavy site can have a green unit suite, a green component suite, and still ship a homepage that links to a page that no longer exists, an article whose hero image 404s, a sitemap that lists deleted URLs, and a run of pages that fail HTML validation. None of those are logic bugs, so none of them live where a unit or component test can reach. They are properties of the **built site as a whole** -- the actual `dist/` on disk and the actual bytes a browser fetches -- and the only tests that can see them are deterministic gates that run *after* the build, over the built output.
@@ -119,7 +119,7 @@ Not every gate belongs on every PR. Map each to an [execution tier](../decision-
 | OGP / image-health / 404 sweep | T1 or main | cheap ones per-PR; the exhaustive versions on main |
 | External-link rot check | T3 (scheduled) | on a schedule -- external URLs go dead on their own timeline, and per-PR failure on someone else's outage is noise |
 
-The load-bearing distinction is **internal vs external**. An internal broken link is *your* regression: it is deterministic, it is your fault, and it belongs on the PR gate that blocks the merge. An external link going dead is *someone else's* outage on *their* timeline: failing a PR on it is a false red, so it belongs in the [scheduled re-exam](./scheduled-re-exam.mdx) tier where a dead-link report files a deduped issue instead of blocking a merge. Putting external-link checks on the PR gate is the single most common mistake in this tier -- it trains people to ignore red.
+The load-bearing distinction is **internal vs external**. An internal broken link is *your* regression: it is deterministic, it is your fault, and it belongs on the PR gate that blocks the merge. An external link going dead is *someone else's* outage on *their* timeline: failing a PR on it is a false red, so it belongs in the [scheduled re-exam](../ci-operations/scheduled-re-exam.mdx) tier where a dead-link report files a deduped issue instead of blocking a merge. Putting external-link checks on the PR gate is the single most common mistake in this tier -- it trains people to ignore red.
 
 ## A Minimal Recipe: Link Check + html-validate in b4push and PR CI
 
@@ -156,7 +156,7 @@ The same two gates become required PR checks -- one build, then both checks agai
 
 <Info>
 
-The build is the shared prerequisite: both gates read `dist/`, so run build once and point both at its output rather than rebuilding per check. Wiring the *same* commands into `b4push` and CI is what keeps the two surfaces from drifting -- the local gate and the PR gate check identical things because they call the identical scripts. That parity is worth enforcing mechanically; see the guard-manifest pattern in [Scheduled Re-exam](./scheduled-re-exam.mdx#guard-manifest-parity-between-b4push-and-ci) for treating "wired into both surfaces" as a checkable invariant.
+The build is the shared prerequisite: both gates read `dist/`, so run build once and point both at its output rather than rebuilding per check. Wiring the *same* commands into `b4push` and CI is what keeps the two surfaces from drifting -- the local gate and the PR gate check identical things because they call the identical scripts. That parity is worth enforcing mechanically; see the guard-manifest pattern in [Scheduled Re-exam](../ci-operations/scheduled-re-exam.mdx#guard-manifest-parity-between-b4push-and-ci) for treating "wired into both surfaces" as a checkable invariant.
 
 </Info>
 

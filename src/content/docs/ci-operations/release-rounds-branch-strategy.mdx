@@ -1,7 +1,7 @@
 ---
 title: "Release Rounds: A develop→main Branch Strategy"
 description: Branch topology as a cost + stability lever -- a permanent develop branch, short-lived release rounds into an auto-deploying main, and heavy CI gated by base branch.
-sidebar_position: 16
+sidebar_position: 4
 ---
 
 Every other page in this guide answers *what* to run at a given tier: which assertions belong at the unit level, which heavy lanes need real hardware, when a scheduled re-exam earns its runner. None of them answer a question that sits underneath all of those: **which branch is a given commit sitting on when the expensive tiers fire, and which branch turning green changes production.** That is branch topology, and it is the lever this page adds.
@@ -15,7 +15,7 @@ The pattern here was evaluated 2026-07-05 for adoption in zudo-pattern-gen, and 
 Picture the workflow this is built for: coding agents open and merge pull requests continuously, on the order of **200+ merged PRs a month**, into a `main` branch wired to auto-deploy on every push. That wiring is fine at low volume. At agent volume it produces three distinct problems, and they compound.
 
 - **"Agent finished" and "prod changed" become the same event.** Every autonomous merge is a production deploy. When the deploy pipeline also applies database migrations automatically, each merge can mutate the schema of the real production database against real data -- with no human between the agent declaring victory and the migration running against prod. The blast radius of a single confused agent is a live schema change.
-- **Per-PR heavy CI cost multiplies by PR volume.** Any heavy lane you attach to every PR -- long end-to-end suites, [visual regression](./visual-regression-baselines.mdx), Mac or GPU runners -- runs 200+ times a month whether or not the change could possibly have touched what it covers. The heavy lane, not the feature work, becomes the dominant line item on the CI bill.
+- **Per-PR heavy CI cost multiplies by PR volume.** Any heavy lane you attach to every PR -- long end-to-end suites, [visual regression](../tool-patterns/visual-regression-baselines.mdx), Mac or GPU runners -- runs 200+ times a month whether or not the change could possibly have touched what it covers. The heavy lane, not the feature work, becomes the dominant line item on the CI bill.
 - **A pre-release, single-user app does not need continuous delivery.** Continuous deployment is a feature when you have users waiting on every fix. For a pre-release or single-user project, nobody is waiting; the thing that actually has value is the **stability of the production data**, not the frequency of deploys. Paying the full price of continuous delivery to serve an audience of one is the wrong trade.
 
 The fix is not to slow the agents down or to gate every merge behind a human. It is to change the branch topology so that "an agent merged something" and "production changed" stop being the same event -- and so the heavy lanes run at the boundary that matters instead of on every PR.
@@ -109,7 +109,7 @@ Wrap the four sync-forward commands in a `scripts/sync-develop.sh` (or a project
 
 ## Gating Heavy CI by Base Branch
 
-The branch topology is only half the payoff. The other half is a CI rule that pairs with it: **heavy lanes run only when the PR's base is `main`.** Round PRs are the near-total majority of base-`main` PRs (the rare exception is a direct hotfix straight to production), so this rule confines the expensive lanes to round boundaries and the nightly schedule below -- not to every one of the month's 200+ PRs. This is the branch-topology instance of the general cost-control principle in [CI Runner Sizing § Rule 4: Cost control comes from trigger design, not runner choice](../tools-reference/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-4-cost-control-comes-from-trigger-design-not-runner-choice).
+The branch topology is only half the payoff. The other half is a CI rule that pairs with it: **heavy lanes run only when the PR's base is `main`.** Round PRs are the near-total majority of base-`main` PRs (the rare exception is a direct hotfix straight to production), so this rule confines the expensive lanes to round boundaries and the nightly schedule below -- not to every one of the month's 200+ PRs. This is the branch-topology instance of the general cost-control principle in [CI Runner Sizing § Rule 4: Cost control comes from trigger design, not runner choice](./ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-4-cost-control-comes-from-trigger-design-not-runner-choice).
 
 Filter by **base branch**, not head-branch name:
 

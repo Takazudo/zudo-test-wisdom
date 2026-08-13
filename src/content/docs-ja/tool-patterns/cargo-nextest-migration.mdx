@@ -1,7 +1,7 @@
 ---
 title: Rustスイートをcargoからnextestへ移行する
 description: このガイドのリトライ予算とflakyテレメトリのポリシーが、プレーンな cargo test では実装不可能である理由と、Rustスイートをcargo-nextestへ移行するための機械的なチェックリスト。
-sidebar_position: 11
+sidebar_position: 5
 ---
 
 ## なぜnextestがRustのflakeパイプラインのゲートなのか
@@ -81,7 +81,7 @@ cargo nextest run --workspace --profile exam --run-ignored ignored-only # T3: th
 cargo nextest run --workspace --profile exam --run-ignored all          # full-inventory sanity run -- everything, ignored and not; not a gate
 ```
 
-`--run-ignored ignored-only` は、[定期再試験](../real-world-patterns/scheduled-re-exam.mdx)にあるPlaywrightの `--grep "@flaky"` 隔離レーンのnextest版です — ただし、こちらは理由文字列の中身ではなく `#[ignore]` の*有無*で選択します。nextestは引用符の中身を一切パースしません。あの文字列は人間とgrepのためのものであり、nextest自身のフィルタリングのためのものではないのです。`heavy:` と `flaky:` の理由が混在するignore済みセットを持つワークスペースは、両方を同じ `ignored-only` の実行にまとめて走らせてしまい、Playwright側が独立した `--grep` 式で保っていた区別を消してしまいます。両者を別々に判断する必要があるときは、名前フィルタで絞り込みます：
+`--run-ignored ignored-only` は、[定期再試験](../ci-operations/scheduled-re-exam.mdx)にあるPlaywrightの `--grep "@flaky"` 隔離レーンのnextest版です — ただし、こちらは理由文字列の中身ではなく `#[ignore]` の*有無*で選択します。nextestは引用符の中身を一切パースしません。あの文字列は人間とgrepのためのものであり、nextest自身のフィルタリングのためのものではないのです。`heavy:` と `flaky:` の理由が混在するignore済みセットを持つワークスペースは、両方を同じ `ignored-only` の実行にまとめて走らせてしまい、Playwright側が独立した `--grep` 式で保っていた区別を消してしまいます。両者を別々に判断する必要があるときは、名前フィルタで絞り込みます：
 
 ```sh
 # separate "expected to always pass, just slow" from "expected to sometimes fail"
@@ -122,7 +122,7 @@ test-group = 'exam-heavy'
 
 ### 失敗許容のスケジュール実行エグザムジョブ
 
-このスケジュールジョブは、[定期再試験 § flakyテレメトリのメカニズム](../real-world-patterns/scheduled-re-exam.mdx#flakyテレメトリのメカニズム)にあるPlaywright隔離レーンの終了コードキャプチャパターンをそのまま踏襲します：`continue-on-error: true` と `if: failure()` の組み合わせがあちらでフィリングステップを死んだコードにしてしまうのと同じ理由で、こちらでも同じことが起こります — ステップレベルの `continue-on-error` はそのステップの `conclusion` をsuccessに書き換えてしまうため、下流の `if: failure()` は決して発火しません。
+このスケジュールジョブは、[定期再試験 § flakyテレメトリのメカニズム](../ci-operations/scheduled-re-exam.mdx#flakyテレメトリのメカニズム)にあるPlaywright隔離レーンの終了コードキャプチャパターンをそのまま踏襲します：`continue-on-error: true` と `if: failure()` の組み合わせがあちらでフィリングステップを死んだコードにしてしまうのと同じ理由で、こちらでも同じことが起こります — ステップレベルの `continue-on-error` はそのステップの `conclusion` をsuccessに書き換えてしまうため、下流の `if: failure()` は決して発火しません。
 
 ```yaml
 # .github/workflows/exam.yml
@@ -165,10 +165,10 @@ jobs:
         run: bash scripts/file-exam-issue.sh
 ```
 
-`file-exam-issue.sh` は、定期再試験にある[1ワークフロー1トラッキングissue](../real-world-patterns/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく)パターンと同じものです — ラベルとタイトルによる重複排除、コメントか新規作成かの判定、グリーン時のクローズというロジックはそのまま移植できます。異なるのは失敗抽出のステップだけです：Playwrightの JSON レポーターの代わりに、上の `[profile.exam.junit]` が生成する `junit.xml` をパースします。
+`file-exam-issue.sh` は、定期再試験にある[1ワークフロー1トラッキングissue](../ci-operations/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく)パターンと同じものです — ラベルとタイトルによる重複排除、コメントか新規作成かの判定、グリーン時のクローズというロジックはそのまま移植できます。異なるのは失敗抽出のステップだけです：Playwrightの JSON レポーターの代わりに、上の `[profile.exam.junit]` が生成する `junit.xml` をパースします。
 
 ## 次に読むページ
 
 - [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx#同じルール、rust構文) — このnextest設定が実行する `#[ignore]` 理由文字列タグ分類の全体（`env-gate:`、`heavy:`、`flaky:`、`verification:`、`pending-feature:`）と、Rustのflakeがどう隔離されるか
 - [実行ティア](../decision-guide/execution-tiers.mdx) — この移行がRustスイート上で実装可能にするために存在する、リトライ予算
-- [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) — nextestがバイナリをまたいで並列化した瞬間に表面化する、ネイティブスイートのflake原因（ポートレース、暗黙の直列化、共有状態）
+- [フレイク根本原因カタログ & デフレイキングレシピ](../test-integrity/deflaking-recipe.mdx) — nextestがバイナリをまたいで並列化した瞬間に表面化する、ネイティブスイートのflake原因（ポートレース、暗黙の直列化、共有状態）

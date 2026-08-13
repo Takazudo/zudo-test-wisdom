@@ -1,7 +1,7 @@
 ---
 title: 暗号 & ハッシュのテスト
 description: ハッシュ・HMAC・署名関数に対する既知の答えによるテスト。
-sidebar_position: 6
+sidebar_position: 3
 ---
 
 ## 「同じ入力なら同じ出力」という罠
@@ -170,7 +170,7 @@ describe("JWT signing -- round-trip supplements", () => {
 
 <Note>
 
-このページではJWTを既知の答え／署名ベクターの観点からのみ扱います。ハッシュテストと規律を共有する部分です。トークンの有効期限（`vi.setSystemTime`でテストする）のような時間ベースの振る舞いは時刻制御の関心事であり、[バックエンド & Node.js テスト](./backend-testing.mdx)のページで扱います。
+このページではJWTを既知の答え／署名ベクターの観点からのみ扱います。ハッシュテストと規律を共有する部分です。トークンの有効期限（`vi.setSystemTime`でテストする）のような時間ベースの振る舞いは時刻制御の関心事であり、[バックエンド & Node.js テスト](../project-recipes/backend-testing.mdx)のページで扱います。
 
 </Note>
 

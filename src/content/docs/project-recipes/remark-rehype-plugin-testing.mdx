@@ -1,7 +1,7 @@
 ---
 title: Testing remark/rehype Plugins
 description: Two complementary layers for AST plugins -- hand-built tree factories for unit control, and a golden-fixture corpus for whole-pipeline parity.
-sidebar_position: 7
+sidebar_position: 3
 ---
 
 A remark or rehype plugin is just a function that walks and mutates a syntax tree (mdast for markdown, hast for HTML). That makes it tempting to test by feeding markdown through `remark-parse` and eyeballing the result. But there are two distinct things worth verifying, and they call for two distinct techniques:

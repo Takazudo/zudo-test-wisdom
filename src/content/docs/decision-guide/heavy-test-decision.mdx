@@ -10,7 +10,7 @@ Sooner or later, every project with E2E tests hits the same moment: a test looks
 
 Every heavy test leaves this page through one of three exits:
 
-- **Fix** — keep the test, classify *why* it is heavy, and assign it the matching tier (if the test is flaky, see [Flake Root-Cause Catalog & Deflaking Recipe](../real-world-patterns/deflaking-recipe.mdx))
+- **Fix** — keep the test, classify *why* it is heavy, and assign it the matching tier (if the test is flaky, see [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx))
 - **Demote** — rewrite the assertion at a lower testing level
 - **Delete** — remove the test and watch what happens
 
@@ -64,7 +64,7 @@ The test runs fine on CI runners — it just takes long. This category **stays o
 - **Shard** across runners only past roughly 100 tests *and* 30 minutes of runtime
 - Use `--only-changed` as a lossy PR prefilter, backstopped by a scheduled full run
 
-Tag: `@heavy`. Never make this category local-only — slowness alone is not a reason to leave the enforced gate. For the underlying trade-offs of tuning workers, sharding, and sizing the runner itself, see [CI Runner Sizing](../tools-reference/ci-runner-sizing.mdx).
+Tag: `@heavy`. Never make this category local-only — slowness alone is not a reason to leave the enforced gate. For the underlying trade-offs of tuning workers, sharding, and sizing the runner itself, see [CI Runner Sizing](../ci-operations/ci-runner-sizing.mdx).
 
 ### 2. Environment-incapable
 
@@ -88,7 +88,7 @@ The treatment is a **layered split**, not one monolithic heavy suite:
 2. **Native-side mock-runtime tests** — the native layer's logic against a mock runtime; also CI-safe
 3. **A thin native-integration layer** — the few specs that genuinely need the real platform; tagged `@interactive` / `@macos-only`, run as a T3 scheduled macOS job with on-demand `workflow_dispatch` for pre-merge escalation
 
-Most of the suite's protection moves into the CI-safe layers; only the thin remainder is scheduled. See [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) for how that scheduled job is built.
+Most of the suite's protection moves into the CI-safe layers; only the thin remainder is scheduled. See [Scheduled Re-exam and Night Exam](../ci-operations/scheduled-re-exam.mdx) for how that scheduled job is built.
 
 ### 4. Flaky — Not a Heaviness Category at All
 
@@ -111,7 +111,7 @@ The classification result is recorded as a tag on the test itself, so the tier m
 
 `@verification` marks one-time proof artifacts — specs written to prove a change worked once, not to guard it forever. They belong to no gate; see [Required Testing Behavior](./required-behavior.mdx) for how promotion from verification to regression must happen.
 
-Whether a `@heavy`-tagged test's T2/T3 lane runs on every PR or only at release boundaries is a branch-topology decision, not a tagging one — see [Release Rounds: A develop→main Branch Strategy](../real-world-patterns/release-rounds-branch-strategy.mdx) for gating the lane by base branch and cost-controlling it that way.
+Whether a `@heavy`-tagged test's T2/T3 lane runs on every PR or only at release boundaries is a branch-topology decision, not a tagging one — see [Release Rounds: A develop→main Branch Strategy](../ci-operations/release-rounds-branch-strategy.mdx) for gating the lane by base branch and cost-controlling it that way.
 
 ## Classifying a New Test: Mechanical Rules
 
@@ -171,7 +171,7 @@ Apply the first rule that matches — same sequencing as [Classifying a New Test
 6. Asserts a feature that does not exist in the codebase yet → `pending-feature:`
 7. Otherwise → no `#[ignore]`; the test runs on every `cargo nextest run`
 
-When a rule produces a `#[ignore]`d test and the scheduled exam selects its tests by **exact name** -- a cargo/nextest `-E 'test(=...)'` filterset is an allowlist -- tagging the test is not the last step: adding its fully-qualified name to that filterset is a second one, and only an [ignored-test-manifest parity check](../real-world-patterns/scheduled-re-exam.mdx#ignored-test-manifest-parity-a-sibling-inventory-contract) makes forgetting it impossible.
+When a rule produces a `#[ignore]`d test and the scheduled exam selects its tests by **exact name** -- a cargo/nextest `-E 'test(=...)'` filterset is an allowlist -- tagging the test is not the last step: adding its fully-qualified name to that filterset is a second one, and only an [ignored-test-manifest parity check](../ci-operations/scheduled-re-exam.mdx#ignored-test-manifest-parity-a-sibling-inventory-contract) makes forgetting it impossible.
 
 ### Same Graveyard Warning
 
@@ -188,7 +188,7 @@ The `@macos-only` rule says "trustworthy only on real macOS, run in T3." Rust's 
 fn reads_the_saved_credential_from_keychain() { /* ... */ }
 ```
 
-See [Migrating a Rust Suite to cargo-nextest](../real-world-patterns/cargo-nextest-migration.mdx#executing-the-taxonomy) for how each reason string above turns into an actual nextest execution lane.
+See [Migrating a Rust Suite to cargo-nextest](../tool-patterns/cargo-nextest-migration.mdx#executing-the-taxonomy) for how each reason string above turns into an actual nextest execution lane.
 
 ## The Quarantine Pipeline for `@flaky`
 
@@ -196,11 +196,11 @@ Quarantine is a pipeline with an exit, not a parking lot:
 
 **Step 0 of quarantine:** verify the test has ever passed (not pass-by-skip) on some host; if it cannot pass, it is **broken, not flaky** — fix or delete immediately, no quarantine.
 
-Before entering the pipeline, confirm there is at least one verifiable green run of the exact assertion on any CI host. Pass-by-skip does not count — Playwright reports skips as `-` rather than `✓`, so check the distinction carefully. A test that has never produced a genuine green run is not flaky; it is broken. Sending it to quarantine would suspend product coverage without any chance of recovery. Note that this step is distinct from Branch 0 (which asks whether the test deserves a tier at all): Step 0 asks whether the test can even pass anywhere. See [Playwright Patterns](../real-world-patterns/playwright-patterns.mdx) for notes on `test.skip` preconditions — a precondition that "should always hold" must be a hard assertion, not a conditional skip that can silently degrade into a permanent vacuous green.
+Before entering the pipeline, confirm there is at least one verifiable green run of the exact assertion on any CI host. Pass-by-skip does not count — Playwright reports skips as `-` rather than `✓`, so check the distinction carefully. A test that has never produced a genuine green run is not flaky; it is broken. Sending it to quarantine would suspend product coverage without any chance of recovery. Note that this step is distinct from Branch 0 (which asks whether the test deserves a tier at all): Step 0 asks whether the test can even pass anywhere. See [Playwright Patterns](../tool-patterns/playwright-patterns.mdx) for notes on `test.skip` preconditions — a precondition that "should always hold" must be a hard assertion, not a conditional skip that can silently degrade into a permanent vacuous green.
 
 **Step 0.5 of quarantine:** prove the nondeterminism is in the **test**, and not in the **product**. If the product is what varies, the test is not flaky — it is *correctly failing, intermittently*, and quarantining it buries a real bug.
 
-Step 0 does **not** cover this: a test sampling a genuine product bug *does* pass sometimes, so "has it ever passed?" waves it straight through. The check is cheap — **log the product's input on a failing run and diff it against a passing one.** Identical inputs + different outcome → a real flake, proceed. **Different inputs → a product bug, stop and fix the product.** A failure that correlates with the *platform* (one OS, one filesystem, one watcher backend, one CPU architecture) rather than with load or ordering is a product-bug smell, not a timing smell. Full worked case and the diagnostic: [The impostor: when the "flake" is a real product bug](../real-world-patterns/deflaking-recipe.mdx#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
+Step 0 does **not** cover this: a test sampling a genuine product bug *does* pass sometimes, so "has it ever passed?" waves it straight through. The check is cheap — **log the product's input on a failing run and diff it against a passing one.** Identical inputs + different outcome → a real flake, proceed. **Different inputs → a product bug, stop and fix the product.** A failure that correlates with the *platform* (one OS, one filesystem, one watcher backend, one CPU architecture) rather than with load or ordering is a product-bug smell, not a timing smell. Full worked case and the diagnostic: [The impostor: when the "flake" is a real product bug](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
 
 <Danger>
 
@@ -218,8 +218,8 @@ This is the step an autonomous agent skips. The quarantine pipeline is *designed
    ```
 
 2. **Excluded from strict gates.** A quarantined test must not block a PR — otherwise quarantine means nothing.
-3. **It still runs — allowed-to-fail — in the scheduled tier.** A `@flaky` tag that runs nowhere is a graveyard: results stop being collected and the test silently rots. Running allowed-to-fail in T3 keeps fresh failure data flowing into the tracking issue. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../real-world-patterns/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
-4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../real-world-patterns/deflaking-recipe.mdx) — it covers the seven causes of E2E flakiness and the mechanical steps to eliminate each one.
+3. **It still runs — allowed-to-fail — in the scheduled tier.** A `@flaky` tag that runs nowhere is a graveyard: results stop being collected and the test silently rots. Running allowed-to-fail in T3 keeps fresh failure data flowing into the tracking issue. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../ci-operations/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
+4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) — it covers the seven causes of E2E flakiness and the mechanical steps to eliminate each one.
 
 <Tip>
 
@@ -242,9 +242,9 @@ fn drag_preview_follows_cursor() {
 
 - **Paper trail.** The `#[ignore = "..."]` reason string keeps the mandatory inline issue URL right next to the test — the cargo analogue of the `@flaky`-title-substring convention.
 - **Excluded from the strict gate.** `cargo test` skips `#[ignore]` tests by default, so a quarantined flake no longer blocks the gate — the analogue of `--grep-invert "@flaky"`.
-- **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs the ignored set and `cargo test -- --include-ignored` runs everything; schedule one as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue. Caveat: `--ignored` matches *every* `#[ignore]` test, so if your suite also uses `#[ignore]` for slow or manual tests, narrow the run with a name filter (e.g. `cargo test flaky_ -- --ignored` over a naming convention) so unrelated ignored tests do not pollute the flake signal — `#[ignore]` is a broader marker than the flake-specific `@flaky` title substring. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../real-world-patterns/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
+- **It still runs somewhere, allowed-to-fail.** `cargo test -- --ignored` runs the ignored set and `cargo test -- --include-ignored` runs everything; schedule one as a T3 allowed-to-fail job so fresh failure data keeps flowing into the tracking issue. Caveat: `--ignored` matches *every* `#[ignore]` test, so if your suite also uses `#[ignore]` for slow or manual tests, narrow the run with a name filter (e.g. `cargo test flaky_ -- --ignored` over a naming convention) so unrelated ignored tests do not pollute the flake signal — `#[ignore]` is a broader marker than the flake-specific `@flaky` title substring. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../ci-operations/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
 
-Once this suite also adopts the guide's retry budget and pass-on-retry telemetry, plain `cargo test` can no longer implement the policy — it has no retry mechanism, per-test timeout, or stable machine-readable output. See [Migrating a Rust Suite to cargo-nextest](../real-world-patterns/cargo-nextest-migration.mdx), whose checklist runs exactly this `#[ignore]` quarantine as `cargo nextest run --run-ignored ignored-only`.
+Once this suite also adopts the guide's retry budget and pass-on-retry telemetry, plain `cargo test` can no longer implement the policy — it has no retry mechanism, per-test timeout, or stable machine-readable output. See [Migrating a Rust Suite to cargo-nextest](../tool-patterns/cargo-nextest-migration.mdx), whose checklist runs exactly this `#[ignore]` quarantine as `cargo nextest run --run-ignored ignored-only`.
 
 </Note>
 
@@ -299,7 +299,7 @@ An overloaded tag — a catch-all conflating multiple, unrelated reasons a test 
 ## Where to Go Next
 
 - [Execution Tiers](./execution-tiers.mdx) — the definitions of T0–T4 and when a project should adopt each one
-- [Scheduled Re-exam and Night Exam](../real-world-patterns/scheduled-re-exam.mdx) — how the scheduled tier (T3) is actually built: cron, macOS runners, deduped issue filing, on-demand dispatch
-- [CI Runner Sizing](../tools-reference/ci-runner-sizing.mdx) — runner shapes, pricing, and the four sizing rules that decide when a bigger or different runner actually helps
-- [Release Rounds: A develop→main Branch Strategy](../real-world-patterns/release-rounds-branch-strategy.mdx) — gating heavy (T2/T3) lanes by base branch instead of running them on every PR
+- [Scheduled Re-exam and Night Exam](../ci-operations/scheduled-re-exam.mdx) — how the scheduled tier (T3) is actually built: cron, macOS runners, deduped issue filing, on-demand dispatch
+- [CI Runner Sizing](../ci-operations/ci-runner-sizing.mdx) — runner shapes, pricing, and the four sizing rules that decide when a bigger or different runner actually helps
+- [Release Rounds: A develop→main Branch Strategy](../ci-operations/release-rounds-branch-strategy.mdx) — gating heavy (T2/T3) lanes by base branch instead of running them on every PR
 - [Required Testing Behavior](./required-behavior.mdx) — the agent-facing rules: never tag `@flaky` without a linked open issue, promote verification specs explicitly, and more
