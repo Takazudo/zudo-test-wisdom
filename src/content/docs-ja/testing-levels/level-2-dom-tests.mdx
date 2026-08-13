@@ -149,7 +149,7 @@ describe("TableOfContents SSG presence", () => {
 
 jsdomとhappy-domにはCSSエンジンが存在しないため、上のブラインドスポットに挙げたもの -- 算出スタイル、`var()`や`oklch()`の解決、実際のレイアウト -- はレベル2のテストからは見えないままです。Vitestの**ブラウザモード**は、レベル2から離れることなくこのギャップだけを埋めます。シミュレートされたDOMの代わりに、コンポーネントテストを実際のPlaywright駆動のChromium内で実行するため、実際のブラウザのCSSエンジンが解決を行うので算出スタイルが本当に解決されます。
 
-テストファイル自体はほとんど変わりません -- 同じ`describe`/`it`、同じコンポーネントレンダリングAPIです。変わるのは、既存のjsdomの`unit`プロジェクトに加えて、`*.browser.test.ts`という命名規則にスコープされた2つ目のVitestプロジェクトの裏側の環境です。具体的な設定は[2プロジェクト構成のレシピ](../real-world-patterns/vitest-patterns.mdx#vitestブラウザモード-2プロジェクト構成)を参照してください。
+テストファイル自体はほとんど変わりません -- 同じ`describe`/`it`、同じコンポーネントレンダリングAPIです。変わるのは、既存のjsdomの`unit`プロジェクトに加えて、`*.browser.test.ts`という命名規則にスコープされた2つ目のVitestプロジェクトの裏側の環境です。具体的な設定は[2プロジェクト構成のレシピ](../tool-patterns/vitest-patterns.mdx#vitestブラウザモード-2プロジェクト構成)を参照してください。
 
 <Note>
 

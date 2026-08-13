@@ -14,13 +14,13 @@ New articles are available immediately without re-running setup, since they live
 
 ## Installation
 
-Run the setup script to generate the skill and symlink every skill under `.claude/skills/` -- the generated `test-wisdom` skill plus tracked skills like `verify-ui` and `headless-browser` -- into your global Claude Code skills directory:
+Run the setup script to generate the skill and symlink it -- along with this repo's other tracked skills (`verify-ui`, `verify-ui-ai`, `headless-browser`) -- into your global skills directory:
 
 ```bash
 pnpm run setup:doc-skill
 ```
 
-This creates the skill at `.claude/skills/test-wisdom/`, then symlinks all of `.claude/skills/*` to `~/.claude/skills/` in one step.
+This creates the skill at `.claude/skills/test-wisdom/`, then symlinks every skill under `.claude/skills/` to `~/.claude/skills/`. It auto-detects your setup: if `~/.codex` also exists, it links the Codex equivalents under `~/.codex/skills/` too (use `--target claude`, `--target codex`, or `--target both` to override). Pass `--no-link-tracked-skills` to skip the tracked skills and symlink only the generated `test-wisdom` skill.
 
 ## Usage
 

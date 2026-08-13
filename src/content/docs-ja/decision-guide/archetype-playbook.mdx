@@ -122,8 +122,8 @@ it("matches the committed golden output", () => {
 
 **エスカレーショントリガー。**
 
-- **プラットフォーム固有のバイナリや実行ビットを出荷する** → publish 時の pack 検証を足す；素のユニットスイートが見られない3つの失敗モードは[Publishing-Pipeline 検証](../real-world-patterns/publishing-pipeline.mdx)にある。
-- **複数のリポジトリから pin 留めで消費される** → 破壊的な publish を消費者が踏む前に捕らえるスケジュール済みレジストリドリフトネット（**T3**）を足す — [スケジュール再試験](../real-world-patterns/scheduled-re-exam.mdx)を参照。
+- **プラットフォーム固有のバイナリや実行ビットを出荷する** → publish 時の pack 検証を足す；素のユニットスイートが見られない3つの失敗モードは[Publishing-Pipeline 検証](../ci-operations/publishing-pipeline.mdx)にある。
+- **複数のリポジトリから pin 留めで消費される** → 破壊的な publish を消費者が踏む前に捕らえるスケジュール済みレジストリドリフトネット（**T3**）を足す — [スケジュール再試験](../ci-operations/scheduled-re-exam.mdx)を参照。
 - **ブラウザランタイムを出力する**（クライアントルーター、island、ビュートランジションを出荷するジェネレーター） → もはや単なるライブラリではない。テストの表面は*出力される成果物*に従う：ランタイムを L2 DOM テストでカバーする、[CLI の形をしたジェネレーターの注記](./execution-tiers.mdx)のとおり。
 
 ## アーキタイプ: モノレポアプリ + Functions バックエンド
@@ -150,7 +150,7 @@ it("POST /api/login returns a session token", async () => {
 });
 ```
 
-ランタイムではなくバインディングをモックする — セットアップのパターンは[バックエンド & Node.js テスト](../real-world-patterns/backend-testing.mdx)にある。
+ランタイムではなくバインディングをモックする — セットアップのパターンは[バックエンド & Node.js テスト](../project-recipes/backend-testing.mdx)にある。
 
 **スキップ — その理由。**
 
@@ -187,7 +187,7 @@ it("shows the opened file path from the bridge", async () => {
 });
 ```
 
-コアクレートとバックエンドブリッジモックのパターンは[Tauri アプリテスト](../real-world-patterns/tauri-testing.mdx)にある。
+コアクレートとバックエンドブリッジモックのパターンは[Tauri アプリテスト](../project-recipes/tauri-testing.mdx)にある。
 
 **スキップ — その理由。**
 
@@ -212,7 +212,7 @@ const BASE = process.env.TARGET_URL ?? "http://localhost:8788";
 export const url = (path: string) => new URL(path, BASE).toString();
 ```
 
-本番を変更するものはすべて、明示的な破壊的テストガードの背後に置く — [HTTP API テスト](../real-world-patterns/backend-testing.mdx)の環境ベース URL 切り替えと破壊的テストガードのパターンを参照。
+本番を変更するものはすべて、明示的な破壊的テストガードの背後に置く — [HTTP API テスト](../project-recipes/backend-testing.mdx)の環境ベース URL 切り替えと破壊的テストガードのパターンを参照。
 
 **スキップ — その理由。**
 

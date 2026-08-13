@@ -1,0 +1,708 @@
+---
+title: Vitestパターン
+description: Vitest を使ったユニットテスト、コンポーネントテスト、ビルド出力テスト -- ワークスペース設定、jsdom/happy-dom 環境、コントラクトテスト、冪等性テスト、Miniflare を使ったインテグレーションテスト。
+sidebar_position: 1
+---
+
+## プロジェクトレベルのVitest設定
+
+大規模なプロジェクトでは、異なるテストタイプに異なるVitest設定が必要になることがよくあります。`test.projects` を使って、単一のルート設定の中に複数のプロジェクトを定義します：
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "component",
+          include: ["src/**/*.test.tsx"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "build",
+          include: ["tests/build/**/*.test.ts"],
+          environment: "node",
+        },
+      },
+    ],
+  },
+});
+```
+
+<Tip>
+
+プロジェクトを分離することで、高速なユニットテストを低速なコンポーネントテストやビルドテストとは独立して実行できます：`vitest --project unit` vs `vitest --project component`。
+
+</Tip>
+
+### プロジェクトごとのタイムアウト予算
+
+よくあるフレーキーの原因: テストが `spawnSync`/`execSync` で CLI を起動し、*子プロセス*には寛大な `timeout:`（たとえば30秒）を与える一方で、Vitest 自体の per-test タイムアウトはデフォルトで5000msです。ホストの CPU が混み合っていると、より厳しい方の締め切りが勝ちます -- サブプロセスがまだ自分の30秒予算の範囲内で実行中であっても、Vitest は5秒でテストを強制終了します。失敗はハングしているように見えます（「Test timed out in 5000ms」）が、実際には何もハングしていません。サブプロセスは負荷下で単に遅かっただけで、外側のタイムアウトが発火する前に終える機会がなかったのです。
+
+問題のある `it()` ごとに `testTimeout` にパッチを当てても収束しません -- 同じ5秒デフォルトのまま、サブプロセスの重いテストが別のファイルに次々と現れるので、モグラ叩きは終わりません。代わりに設定レベルで直しましょう: `test.projects` を分割し、サブプロセスの重いディレクトリにはプロジェクトレベルの `testTimeout` を最大の子プロセス予算の少なくとも2倍に引き上げて与え、純粋なユニットテストのプロジェクトは厳格な5秒デフォルトを、本当にハングしたテストに対するガードレールとして維持します。
+
+```typescript
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: { /* root-level aliases */ } },
+  test: {
+    server: { deps: { inline: [/* runtime packages needing the alias pipeline */] } },
+    projects: [
+      {
+        extends: true, // projects don't inherit the root config without this
+        test: {
+          name: "unit",
+          include: ["src/**/__tests__/**/*.test.ts"],
+          // default 5s testTimeout stays as the guardrail
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "scripts",
+          include: ["scripts/**/__tests__/**/*.test.ts"],
+          // subprocess-heavy: budget 2x the largest 30s child timeout
+          testTimeout: 60_000,
+        },
+      },
+    ],
+  },
+});
+```
+
+<Tip>
+
+純粋ユニットのプロジェクトのデフォルト `testTimeout` はここで実際に仕事をしています: サブプロセスのテストに対応するためにプロジェクト全体で引き上げてしまうと、本当にハングしたユニットテストも5秒で速やかに失敗する代わりに60秒間実行され続けてしまいます。
+
+</Tip>
+
+### `extends: true` の指定は必須
+
+Vitest のプロジェクト設定は、デフォルトではルート設定を継承**しません**。`test.projects` に `extends: true` なしでプロジェクトを追加すると、ルートレベルの `resolve.alias` と `test.server.deps.inline` はそのプロジェクトに黙って適用されなくなります -- エラーも警告もなく、テストは未解決の依存関係のまま実行されるだけです。`react` を `preact/compat` にエイリアスしている Preact-compat リポジトリでは、これはプリコンパイル済みの React 風ランタイムを間接的に import するすべてのテストが `Cannot find package 'react'` で失敗する、という形で表面化します。エイリアスが本来リダイレクトするはずだった import が、そのプロジェクトには届かなかったからです。
+
+上の設定にある2つのプロジェクトは、まさにこの理由で両方とも `extends: true` を必要とします。プロジェクトが主役になったら、古いルートレベルの `test.include` も削除してください -- 残したままにすると、プロジェクトとは独立にテストファイルを収集してしまい、スイートが二重に実行されたりスコープを誤ったりしかねません。プロジェクトの `include` 配列だけが収集元であるべきです。
+
+<Danger>
+
+`extends: true` の欠落は静かに失敗します。欠けているキーを指し示すエラーは出ません -- 影響を受けたプロジェクトのテストの中で、依存関係の問題のように見える下流の解決失敗が起きるだけです。
+
+</Danger>
+
+継承の完全なルールについては [Vitest projects configuration docs](https://vitest.dev/guide/projects#configuration) を参照してください。
+
+### モジュール評価のタイムアウトの抜け穴と子プロセスのタイムアウト管理
+
+**モジュール評価時**のサブプロセス呼び出し -- たとえば `describe`/`it` ブロックが実行される前、import 時点で `git worktree list` を解決するようなもの -- は、Vitest の per-test タイムアウトを完全にすり抜けます。なぜなら、それはタイムを計測されたテスト実行中ではなく、収集（collection）フェーズの最中に実行されるからです。その呼び出しがハングしても、5秒（あるいはプロジェクトの60秒）の歯止めはありません -- テストが1つも始まらないまま、収集フェーズ全体がハングするだけです。これはこのページの別の場所にある[モジュール評価タイミングの罠](#happy-dom-の落とし穴-モジュール評価タイミングの罠（核心となる気づき）)と同じ「import 時評価」の危険性ですが、DOM の読み取りではなくサブプロセス呼び出しに対するものです -- ランナーレベルのガードレールはそこには届かないので、明示的に独自の子プロセスレベルの `timeout:` を与えてください。
+
+```typescript
+// setup-doc-skill.test.ts
+import { execSync } from "node:child_process";
+
+// Module-level eval runs before Vitest's per-test timeout applies, so this
+// needs its own explicit child-level timeout.
+const MAIN_WORKTREE_ROOT = execSync("git worktree list | head -1 | awk '{print $1}'", {
+  cwd: PROJECT_ROOT,
+  encoding: "utf-8",
+  timeout: 30_000,
+}).trim();
+```
+
+モジュールスコープに限らず、すべての `it()` の内側でも同じ規律が当てはまります: すべての子プロセス呼び出しに、プロジェクトの `testTimeout` 以下の明示的な `timeout:` を与えてください。そうすればハングしたサブプロセスは予算全体を静かに食いつぶすのではなく、個々のテストを失敗させます。そして、そのサブプロセスが本当に仕事をしているかどうかも確認しましょう -- `mkdir -p` のような些細なシェルアウトは純粋なファイルシステム I/O であり、プロセスをフォークする理由がありません。
+
+```typescript
+// Before: forks a process for a one-line filesystem operation
+import { execFileSync } from "node:child_process";
+execFileSync("mkdir", ["-p", fakeBinDir]);
+
+// After: same effect, in-process, nothing left to time out
+import { mkdirSync } from "node:fs";
+mkdirSync(fakeBinDir, { recursive: true });
+```
+
+<Tip>
+
+些細なサブプロセスをインプロセス呼び出しに変換することは一石二鳥です: 管理すべきタイムアウトが1つ減り、プロセスの起動はそれがラップしているファイルシステム呼び出しよりコストがかかる分、速くもなります。
+
+</Tip>
+
+### 重いローカルゲートでのワーカー並列数の上限
+
+Vitest はデフォルトで、ホストのコア数に合わせたサイズの複数ワーカープロセスにテストファイルを分散して実行します。忙しいノートPC上 -- 他のタブ、他の開発サーバー、隣のワークツリーで動いているもう1つの `pnpm build` -- では、それだけ多くの並列ワーカーがあると、すべてのテストが CPU を奪い合うことになります。そしてそれこそが、一見寛大に見えるタイムアウトをそもそもフレーキーにしてしまう競合そのものです。重い pre-push ゲートで並列数を制限することは、ウォールクロック時間と引き換えに信頼性を得るトレードオフです：
+
+```bash
+# --maxWorkers=4 caps vitest parallelism for reliability under host CPU
+# contention over wall-clock, not speed.
+pnpm test:unit --maxWorkers=4
+```
+
+<Note>
+
+これは重いローカルゲートだけに制限し、どこにでも適用しないでください。開発中の素早いフィードバックのため、対話的な `pnpm test:unit` は無制限のままにし、CI ランナーには手を加えないでください -- 通常すでにコア数が少なく自己制限的なので、そこに明示的な上限を追加しても不要な天井を増やすだけです。また、上限を環境変数から供給する場合は、値を境界で検証してください — Playwright側の類似例である `NaN` に変換される `workers` 値は、[ゼロ件のテストを実行してgreenで終了します](./playwright-patterns.mdx#不正な-workers-値はゼロ件のテストを実行してgreenで終了する)。
+
+</Note>
+
+## jsdomとhappy-dom環境
+
+コンポーネントテストに適切なDOM環境を選択します：
+
+```typescript
+// vitest.config.ts for component tests
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom",
+    // Or use happy-dom for faster execution:
+    // environment: "happy-dom",
+    globals: true,
+    setupFiles: ["./test-setup.ts"],
+  },
+});
+```
+
+必要に応じてファイル単位の環境オーバーライドも可能です：
+
+```typescript
+// @vitest-environment jsdom
+import { describe, it, expect } from "vitest";
+
+describe("DOM-dependent test", () => {
+  it("manipulates the document", () => {
+    document.body.innerHTML = '<div id="app">Hello</div>';
+    expect(document.getElementById("app")?.textContent).toBe("Hello");
+  });
+});
+```
+
+## Vitestブラウザモード: 2プロジェクト構成
+
+実際の算出スタイル -- `var()`や`oklch()`の解決、実際のレイアウト値 -- をアサートする必要があるコンポーネントテストは、jsdomの疑似CSSエンジンでは手に負えなくなります。Vitestのブラウザモードは、上と同じ`test.projects`の仕組みを使って、プロジェクトのテストを実際のPlaywright駆動のブラウザ内で実行します。CSSに触れないものはすべて高速なjsdomの`unit`プロジェクトのままにし、CSSに触れるひと握りのテストのために`*.browser.test.ts`という命名規則にスコープされた`browser`プロジェクトを追加します。
+
+```typescript
+// vitest.config.ts -- current Vitest 3.x/4.x browser-mode shape
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: [
+      {
+        test: {
+          name: "unit",
+          include: ["src/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        test: {
+          name: "browser",
+          include: ["src/**/*.browser.test.ts"],
+          browser: {
+            enabled: true,
+            provider: "playwright",
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
+    ],
+  },
+});
+```
+
+```bash
+pnpm add -D vitest @vitest/browser playwright
+```
+
+<Tip>
+
+`browser`プロジェクトだけを実行するには`pnpm vitest run --project browser`を使います。`*.browser.test.ts`というサフィックスだけが、ファイルをjsdomではなく実際のChromiumへとルーティングします -- この命名規則は一貫して守ってください。
+
+</Tip>
+
+<Note>
+
+これは[jsdomでは足りないがフルE2Eには重すぎるとき](../testing-levels/level-2-dom-tests.mdx#jsdomでは足りないがフルe2eには重すぎるとき)の設定レベルでの実装です -- 同じレベル2のエルゴノミクス（コンポーネントの分離、vitestのAPI）で、テスト対象のライブラリコードに対してレベル5相当のCSS可観測性を持ちます。
+
+</Note>
+
+## テストタイプ別の設定分離
+
+mdx-formatterのパターン：ユニットテスト、APIテスト、関数テスト用の別々の設定：
+
+```
+vitest.config.ts          # Default: unit tests
+vitest.config.api.ts      # API integration tests
+vitest.config.functions.ts # Cloud function tests
+```
+
+```json
+{
+  "scripts": {
+    "test": "vitest",
+    "test:api": "vitest --config vitest.config.api.ts",
+    "test:functions": "vitest --config vitest.config.functions.ts",
+    "test:all": "vitest && vitest --config vitest.config.api.ts"
+  }
+}
+```
+
+## コントラクトテスト: VitestによるRustエンジン
+
+mdx-formatterの実例：VitestスイートがRustフォーマッティングエンジンのコントラクトテストとして機能します。Node.jsラッパーがRustバイナリを呼び出し、Vitestが出力の期待値との一致を検証します：
+
+```typescript
+// tests/contract.test.ts
+import { describe, it, expect } from "vitest";
+import { execSync } from "child_process";
+
+describe("Rust formatter contract", () => {
+  it("formats basic MDX correctly", () => {
+    const input = "# Hello\nSome   text   here";
+    const result = execSync(`echo '${input}' | ./target/release/formatter`, {
+      encoding: "utf-8",
+    });
+    expect(result.trim()).toBe("# Hello\n\nSome text here");
+  });
+});
+```
+
+<Note>
+
+コントラクトテストにより、上位レベルの言語からバイナリの動作を検証できます。Vitestスイートが仕様として機能し、Rustエンジンの動作が変わるとコントラクトテストがキャッチします。
+
+</Note>
+
+## 冪等性テスト
+
+フォーマッターやトランスフォーマーにとって強力な不変条件：操作を2回適用した結果は、1回適用した結果と同じでなければなりません。
+
+```typescript
+// tests/idempotency.test.ts
+import { describe, it, expect } from "vitest";
+import { format } from "../src/format";
+import { readFileSync, readdirSync } from "fs";
+import { join } from "path";
+
+const FIXTURES_DIR = join(__dirname, "fixtures");
+
+describe("idempotency", () => {
+  const fixtures = readdirSync(FIXTURES_DIR).filter((f) =>
+    f.endsWith(".mdx")
+  );
+
+  for (const fixture of fixtures) {
+    it(`is idempotent for ${fixture}`, () => {
+      const input = readFileSync(join(FIXTURES_DIR, fixture), "utf-8");
+      const firstPass = format(input);
+      const secondPass = format(firstPass);
+      expect(firstPass).toBe(secondPass);
+    });
+  }
+});
+```
+
+## Miniflare + D1/R2 インテグレーションテスト
+
+pgenの実例：MiniflareによるローカルD1データベースとR2ストレージを使ったCloudflare Workersのテスト：
+
+```typescript
+// tests/integration.test.ts
+import { describe, it, expect, beforeAll } from "vitest";
+import { Miniflare } from "miniflare";
+
+describe("Worker with D1", () => {
+  let mf: Miniflare;
+
+  beforeAll(async () => {
+    mf = new Miniflare({
+      modules: true,
+      script: `export default { async fetch(req, env) { /* ... */ } }`,
+      d1Databases: ["DB"],
+      r2Buckets: ["STORAGE"],
+    });
+
+    // Run migrations. D1's exec() splits its input on newlines (one
+    // statement per line), so a pretty-printed multi-line CREATE TABLE
+    // throws D1_EXEC_ERROR -- keep the statement on a single line.
+    const db = await mf.getD1Database("DB");
+    await db.exec(
+      "CREATE TABLE IF NOT EXISTS patterns (id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL)",
+    );
+  });
+
+  it("stores and retrieves a pattern", async () => {
+    const resp = await mf.dispatchFetch("http://localhost/api/patterns", {
+      method: "POST",
+      body: JSON.stringify({ name: "test", data: "{}" }),
+    });
+    expect(resp.status).toBe(201);
+
+    const getResp = await mf.dispatchFetch("http://localhost/api/patterns");
+    const patterns = await getResp.json();
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0].name).toBe("test");
+  });
+});
+```
+
+<Warning>
+
+**D1の`exec()`はセミコロンではなく改行で分割されます。** 入力文字列の各行が個別のステートメントとして実行されるため、複数行にきれいに整形されたSQLステートメントは`D1_EXEC_ERROR: incomplete input`をスローします -- D1はそれぞれの断片を個別に実行しようとするからです。`exec()`を呼ぶ前に各ステートメントを1行に折りたたむか、複数ステートメントのマイグレーションファイルは自分で分割してください（複数ステートメントのケースについては[`createTestEnv`](../project-recipes/backend-testing.mdx#cloudflare-functions-と-miniflare)を参照）。これはプラットフォーム固有のクセであり、自分のコードをいくら読んでも回復できるものではありません。
+
+</Warning>
+
+<Tip>
+
+Miniflareは同じWorkersランタイムをローカルで実行するため、インテグレーションテストは本番環境の動作に近くなります。D1とR2のバインディングを組み合わせることで、デプロイなしに完全なデータフローをテストできます。
+
+</Tip>
+
+## happy-dom の落とし穴
+
+happy-dom は高速ですが、自分のコードをいくら読み返しても気づけない挙動がいくつかあります。これらはフレームワーク固有のクセだからです。zfb-runtime のクライアントルーターのテストから、特に発見に時間を要したエスケープハッチと、import 順序に関する罠を紹介します。
+
+### シムで実ファイルの読み込みを無効化する
+
+テストが `<link rel="stylesheet">` や `<script src>` タグを挿入すると、happy-dom は実際のネットワークフェッチを試みます。テストを外部依存のない状態に保つため、これらを最初に無効化します。さらに無効化された読み込みを「成功した」とみなすことで、load イベントは引き続き発火します：
+
+```typescript
+// _helpers.ts
+type HappyDOMWindow = Window & {
+  happyDOM: {
+    settings: Record<string, boolean>;
+    waitUntilComplete: () => Promise<void>;
+  };
+};
+
+export function installHappyDomShim(): void {
+  const w = window as unknown as HappyDOMWindow;
+  w.happyDOM.settings["disableJavaScriptFileLoading"] = true;
+  w.happyDOM.settings["disableCSSFileLoading"] = true;
+  w.happyDOM.settings["disableIframePageLoading"] = true;
+  w.happyDOM.settings["handleDisabledFileLoadingAsSuccess"] = true;
+}
+```
+
+<Warning>
+
+`installHappyDomShim()` は、`describe`/`beforeEach` での DOM 操作よりも前、モジュールのトップレベルで呼び出してください。最初のタグ挿入よりも前に設定が有効になっている必要があります。さもないと最初のフェッチがすり抜けてしまいます。
+
+</Warning>
+
+### `afterEach` で保留中の非同期タスクをドレインする
+
+ファイル読み込みを無効化しても、happy-dom は依然として非同期処理（たとえば無効化されたスタイルシートの load イベントなど）をキューに入れます。その処理が保留中のまま Vitest が環境をティアダウンすると、アサーションとは無関係なフレーキーなティアダウンエラーが発生します。明示的にドレインしましょう：
+
+```typescript
+// _helpers.ts
+export async function drainHappyDom(): Promise<void> {
+  const w = window as unknown as HappyDOMWindow;
+  await w.happyDOM.waitUntilComplete();
+}
+```
+
+```typescript
+// router.test.ts
+afterEach(async () => {
+  await drainHappyDom();
+});
+```
+
+### ドキュメントは実 DOM API でリセットする
+
+テスト間のリセットとして自然なのは `document.body.innerHTML = ""` です。しかし、直前のテストが `replaceWith()` で body 要素を差し替えていた場合、このショートカットでは `getElementById` の内部状態が古いまま残り、参照が誤ったノードを返し始めます。代わりに標準の DOM API で body を作り直してください：
+
+```typescript
+// _helpers.ts
+export function resetDocument(): void {
+  document.head.innerHTML = "";
+  if (document.body) document.body.remove();
+  document.documentElement.appendChild(document.createElement("body"));
+}
+```
+
+<Note>
+
+`createElement("body")` と `appendChild` で要素を作り直すと、happy-dom の内部ノードレジストリがクリーンにリセットされます。body が以前に差し替えられている場合、`innerHTML = ""` ではこれが行われません。
+
+</Note>
+
+### モジュール評価タイミングの罠（核心となる気づき）
+
+これは、テストコードだけを見ても論理的に導き出すことが本当に不可能なものです。一部のモジュールは**モジュール評価時**――後から呼び出す関数の中ではなく、最初に import された瞬間――にライブのドキュメントを読み取ります。クライアントルーターはトップレベルでオプトイン用の `<meta>` タグをチェックします。そのタグを注入する前にルーターを import してしまうと、ルーターはすでにページがオプトインされていないと判断しており、後からどれだけ DOM をセットアップしても修正できません。
+
+解決策は、先にタグを注入してから、テスト対象モジュールを `import` することです：
+
+```typescript
+// router.test.ts
+import { drainHappyDom, installHappyDomShim, resetDocument } from "./_helpers.js";
+
+installHappyDomShim();
+
+// Inject the opt-in meta tag BEFORE importing the router module, so the
+// module's top-level branch sees the page as opted-in.
+// router.ts reads the live document at module-eval time.
+function enableTransitions(): void {
+  const meta = document.createElement("meta");
+  meta.setAttribute("name", "zfb-view-transitions-enabled");
+  meta.setAttribute("content", "true");
+  document.head.appendChild(meta);
+}
+enableTransitions();
+
+// Dynamic import AFTER the document is primed. A static `import` here
+// would hoist above enableTransitions(), so the router would still see
+// the pre-injection document -- `await import(...)` runs at this exact
+// point in the file instead.
+const { init, navigate } = await import("../../client-router/router.js");
+```
+
+<Danger>
+
+テスト対象モジュールが評価時に `document`（あるいは任意のグローバル）を読み取る場合、ファイル先頭の静的な `import` はそのコードを即座に実行します。セットアップを import より前に配置するか、ドキュメントの準備が整った後に置く動的な `await import(...)` に切り替えてください。ESM は静的 import を周囲の文よりも上に巻き上げる（ホイスティング）ため、それより上の行に書いた DOM 操作を、通常の `import` は観測*しません*。観測されるのは、それらの操作がより早く評価されるモジュール内にある場合だけです。
+
+</Danger>
+
+### おまけ：`startViewTransition` をモックして両方の経路をテストする
+
+`document.startViewTransition` はプログレッシブエンハンスメントの API です。happy-dom はこれを実装していないため、View Transition の経路とプレーンなフォールバックの両方をカバーしたくなります。グローバル全体をスタブするのではなく、`document` に直接メソッドを割り当ててください -- `vi.stubGlobal("document", { ...document, ... })` は `document` を素のオブジェクトリテラルへ展開してしまうため、プロトタイプ由来の DOM メソッド（`createElement`、`getElementById` など）がすべて失われ、テストが触れる他の箇所を壊してしまいます：
+
+```typescript
+// router.test.ts
+afterEach(() => {
+  delete (document as any).startViewTransition;
+});
+
+it("uses the View Transitions path when available", async () => {
+  (document as any).startViewTransition = vi.fn((cb: () => void) => {
+    cb();
+    return { finished: Promise.resolve(), ready: Promise.resolve() };
+  });
+  // ...drive navigate() and assert the transition branch ran
+});
+
+it("falls back to a plain DOM swap when the API is absent", async () => {
+  // happy-dom has no startViewTransition by default -- assert the fallback
+  // ...drive navigate() and assert no transition was started
+});
+```
+
+## プリコンパイル済みランタイムのエイリアス（React → Preact）
+
+プリコンパイル済みのアイランドランタイム -- あるいは React 向けに書かれた任意の dist -- を相手にテストする Preact/compat プロジェクトは、3 つの壁に立て続けにぶつかります。どれも自分のコードを読んでいても解決できません。それぞれの原因は、vite とパッケージマネージャーが*相手側*をどう解決するかにあるからです。
+
+### 壁 1：素の `react` エイリアスが `react/jsx-runtime` を飲み込む
+
+症状：`react` をエイリアスしているのに `Failed to resolve import "react/jsx-runtime"`（または `jsx-dev-runtime`）が出る。配列形式の vite `resolve.alias` は最初にマッチしたものが勝つため、エントリは「具体的なものから先」の順に並べます。また jsx ランタイムのマッピング先は `preact/compat` ではなく Preact 自身の jsx ランタイム（`preact/jsx-runtime`、`preact/jsx-dev-runtime`）である点にも注意：
+
+```typescript
+// vitest.config.ts -- resolve.alias is TOP-LEVEL vite config, not under `test`
+export default defineConfig({
+  resolve: {
+    alias: [
+      { find: "react/jsx-runtime", replacement: "preact/jsx-runtime" },
+      { find: "react/jsx-dev-runtime", replacement: "preact/jsx-dev-runtime" },
+      { find: "react-dom", replacement: "preact/compat" },
+      // exact-match regex: immune to reordering, never swallows subpaths
+      { find: /^react$/, replacement: "preact/compat" },
+    ],
+  },
+});
+```
+
+### 壁 2：外部化された依存に対してエイリアスが黙って無視される
+
+症状：上のエイリアスは自分のソースには効くのに、プリコンパイル済みの依存だけは本物の React を読み込み続ける -- しかもエラーは出ない。3 つの中で最も厄介な壁です。vitest はデフォルトで node_modules の依存を外部化し、外部化されたモジュールは Node のネイティブリゾルバー経由で読み込まれるため、vite の `resolve.alias` を完全にバイパスします。`server.deps.inline` で当該の依存だけを vite の変換パイプラインに通してください -- このオプションは `test` の下にあります：
+
+```typescript
+export default defineConfig({
+  test: {
+    server: {
+      deps: {
+        // Inline ONLY the precompiled package (plus at most its small
+        // runtime deps). Inlining everything slows the run and masks
+        // other resolution issues.
+        inline: ["@acme/island-runtime"],
+      },
+    },
+  },
+});
+```
+
+### 壁 3：ピン留めした pnpm ストアパスは腐る
+
+症状：ホイストされているのに表に出ていない peer（たとえばランタイムが引き込む `preact-render-to-string`）へ、ハードコードした `node_modules/.pnpm/preact-render-to-string@6.5.0_preact@10.22.0/...` パスでアクセスしている -- そして `pnpm up preact` のたびにパスが壊れる。バージョンと peer のハッシュがディレクトリ名の一部だからです。代わりにストアを動的にスキャンします（pnpm 固有）：
+
+```typescript
+import { readdirSync } from "node:fs";
+import path from "node:path";
+
+// Scoped packages encode as "@scope+name@version" in .pnpm --
+// adjust the prefix accordingly.
+const findPnpmDir = (pkgName: string) => {
+  const store = path.join(process.cwd(), "node_modules", ".pnpm");
+  const hit = readdirSync(store).find((d) => d.startsWith(`${pkgName}@`));
+  if (!hit) throw new Error(`no .pnpm entry for ${pkgName}`);
+  return path.join(store, hit, "node_modules", pkgName);
+};
+
+// Resolves whatever version is currently installed:
+const rtsDir = findPnpmDir("preact-render-to-string");
+```
+
+<Tip>
+
+可能なら、足りない peer を実際の依存として宣言するほうを選んでください -- そうすれば素の `import` が動き、スキャンは不要になります。動的スキャンは、インストール済みアーティファクトをテストしていて peer がホイストされているのに表に出ておらず、依存として追加するとパッケージの本当の契約を偽ってしまう、という狭いケースのためのものです。
+
+</Tip>
+
+## 信頼できる唯一の情報源を守る
+
+ある定数が単一のソースファイルにのみ存在するのに、2 つの異なる import チェーンを通じて参照される場合――たとえば TypeScript の ESM エントリと手書きの `.mjs` bin など――、どちらかのチェーンが壊れると 2 つのコピーは静かに分岐しうります。ごく小さな「メタ」テストが両者を固定します。zfb-adapter-cloudflare では、ワーカーラッパーの文字列が `src/build.ts` から 1 回、`bin/cli.mjs` 経由の再エクスポートで 1 回 import され、たった 1 つのアサーションが両者の分岐を防ぎます：
+
+```typescript
+// cli.test.ts
+import { WORKER_WRAPPER_SOURCE as TS_WRAPPER } from "../build.js";
+// CLI helper is a sibling .mjs re-exporting the same canonical constant.
+import { WORKER_WRAPPER_SOURCE as MJS_WRAPPER } from "../../bin/cli.mjs";
+
+describe("single source of truth", () => {
+  it("the .mjs bin re-exports the same wrapper as build.ts", () => {
+    // Both ultimately import from the canonical src/worker-wrapper.mjs,
+    // so they must be byte-identical. This catches import-chain breakage.
+    expect(MJS_WRAPPER).toBe(TS_WRAPPER);
+  });
+});
+```
+
+<Tip>
+
+このパターンを一般化しましょう。「本来は 1 つであるべき」値が 2 つの消費側で共有されているとき、それは静かに分岐しうります。1 つの `toBe` がそれを捕捉します。同じ形は「この TypeScript の enum はあの JSON 設定と一致していなければならない」や「この `.d.ts` の宣言はランタイムのエクスポートと一致していなければならない」にも当てはまります。値がモジュール境界をまたいで――あるいは生成ファイルとそのソースの間で――重複しているときは常に、1 つの等価アサーションが、静かな分岐を失敗するテストへと変えてくれます。
+
+</Tip>
+
+このガードが捕捉するのは*リポジトリ内*の分岐です。**外部ツールの実際の出力スキーマ**とパーサーの間の分岐は捕捉できません -- そのケースは手書きではなくキャプチャしたアーティファクトのフィクスチャが必要です。詳細は[レポーターのパースフィクスチャを実際にキャプチャしたレポートに固定する](../ci-operations/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく-レポーターのパースフィクスチャを実際にキャプチャしたレポートに固定する)を参照してください。
+
+## ミラーテスト・アンチパターン
+
+上のガードが固定するのは重複した*値*でした。関数も同じように分岐しえます -- そしてその失敗モードには特徴的な形があります。テストファイルが、テスト対象の関数を import せずに**再実装してしまう**のです。ときには「import せずここで再実装する」といったコメント付きで。このようなミラーテストは、実際の実装がリグレッションしても永遠にパスし続けます。固定しているのは手書きコピーのミラーであって、プロダクションコードではないからです。
+
+実際に観測された例：
+
+- それ自体が**デッドコード**だったソースファイルのヘルパーをミラーしていたテストスイート -- プロダクションからの importer が存在せず、テストは何も固定していなかった。
+- リファクタリング後に存在しなくなったソースパスを引用し続けていたミラーコピー。
+- 兄弟スクリプト 2 つ（CI ガードとテレメトリレポーター）がそれぞれ同じ URL 抽出関数のプライベートコピーを持ち、ユニットテストされているのは片方だけ -- しかしパイプラインが動くには両者が一致していなければならない。
+
+このパターンが生まれる理由はありふれています。本物の関数がモジュールプライベートだったり、インラインスクリプト文字列の中にあったり、トップレベルに CLI の副作用を持つファイルにあったりする。import が面倒で、コピーが無害に感じられるのです。
+
+**テスト対象の関数を再実装してはいけません。** import できないなら、それこそ先に直すべきバグです。エクスポートされた純粋なモジュールへ抽出し、プロダクションコードとテストの両方からそれを import してください。
+
+```typescript
+// mytool.test.ts -- BEFORE (the anti-pattern)
+// re-implemented here for testability   <- review red flag, not a justification
+const extractIssueUrl = (line: string) =>
+  line.match(/https:\/\/github\.com\/\S+/)?.[0] ?? null;
+
+// AFTER: one canonical module, imported by production and tests alike
+import { extractIssueUrl } from "../scripts/lib/extract-issue-url.js";
+```
+
+抽出が本当に割に合わない場合 -- たとえば関数がビルド済み IIFE 文字列の中にある場合 -- は、上のガードを関数へ一般化したフォールバックを使います。埋め込まれたソースを取り出して正準モジュールと比較するビルド時のピンで、分岐を大きな音で失敗させるのです。比較はソーステキスト同士で行ってください（改行コードは正規化）。`fn.toString()` に対してピンしてはいけません -- フォーマットやトランスパイルで出力が変わってしまいます。
+
+```typescript
+// Meta-test: it guards duplicate-implementation drift, nothing more.
+// Behavioral tests still target the canonical module directly.
+const normalize = (s: string) => s.replace(/\r\n/g, "\n").trim();
+
+it("the built wrapper embeds the canonical parseRoute source", () => {
+  const built = normalize(readFileSync("dist/worker-wrapper.mjs", "utf8"));
+  const canonical = normalize(readFileSync("src/parse-route.mjs", "utf8"));
+  expect(built).toContain(canonical);
+});
+```
+
+締めくくりに 2 つの系：
+
+- **「テストしやすさのためにここで再実装した」というコメントはレビューの兆候です。** 直すべき赤信号として扱い、受け入れる正当化にしてはいけません。
+- **抽出する前に、ミラー元のソースが生きているかを確認してください。** デッドコードのミラーは何も固定していません -- テストを生きている実装へ向け直すか、削除してください。
+
+<Tip>
+
+ミラーテストは SSoT ガードの失敗ケースを裏返したものです。ガードが 2 つのコピーを固定して分岐を防ぐのに対し、ミラーテストはピンのない 2 つ目のコピーを作ってしまいます。テストファイルへ関数をコピーしそうになったら、import する（必要なら先に抽出する）かピンで固定する -- コピーを宙に浮かせたままにしてはいけません。
+
+</Tip>
+
+## ジェネレーターとホストのロックステップテスト
+
+上の「[信頼できる唯一の情報源を守る](#信頼できる唯一の情報源を守る)」は、重複した*値*を 1 つ固定するものでした。同じリスクは、プロジェクトが*生きたホスト実装*を追随しなければならないジェネレーターやスキャフォールダーを提供している場合にスケールします -- ジェネレーター側にコピーされた機能リスト、オプションセット、あるいは CLI サーフェス全体は、リリースを重ねるごとにホストの実際のエクスポートから少しずつ乖離しえます。そして、誰か他の人の手元で生成済みプロジェクトが壊れるまで、何も失敗しません。この隙間を塞ぐ 2 つのテスト形状を紹介します。これらはシェルベースのテンプレートドリフトガードのテストレベルでの補完でもあります（下記の補足を参照）。
+
+### ラウンドトリップテスト：生成 → 再パース → 比較
+
+境界の**両側**を同じテストで import します：ホストの生きた設定ロジックと、ジェネレーターの実際の CLI パーサーです（どちらの手書きスタブでもありません）。生きたホストの状態から CLI コマンドを組み立て、ユーザーのシェルが行うのと同じ方法でそのコマンドを再パースし、ラウンドトリップが信頼できる情報源の値に戻ることをアサートします：
+
+```typescript
+// tests/roundtrip.test.ts
+import { describe, it, expect } from "vitest";
+import { buildFeatureFlags } from "../../host/src/config/feature-flags.js";
+import { buildCliCommand } from "../src/generator.js";
+import { parseCliArgs } from "../src/cli-parser.js";
+
+describe("generator roundtrip", () => {
+  it("re-parsing a generated command reproduces the host's live flags", () => {
+    // Source of truth: the host's real config function, not a copied list.
+    const sourceOfTruth = buildFeatureFlags({ tier: "pro" });
+
+    const command = buildCliCommand(sourceOfTruth);
+    const reparsed = parseCliArgs(command);
+
+    expect(reparsed).toEqual(sourceOfTruth);
+  });
+});
+```
+
+<Tip>
+
+このテストはジェネレーターの*実際の*パーサーを import しています。モックではありません。アサーションを通すためにパース処理を再実装したラウンドトリップテストは、上のミラーテスト・アンチパターンが別の姿を取ったものにすぎません -- 固定しているのは手書きコピーのパーサーであって、ユーザーが実際に実行するものではないからです。
+
+</Tip>
+
+### 同期リストテスト：パッケージ境界をまたぐ列挙を固定する
+
+ラウンドトリップテストが捕捉するのは壊れた変換です。ジェネレーターが単に更新し忘れた列挙 -- 機能リスト、テンプレートレジストリ、オプションセット -- は捕捉できません。そのためには、ジェネレーターのリストがホストの生きたエクスポートと一致することを直接アサートします：
+
+```typescript
+// tests/sync-list.test.ts
+import { describe, it, expect } from "vitest";
+import { AVAILABLE_TEMPLATES } from "../../host/src/config/templates.js";
+import { GENERATOR_TEMPLATE_CHOICES } from "../src/template-choices.js";
+
+describe("generator/host template sync", () => {
+  it("the generator offers exactly the host's live template list", () => {
+    // Whole configuration surface, not a single constant -- this is the
+    // SSoT guard generalized across a package boundary.
+    const hostIds = AVAILABLE_TEMPLATES.map((t) => t.id).sort();
+    const generatorIds = GENERATOR_TEMPLATE_CHOICES.map((c) => c.id).sort();
+
+    expect(generatorIds).toEqual(hostIds);
+  });
+});
+```
+
+<Warning>
+
+テンプレートファイルのコピーを、包括的な許可リスト（ブランケットアローリスト）でドリフトチェックから除外してはいけません。許可リストが証明するのは、リストされたファイルがかつてコピーとして認識されていたことだけです -- 今日のコピーが今日のソースとまだ一致しているかどうかについては何も語りませんし、後から追加された新しいコピーはタダでその除外を引き継いでしまいます。正規化した差分チェック（パッケージ名やバージョンなど、正当に変わることが期待される値だけを取り除く）か、さらに強力には、テンプレート自身のテストスイートをインストール済みパッケージに対して実行する方法を選んでください。どちらも、コピーが実際にドリフトすれば失敗します -- 包括的な許可リストは決して失敗しません。
+
+</Warning>

@@ -31,7 +31,10 @@ Top-level directories under `src/content/docs/`. Directories with header nav ent
 - `overview/` - Introduction and purpose of the testing guide
 - `testing-levels/` - The 6 testing levels from unit to AI-based verification
 - `decision-guide/` - Which level to use, common failure patterns, required behaviors
-- `real-world-patterns/` - Vitest patterns, Playwright E2E, Tauri app testing
+- `tool-patterns/` - Patterns organized around a specific tool, not a project shape (Vitest, Playwright, visual regression, browser-in-container verification, cargo-nextest)
+- `project-recipes/` - Patterns organized around a repo/project shape, not a single tool (backend, Tauri, remark/rehype plugins, built-site integrity)
+- `ci-operations/` - Running suites across CI, deploys, and releases (environment-tiered testing, smoke tests, scheduled re-exam, branch strategy, publishing, runner sizing)
+- `test-integrity/` - Ways tests deceive (flakes, false greens, self-agreement, fixture traps) and the discipline preventing them
 - `tools-reference/` - Quick reference of tools per testing level
 
 Auto-generated directories (no header nav entry, managed by claude-resources integration):
@@ -60,6 +63,7 @@ Schema is the zudo-doc package default (shipped by `@takazudo/zudo-doc`; overrid
 - **No h1 in content**: The frontmatter `title` is automatically rendered as the page h1. Start your content with `## h2` headings.
 - **Always set `sidebar_position`**: Without it, pages sort alphabetically which is unpredictable.
 - **Kebab-case file names**: Use `my-article.mdx`, not `myArticle.mdx`.
+- **No body `hr`** (`---`) in MDX content. A separator that marks a real topic shift should be expressed with heading structure instead (see the deflaking-recipe restructure). (auto-generated pages — claude-md/, claude-skills/, and any `generated: true` page — are exempt: they may contain `---` inside embedded examples and must never be hand-edited. This excludes `docs-ja/claude/index.mdx`, a hand-maintained locale stub with no `generated: true` marker.)
 
 ### Linking Between Docs
 
@@ -96,11 +100,7 @@ This repo contains test-related Claude Code skills under `.claude/skills/`:
 
 Run `pnpm setup:doc-skill` to generate the test-wisdom skill and symlink it to `~/.claude/skills/` (and `~/.codex/skills/`).
 
-**It does NOT symlink the tracked skills** (`verify-ui`, `verify-ui-ai`, `headless-browser`) — despite what this file used to claim. `scripts/setup-doc-skill.sh` is a create-zudo-doc **template file** guarded by `pnpm check:template-drift`, so it must not be edited locally: a local edit fails the drift check and is silently overwritten on the next template re-sync. Symlink the tracked skills by hand, or from a host-owned script:
-
-```bash
-ln -sfn "$PWD/.claude/skills/verify-ui" ~/.claude/skills/verify-ui   # etc.
-```
+**It also symlinks the tracked skills** (`verify-ui`, `verify-ui-ai`, `headless-browser`) into the same global directory by default — a `create-zudo-doc@5.2.1`+ template feature (`LINK_TRACKED_SKILLS`), pulled in by the Aug-2026 zudo-doc 5.x migration, not something this repo added. `scripts/setup-doc-skill.sh` is a create-zudo-doc **template file** guarded by `pnpm check:template-drift`, so it must not be edited locally: a local edit fails the drift check and is silently overwritten on the next template re-sync. Pass `--no-link-tracked-skills` to skip that step and symlink only the generated skill.
 
 Improving the shared template is an upstream change — see `/dev-upstream-report`.
 
