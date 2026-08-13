@@ -63,7 +63,7 @@ Schema is the zudo-doc package default (shipped by `@takazudo/zudo-doc`; overrid
 - **No h1 in content**: The frontmatter `title` is automatically rendered as the page h1. Start your content with `## h2` headings.
 - **Always set `sidebar_position`**: Without it, pages sort alphabetically which is unpredictable.
 - **Kebab-case file names**: Use `my-article.mdx`, not `myArticle.mdx`.
-- **No body `hr`** (`---`) in MDX content. A separator that marks a real topic shift should be expressed with heading structure instead (see the deflaking-recipe restructure). (auto-generated pages — claude-md/, claude-skills/, claude/ and any `generated: true` page — are exempt: they may contain `---` inside embedded examples and must never be hand-edited)
+- **No body `hr`** (`---`) in MDX content. A separator that marks a real topic shift should be expressed with heading structure instead (see the deflaking-recipe restructure). (auto-generated pages — claude-md/, claude-skills/, and any `generated: true` page — are exempt: they may contain `---` inside embedded examples and must never be hand-edited. This excludes `docs-ja/claude/index.mdx`, a hand-maintained locale stub with no `generated: true` marker.)
 
 ### Linking Between Docs
 
