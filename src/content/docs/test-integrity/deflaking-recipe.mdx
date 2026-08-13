@@ -46,8 +46,6 @@ assert(elapsed < budget)    // deterministic — asserts the property you actual
 
 A probabilistic assertion is almost always a sign you picked a convenient **proxy** instead of the real invariant. Fix the assertion, not the tolerance.
 
----
-
 ## Red CI you don't own — the gate operator's playbook
 
 Everything else on this page is written for the test's **author**: how to diagnose a flake and eliminate it. This section is for a different role. You are the **gate operator** — the human or autonomous agent holding a merge gate when a required check goes red on a test the diff never touched. You did not write the test, you cannot fix it inside this merge window, and Rule 2 has already told you what not to normalize. What Rule 2 does not give you is a decision procedure for the next 30 minutes. This is it.
@@ -77,8 +75,6 @@ So the line is an **authority boundary, not a judgment call**: the gate operator
 **For an autonomous agent, this is a hard rule.** An agent operating a merge gate never expands its own authority mid-incident. Record, rerun within the bound, then leave the PR blocked and surface everything. "I proved it was unrelated and merged anyway" is the wrong ending even when the proof was correct — the proof belongs in the escalation, not in a merge rationale.
 
 </Note>
-
----
 
 ## Part 1 — Root-Cause Catalog
 
@@ -432,8 +428,6 @@ Two limits keep it honest. First, **twin legs classify intermittency, not causal
 
 In short: the twin leg answers "is this deterministic on head?" — not "is merging safe?" Record it on the identity's tracking issue and let it vote there, alongside the history that carries the exoneration.
 
----
-
 ## Part 2 — The Deflaking Recipe
 
 Apply these four steps in order. Each step is mechanical — no judgment required. Step 5 below is the escalation for when none of the four leaves you anything to wait on.
@@ -550,8 +544,6 @@ An untestable wait is a product-code observability gap, not a spec problem. Once
 
 </Note>
 
----
-
 ## Before / After — Putting It Together
 
 A common flaky test combines both anti-patterns at once:
@@ -590,6 +582,6 @@ test("navigates to dashboard", async ({ page }) => {
 });
 ```
 
----
+## See also
 
 See also: [Playwright Patterns](../tool-patterns/playwright-patterns.mdx) for the full Playwright setup patterns, and [Execution Tiers](../decision-guide/execution-tiers.mdx) for when a flaky test is a topology problem rather than a timing problem.
