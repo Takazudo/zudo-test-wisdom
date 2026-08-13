@@ -37,7 +37,7 @@ sidebar_position: 2
 最もよくある壊れ方が、TLS の広すぎるマッチャーである：
 
 ```js
-// 誤り：CERT_HAS_EXPIRED まで飲み込む
+// WRONG: also swallows CERT_HAS_EXPIRED
 if (/CERT|TLS|SSL|HANDSHAKE/.test(code)) return skip();
 ```
 
@@ -52,7 +52,7 @@ const PROVISIONING = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID", "SELF_SIGNED_CERT_IN_CHAIN",
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT",
 ]);
-// CERT_HAS_EXPIRED は意図的に不在 — これは失敗させる。
+// CERT_HAS_EXPIRED deliberately absent -- it fails.
 ```
 
 ### 2. ホストが一度応答したら skip をやめる
@@ -61,8 +61,8 @@ skip パスは「立ち上がっていないホスト」のために存在する
 
 ```js
 let answered = false;
-// ...レスポンス成功時: answered = true
-// ...接続失敗時: if (answered) throw; else maybeSkip();
+// ...on any successful response: answered = true
+// ...on a connection failure: if (answered) throw; else maybeSkip();
 ```
 
 ラッチが無いと、実行の途中で落ちたサイトが「まだデプロイされていない」に再分類されて成功してしまう。
@@ -74,7 +74,7 @@ let answered = false;
 ```yaml
 - name: Smoke-test the custom domain
   env:
-    SMOKE_REQUIRE_LIVE: "1"   # skip が失敗になる
+    SMOKE_REQUIRE_LIVE: "1"   # skips become failures
   run: node scripts/smoke.mjs
 ```
 
@@ -105,7 +105,7 @@ curl -H 'sec-fetch-mode: navigate'   -> 404  404 ページ
 **`fetch()` はそのヘッダーを送れないので、Node のスモークテストに足しても何も起きない。** `Sec-` で始まる名前は Fetch 仕様の**禁止ヘッダー名**であり、undici — したがって Node のグローバル `fetch()` — はこれを**黙って**取り除く。エラーも警告も出ず、リクエストは通常のものとして送出される：
 
 ```js
-await fetch(url, { headers: { "sec-fetch-mode": "navigate" } });  // -> 200、ヘッダーは落ちている
+await fetch(url, { headers: { "sec-fetch-mode": "navigate" } });  // -> 200, header dropped
 ```
 
 これは試さないより悪い。コードがブラウザのナビゲーションを再現している*ように見えて*しまうからだ。信じる前に、リクエストヘッダーをエコーするサーバーで確認するか、`curl` と結果を比較すること。
