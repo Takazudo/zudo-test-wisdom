@@ -17,7 +17,7 @@ Use this table to determine the minimum testing level for your current task:
 | "It's not showing" | Level 5 | Visibility is a visual property |
 | "It's still broken" (after test passed) | Next level up | Current level has blind spot for this bug |
 | Canvas / photo-editor / zoom-resize surface where L4 is intractable AND L5 cannot reach | Level 6 (final resort) | Neither E2E nor mechanical visual can express the assertion |
-| Broken link / missing page / stale sitemap | [Site-integrity gates](../project-recipes/site-integrity-checks.mdx) (L3/L4 hybrid) | Structurally invisible to unit and component tests -- only a built-output/crawl check sees it |
+| Broken link / missing page / dead image / stale sitemap | [Site-integrity gates](../project-recipes/site-integrity-checks.mdx) (L3/L4 hybrid) | Structurally invisible to unit and component tests -- only a built-output/crawl check sees it |
 | Deploy config: domain, route, binding id, certificate | [Post-deploy smoke test](../ci-operations/post-deploy-smoke-tests.mdx) | The failure is not in the repository, so nothing that runs against the repository can see it -- only a request to the deployed origin can |
 | Visual regression risk across a refactor | [Committed-baseline visual regression](../tool-patterns/visual-regression-baselines.mdx) | Deterministic pixel-diff gate -- catches shifted/recolored visuals an informal screenshot look would miss |
 
@@ -84,7 +84,7 @@ If only one of the two is true, the right answer is the other level. L6 is the f
 
 ## Start from Your Symptom
 
-The table at the top of this page starts from what you changed. When you are starting from what you are *seeing* instead -- a failure already in front of you -- start here. Each row points at the pattern page that covers that symptom.
+The table at the top of this page starts from what you changed -- two of its rows (a broken link or stale sitemap, a visual regression across a refactor) are already symptom-shaped, so they aren't repeated below. When you are starting from what you are *seeing* instead -- a failure already in front of you -- start here. Each row points at the pattern page that covers that symptom.
 
 | Symptom | Start here |
 |---|---|
@@ -94,8 +94,6 @@ The table at the top of this page starts from what you changed. When you are sta
 | Not sure whether to test against real D1 or a stub | [Backend & Node.js Testing § Mock the Binding, Not the Runtime](../project-recipes/backend-testing.mdx#mock-the-binding-not-the-runtime) |
 | CI is green, but the published artifact is broken | [Publishing-Pipeline Verification](../ci-operations/publishing-pipeline.mdx) |
 | A build that worked last month fails today with nothing in your own diff | [Scheduled Re-exam & Night Exam § T3 as an External-Dependency Drift Net](../ci-operations/scheduled-re-exam.mdx#t3-as-an-external-dependency-drift-net) |
-| A broken link, missing page, dead image, or stale sitemap entry in the built site | [Built-Site Integrity Gates](../project-recipes/site-integrity-checks.mdx) |
-| A visual diff regression across a refactor -- nothing catches it until someone eyeballs a screenshot | [Deterministic Visual Regression with Committed Baselines](../tool-patterns/visual-regression-baselines.mdx) |
 | It works on your machine but breaks on preview or production | [Environment-Tiered Testing Against Deployed Targets](../ci-operations/environment-tiered-testing.mdx) |
 | An absence assertion fails in CI only, and every positive assertion in the same test passes | [Negative Assertions vs. Their Own Fixture Data](../test-integrity/negative-assertion-fixtures.mdx) |
 

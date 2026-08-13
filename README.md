@@ -46,9 +46,9 @@ Top-level directories under `src/content/docs/`. Directories with header nav ent
 - `overview/` — Introduction and purpose of the testing guide
 - `testing-levels/` — The 6 testing levels from unit to AI-based verification
 - `decision-guide/` — Which level to use, common failure patterns, required behaviors
-- `tool-patterns/` — Patterns organized around a specific tool, not a project shape (Vitest, Playwright, visual regression, cargo-nextest)
+- `tool-patterns/` — Patterns organized around a specific tool, not a project shape (Vitest, Playwright, visual regression, browser-in-container verification, cargo-nextest)
 - `project-recipes/` — Patterns organized around a repo/project shape, not a single tool (backend, Tauri, remark/rehype plugins, built-site integrity)
-- `ci-operations/` — Running suites across CI, deploys, and releases (environment tiers, smoke tests, scheduled re-exam, publishing)
+- `ci-operations/` — Running suites across CI, deploys, and releases (environment-tiered testing, smoke tests, scheduled re-exam, branch strategy, publishing, runner sizing)
 - `test-integrity/` — Ways tests deceive (flakes, false greens, self-agreement, fixture traps) and the discipline preventing them
 - `tools-reference/` — Quick reference of tools per testing level
 
@@ -110,6 +110,7 @@ This repo contains test-related Claude Code skills under `.claude/skills/`:
 
 - `test-wisdom/` — Doc-lookup skill (**generated** by `pnpm setup:doc-skill`, gitignored — do NOT track or edit directly)
 - `verify-ui/` — Deterministic CSS/computed-style verification (tracked in git)
+- `verify-ui-ai/` — AI-based visual confirmation for Level 6 final-resort verification (tracked in git)
 - `headless-browser/` — Headless browser screenshots and interaction (tracked in git; bundles its own Playwright)
 
 Run `pnpm setup:doc-skill` to generate the test-wisdom skill, then symlink every skill under `.claude/skills/` — the generated skill plus the tracked ones above — to `~/.claude/skills/` (and, if Codex CLI is installed, `~/.codex/skills/`). Pass `--no-link-tracked-skills` to symlink only the generated skill.
