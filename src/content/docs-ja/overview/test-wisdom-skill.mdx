@@ -14,13 +14,13 @@ sidebar_position: 10
 
 ## インストール
 
-セットアップスクリプトを実行して、スキルを生成し、`.claude/skills/`配下のすべてのスキル -- 生成された`test-wisdom`スキルと、`verify-ui`や`headless-browser`のような追跡対象スキル -- をグローバルClaude Codeスキルディレクトリにシンボリックリンクします：
+セットアップスクリプトを実行して、スキルを生成し、このリポジトリの他の追跡対象スキル（`verify-ui`、`headless-browser`）とともにグローバルスキルディレクトリへシンボリックリンクします：
 
 ```bash
 pnpm run setup:doc-skill
 ```
 
-これにより`.claude/skills/test-wisdom/`にスキルが作成され、続けて`.claude/skills/*`のすべてが`~/.claude/skills/`へ一括でシンボリックリンクされます。
+これにより`.claude/skills/test-wisdom/`にスキルが作成され、続けて`.claude/skills/`配下のすべてのスキルが`~/.claude/skills/`へシンボリックリンクされます。セットアップ状況は自動検出され、`~/.codex`も存在する場合は`~/.codex/skills/`配下にCodex版も同様にリンクされます（`--target claude`、`--target codex`、`--target both`で上書き可能）。`--no-link-tracked-skills`を指定すると追跡対象スキルをスキップし、生成された`test-wisdom`スキルのみをシンボリックリンクします。
 
 ## 使い方
 
