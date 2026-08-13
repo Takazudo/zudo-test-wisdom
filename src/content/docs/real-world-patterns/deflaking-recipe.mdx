@@ -1,6 +1,6 @@
 ---
 title: Flake Root-Cause Catalog & Deflaking Recipe
-description: The three rules that govern flaky tests, the root-cause catalog behind them, and a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating them.
+description: "The three rules that govern flaky tests, the root-cause catalog behind them, a five-step recipe -- four mechanical fixes plus an escalation step -- for eliminating them, and the gate operator's playbook for red CI you don't own."
 sidebar_position: 9
 ---
 
@@ -27,6 +27,8 @@ Then a real regression that fails 100% gets re-run three times before anyone tak
 
 The entire value of a test suite is that **red means something.** Flake tolerance is an attack on that property, and it compounds. This is why **pass-on-retry is a triage signal, not a success**: record it, never celebrate it.
 
+Everything on this page downstream of this rule is written for the test's author. If the red you are holding is on a test you *don't* own — you are operating a merge gate, not authoring a fix — the rule still binds you, and there is a dedicated procedure: [the gate operator's playbook](#red-ci-you-don-t-own-—-the-gate-operator-s-playbook).
+
 <Note>
 
 Quarantine is not the enemy — using it as an *answer* is. It is **a pipeline with an exit, not a parking lot.** Legitimate only when ALL of: you have **proven** the nondeterminism is in the test and not the product ([Step 0.5](../decision-guide/heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky)); a linked issue exists; it still runs allowed-to-fail somewhere; and it has a deadline. And you accept that **while quarantined, the product behavior is unguarded.**
@@ -43,6 +45,38 @@ assert(elapsed < budget)    // deterministic — asserts the property you actual
 ```
 
 A probabilistic assertion is almost always a sign you picked a convenient **proxy** instead of the real invariant. Fix the assertion, not the tolerance.
+
+---
+
+## Red CI you don't own — the gate operator's playbook
+
+Everything else on this page is written for the test's **author**: how to diagnose a flake and eliminate it. This section is for a different role. You are the **gate operator** — the human or autonomous agent holding a merge gate when a required check goes red on a test the diff never touched. You did not write the test, you cannot fix it inside this merge window, and Rule 2 has already told you what not to normalize. What Rule 2 does not give you is a decision procedure for the next 30 minutes. This is it.
+
+The role boundary is the point: **the author's job is to make red mean something; the operator's job is to act as if red means something — especially when this particular red probably doesn't.** The moment operators start making private exceptions, Rule 2's compounding failure is underway — not because any single exception was wrong, but because each one goes unrecorded, and the next operator inherits a gate that is already negotiable.
+
+### The procedure
+
+1. **Pin down what you are holding before touching anything.** Confirm the red belongs to the current head SHA, then classify it: an **infrastructure failure** (checkout died, the runner vanished) routes to the infra owner and gets no test-identity issue; a **lane failure** (the roaming teardown signature of [entry 7](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams)) routes to the lane's owner; only a **test failure** continues below. One special case is a gate defect, not a failure at all: a validly quarantined `@flaky` test showing up red in a *required* check means the quarantine and the gate wiring disagree — a quarantined test has no business in a required gate ([Required Behavior Rule 7](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-7-—-red-checks-block-the-author)); route that to the CI owner.
+2. **Test the "unrelated" claim with evidence, not vibes.** "Unrelated to my diff" carries the same proof obligation as Rule 1. The actual exoneration is **history**: the same identity failing *with the same signature* before this diff existed, or concurrently on the base branch. The signature has to match — an identity that used to time out in teardown and now fails an assertion is a different failure wearing a familiar name, and its history exonerates nothing. A [twin leg](#part-1-—-root-cause-catalog-the-twin-leg-comparison-same-commit-same-suite-one-leg-red) on the same commit is the fastest, cheapest narrowing evidence — an *equivalent* sibling leg passing proves the failure is intermittent on head — but it cannot clear the diff by itself: an intermittent race the diff just *introduced* produces the identical green/red pair. Complete the check with a transitive diff-scope pass (shared fixtures, config, dependencies, global setup — not just the failing spec's own files). If you cannot exonerate the diff, stop reading: this is an ordinary red build, and the diff's author owns it.
+3. **Record the occurrence before any rerun.** One tracking issue per failing identity — keyed on [test identity, never bare title](#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title), matrix leg included — **find and update it; never open one per occurrence.** Append: run URL, commit, workflow/job/leg, attempt number, failure phase, artifact links. Preserve the logs and traces *first* — a rerun can overwrite or expire exactly the artifacts that made this occurrence diagnosable. This is Rule 2's "record it, never celebrate it" made operational, and the accumulating history is what later separates an identity that roams (a lane property) from one that repeats (a per-spec fix candidate). A rerun *without* a record is exactly the rerun culture Rule 2 warns about — the retry that quietly eats the evidence.
+4. **Rerun the failed leg, once.** Rerun only the failed job or leg, never the whole workflow — a full rerun burns compute to reproduce green you already have. And the bound is one operator-initiated rerun per head SHA by default: it answers "was that transient?", which is the only question a merge window needs a rerun for. A second requires a specific stated reason — the first rerun's artifacts went missing, a confirmed infrastructure incident just resolved — not "another chance at green." (This bound governs *operator-initiated* reruns; the suite's own per-test retries are a separate, pre-budgeted mechanism — see [Retry Budgets](../decision-guide/execution-tiers.mdx#retry-budgets) — whose pass-on-retry telemetry lands on the same tracking issue.) More reruns *would* estimate failure frequency, but that is diagnosis — burn-in work that belongs to the test's owner on their own time, not to a merge gate holding everyone else's work.
+5. **At the bound, leave the PR blocked and escalate.** Stop initiating reruns. Route by the classification from step 1 — repeating identity to the test's owner, roaming identity to the lane/CI owner — and hand over the tracking issue: the evidence, the rerun count, the identity's history. Merging past red is not on the operator's menu at any evidence level — see below. Quarantine is likewise not an operator unblocking move: it is the owner's decision, downstream of [the product-vs-test proof obligation](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
+
+### Why merge-on-red is never the operator's call
+
+Two reasons — one epistemic, one structural.
+
+The epistemic one: even at its best, your evidence exonerates **the diff**, and the diff is not the only thing the gate protects. The failing identity may be [the impostor](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug) — a real product bug that fails 30% of the time — and "unrelated to this diff" is fully compatible with "live defect in the product you are about to ship on top of." Exonerating the diff answers *whose* problem the red is; it does not answer whether the red is a problem.
+
+The structural one is Rule 2 applied to yourself: an operator who merges past red on private judgment — however good the judgment — has demonstrated that red is negotiable given a sufficiently confident operator, and every future operator (and every agent trained on the precedent) inherits that. The gate's value is precisely that it does not bend to in-context confidence.
+
+So the line is an **authority boundary, not a judgment call**: the gate operator cannot bypass a red required check — the PR stays blocked, and the evidence goes up. If the repository has a break-glass path at all, it is a documented policy invoked by a named authority, with the exact SHA, the evidence links, an explicit risk acceptance, compensating verification, and a follow-up issue all on the record — not an operator improvising with a confident rationale.
+
+<Note>
+
+**For an autonomous agent, this is a hard rule.** An agent operating a merge gate never expands its own authority mid-incident. Record, rerun within the bound, then leave the PR blocked and surface everything. "I proved it was unrelated and merged anyway" is the wrong ending even when the proof was correct — the proof belongs in the escalation, not in a merge rationale.
+
+</Note>
 
 ---
 
@@ -335,6 +369,8 @@ The local row has no runner to resize: on your own machine, worker count *is* th
 
 Worked case: a Tauri app's local `b4push` lane failed on a context-teardown timeout across several consecutive runs — a different spec each time, including specs untouched by the change under review, each green when rerun focused. The proposed fix, arrived at by faithfully following the quarantine pipeline, was to tag the most recent victim `@flaky`. The actual cause was the lane: default workers plus the dev server plus trace retention plus `retries: 0`, all on one loaded laptop. `--workers=1` was green. Nothing about any spec was ever wrong.
 
+The roams-vs-repeats rule itself transfers to hosted CI unchanged: consecutive runs of a hosted matrix failing on a different identity each time is the same lane signature, just wearing CI clothes. The levers do **not** map 1:1 — worker caps and trace retention still exist on a CI runner, but they are no longer the whole dial, because hosted CI adds levers a laptop does not have: the runner's shape and the matrix topology itself. Diagnose the leg's binding constraint before resizing anything, per [runner-sizing Rule 3](../tools-reference/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-3-diagnose-the-failure-mode-before-resizing). And when the CI runs in question share a commit, you are also holding a [twin-leg comparison](#part-1-—-root-cause-catalog-the-twin-leg-comparison-same-commit-same-suite-one-leg-red) — use it before paying for any extra run.
+
 ### Key cross-run triage on test identity, not on test title
 
 Every cross-run comparison on this page — the duration diff above, [lane over-subscription](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), the retry-pass telemetry in [Scheduled Re-Exam](./scheduled-re-exam.mdx#flake-telemetry-mechanics-retry-pass-detection), any "did this fail twice?" triage — joins two runs on a key. **That key must be the test's identity: project + file + title.** A bare test title is not an identity, and using one corrupts the comparison silently.
@@ -383,6 +419,18 @@ Two rules keep the key honest across the two ways it can fail:
 **The same key governs issue filing.** A tracking issue titled `flaky: closes with Escape` is one issue collecting telemetry from two unrelated specs, and neither spec's fix will ever close it cleanly. Title issues with the identity — `flaky: e2e/settings-dialog.spec.ts › closes with Escape` — so the dedup query matches one spec and only that spec (and when the same spec runs under several Playwright projects, put the project in the title too). This is the same discipline as the workflow-name-in-the-title rule for [deduped exam issues](./scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run): the dedup key has to be as specific as the thing it identifies.
 
 </Note>
+
+### The twin-leg comparison: same commit, same suite, one leg red
+
+Every comparison above joins runs across **time** — this run against an earlier run, durations drifting, identities repeating. There is a sharper comparison available whenever the pipeline runs the same suite more than once on the same commit: a required check plus an identical sibling matrix leg, a re-triggered workflow, two runs of the same workflow. One leg passes everything; the other fails one test. Same tree, same suite, same moment — and it costs zero extra runs, because the pipeline already paid for both.
+
+One precondition gates everything the pair can tell you: **the legs must be equivalent** — same OS, same runtime, same browser, same configuration, differing only in which runner instance executed them. A green/red split across *non*-equivalent legs (an Ubuntu leg vs a macOS leg, Node 20 vs Node 22) proves only that the failure is **leg-specific** — which is a different and equally valuable signal: a deterministic, environment-specific failure, possibly a regression this very diff introduced for that platform. A failure that correlates with the platform is [the impostor's tell](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug), not intermittency, and it earns a reproduction run rather than an exoneration note.
+
+Given equivalent legs, what the pair proves is immediate and cheap: **the failure is intermittent on this commit.** One execution of this exact tree under these exact conditions produced green and another produced red, so the hypothesis "the diff deterministically broke this test" is dead on arrival — no reproduction run needed, no bisect. For a [gate operator](#red-ci-you-don-t-own-—-the-gate-operator-s-playbook) mid-incident, that is the fastest possible narrowing of the question.
+
+Two limits keep it honest. First, **twin legs classify intermittency, not causality.** The pair does not clear the diff: an intermittent race the diff just *introduced* produces exactly the same green/red split, and even equivalent legs are not a laboratory control group — cache state, external services, and timing still differ between them. Exoneration needs history on top: the same identity failing *the same way* before the diff existed, or concurrently on the base branch, plus a transitive diff-scope check (shared fixtures, config, dependencies, global setup). Second, the pair says nothing about the failing identity's behavior *across* runs — whether it roams (a lane property — [entry 7](#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), including its hosted-CI variant) or repeats (a per-spec fix candidate, or the impostor) still requires the identity-keyed cross-run history above.
+
+In short: the twin leg answers "is this deterministic on head?" — not "is merging safe?" Record it on the identity's tracking issue and let it vote there, alongside the history that carries the exoneration.
 
 ---
 
