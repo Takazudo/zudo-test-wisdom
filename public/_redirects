@@ -1,0 +1,121 @@
+# 301 redirects for URLs removed by the doc-category-reorg (issue #245).
+#
+# Cloudflare Workers static assets (wrangler.toml [assets], no html_handling
+# override -> default "auto-trailing-slash") only normalizes bare paths to
+# their trailing-slash form when a matching asset still exists at that path.
+# Every URL below points at a page that was moved or deleted, so there is no
+# asset left to normalize against -- both the trailing-slash and bare-path
+# forms of each old URL are listed explicitly so neither dead-ends in a 404.
+# https://developers.cloudflare.com/workers/static-assets/redirects/
+
+# --- 17 articles moved out of real-world-patterns/ (both locales) ---
+
+# tool-patterns/
+/docs/real-world-patterns/vitest-patterns/ /docs/tool-patterns/vitest-patterns/ 301
+/docs/real-world-patterns/vitest-patterns /docs/tool-patterns/vitest-patterns/ 301
+/ja/docs/real-world-patterns/vitest-patterns/ /ja/docs/tool-patterns/vitest-patterns/ 301
+/ja/docs/real-world-patterns/vitest-patterns /ja/docs/tool-patterns/vitest-patterns/ 301
+
+/docs/real-world-patterns/playwright-patterns/ /docs/tool-patterns/playwright-patterns/ 301
+/docs/real-world-patterns/playwright-patterns /docs/tool-patterns/playwright-patterns/ 301
+/ja/docs/real-world-patterns/playwright-patterns/ /ja/docs/tool-patterns/playwright-patterns/ 301
+/ja/docs/real-world-patterns/playwright-patterns /ja/docs/tool-patterns/playwright-patterns/ 301
+
+/docs/real-world-patterns/visual-regression-baselines/ /docs/tool-patterns/visual-regression-baselines/ 301
+/docs/real-world-patterns/visual-regression-baselines /docs/tool-patterns/visual-regression-baselines/ 301
+/ja/docs/real-world-patterns/visual-regression-baselines/ /ja/docs/tool-patterns/visual-regression-baselines/ 301
+/ja/docs/real-world-patterns/visual-regression-baselines /ja/docs/tool-patterns/visual-regression-baselines/ 301
+
+/docs/real-world-patterns/web-container-browser/ /docs/tool-patterns/web-container-browser/ 301
+/docs/real-world-patterns/web-container-browser /docs/tool-patterns/web-container-browser/ 301
+/ja/docs/real-world-patterns/web-container-browser/ /ja/docs/tool-patterns/web-container-browser/ 301
+/ja/docs/real-world-patterns/web-container-browser /ja/docs/tool-patterns/web-container-browser/ 301
+
+/docs/real-world-patterns/cargo-nextest-migration/ /docs/tool-patterns/cargo-nextest-migration/ 301
+/docs/real-world-patterns/cargo-nextest-migration /docs/tool-patterns/cargo-nextest-migration/ 301
+/ja/docs/real-world-patterns/cargo-nextest-migration/ /ja/docs/tool-patterns/cargo-nextest-migration/ 301
+/ja/docs/real-world-patterns/cargo-nextest-migration /ja/docs/tool-patterns/cargo-nextest-migration/ 301
+
+# project-recipes/
+/docs/real-world-patterns/backend-testing/ /docs/project-recipes/backend-testing/ 301
+/docs/real-world-patterns/backend-testing /docs/project-recipes/backend-testing/ 301
+/ja/docs/real-world-patterns/backend-testing/ /ja/docs/project-recipes/backend-testing/ 301
+/ja/docs/real-world-patterns/backend-testing /ja/docs/project-recipes/backend-testing/ 301
+
+/docs/real-world-patterns/tauri-testing/ /docs/project-recipes/tauri-testing/ 301
+/docs/real-world-patterns/tauri-testing /docs/project-recipes/tauri-testing/ 301
+/ja/docs/real-world-patterns/tauri-testing/ /ja/docs/project-recipes/tauri-testing/ 301
+/ja/docs/real-world-patterns/tauri-testing /ja/docs/project-recipes/tauri-testing/ 301
+
+/docs/real-world-patterns/remark-rehype-plugin-testing/ /docs/project-recipes/remark-rehype-plugin-testing/ 301
+/docs/real-world-patterns/remark-rehype-plugin-testing /docs/project-recipes/remark-rehype-plugin-testing/ 301
+/ja/docs/real-world-patterns/remark-rehype-plugin-testing/ /ja/docs/project-recipes/remark-rehype-plugin-testing/ 301
+/ja/docs/real-world-patterns/remark-rehype-plugin-testing /ja/docs/project-recipes/remark-rehype-plugin-testing/ 301
+
+/docs/real-world-patterns/site-integrity-checks/ /docs/project-recipes/site-integrity-checks/ 301
+/docs/real-world-patterns/site-integrity-checks /docs/project-recipes/site-integrity-checks/ 301
+/ja/docs/real-world-patterns/site-integrity-checks/ /ja/docs/project-recipes/site-integrity-checks/ 301
+/ja/docs/real-world-patterns/site-integrity-checks /ja/docs/project-recipes/site-integrity-checks/ 301
+
+# ci-operations/
+/docs/real-world-patterns/scheduled-re-exam/ /docs/ci-operations/scheduled-re-exam/ 301
+/docs/real-world-patterns/scheduled-re-exam /docs/ci-operations/scheduled-re-exam/ 301
+/ja/docs/real-world-patterns/scheduled-re-exam/ /ja/docs/ci-operations/scheduled-re-exam/ 301
+/ja/docs/real-world-patterns/scheduled-re-exam /ja/docs/ci-operations/scheduled-re-exam/ 301
+
+/docs/real-world-patterns/release-rounds-branch-strategy/ /docs/ci-operations/release-rounds-branch-strategy/ 301
+/docs/real-world-patterns/release-rounds-branch-strategy /docs/ci-operations/release-rounds-branch-strategy/ 301
+/ja/docs/real-world-patterns/release-rounds-branch-strategy/ /ja/docs/ci-operations/release-rounds-branch-strategy/ 301
+/ja/docs/real-world-patterns/release-rounds-branch-strategy /ja/docs/ci-operations/release-rounds-branch-strategy/ 301
+
+/docs/real-world-patterns/publishing-pipeline/ /docs/ci-operations/publishing-pipeline/ 301
+/docs/real-world-patterns/publishing-pipeline /docs/ci-operations/publishing-pipeline/ 301
+/ja/docs/real-world-patterns/publishing-pipeline/ /ja/docs/ci-operations/publishing-pipeline/ 301
+/ja/docs/real-world-patterns/publishing-pipeline /ja/docs/ci-operations/publishing-pipeline/ 301
+
+/docs/real-world-patterns/post-deploy-smoke-tests/ /docs/ci-operations/post-deploy-smoke-tests/ 301
+/docs/real-world-patterns/post-deploy-smoke-tests /docs/ci-operations/post-deploy-smoke-tests/ 301
+/ja/docs/real-world-patterns/post-deploy-smoke-tests/ /ja/docs/ci-operations/post-deploy-smoke-tests/ 301
+/ja/docs/real-world-patterns/post-deploy-smoke-tests /ja/docs/ci-operations/post-deploy-smoke-tests/ 301
+
+/docs/real-world-patterns/environment-tiered-testing/ /docs/ci-operations/environment-tiered-testing/ 301
+/docs/real-world-patterns/environment-tiered-testing /docs/ci-operations/environment-tiered-testing/ 301
+/ja/docs/real-world-patterns/environment-tiered-testing/ /ja/docs/ci-operations/environment-tiered-testing/ 301
+/ja/docs/real-world-patterns/environment-tiered-testing /ja/docs/ci-operations/environment-tiered-testing/ 301
+
+# test-integrity/
+/docs/real-world-patterns/deflaking-recipe/ /docs/test-integrity/deflaking-recipe/ 301
+/docs/real-world-patterns/deflaking-recipe /docs/test-integrity/deflaking-recipe/ 301
+/ja/docs/real-world-patterns/deflaking-recipe/ /ja/docs/test-integrity/deflaking-recipe/ 301
+/ja/docs/real-world-patterns/deflaking-recipe /ja/docs/test-integrity/deflaking-recipe/ 301
+
+/docs/real-world-patterns/negative-assertion-fixtures/ /docs/test-integrity/negative-assertion-fixtures/ 301
+/docs/real-world-patterns/negative-assertion-fixtures /docs/test-integrity/negative-assertion-fixtures/ 301
+/ja/docs/real-world-patterns/negative-assertion-fixtures/ /ja/docs/test-integrity/negative-assertion-fixtures/ 301
+/ja/docs/real-world-patterns/negative-assertion-fixtures /ja/docs/test-integrity/negative-assertion-fixtures/ 301
+
+/docs/real-world-patterns/crypto-testing/ /docs/test-integrity/crypto-testing/ 301
+/docs/real-world-patterns/crypto-testing /docs/test-integrity/crypto-testing/ 301
+/ja/docs/real-world-patterns/crypto-testing/ /ja/docs/test-integrity/crypto-testing/ 301
+/ja/docs/real-world-patterns/crypto-testing /ja/docs/test-integrity/crypto-testing/ 301
+
+# --- tools-reference/ci-runner-sizing relocated into ci-operations/ ---
+/docs/tools-reference/ci-runner-sizing/ /docs/ci-operations/ci-runner-sizing/ 301
+/docs/tools-reference/ci-runner-sizing /docs/ci-operations/ci-runner-sizing/ 301
+/ja/docs/tools-reference/ci-runner-sizing/ /ja/docs/ci-operations/ci-runner-sizing/ 301
+/ja/docs/tools-reference/ci-runner-sizing /ja/docs/ci-operations/ci-runner-sizing/ 301
+
+# --- patterns-overview.mdx redistributed; symptom->pattern table now lives
+# --- in decision-guide/quick-decision (documented default: URL fragments
+# --- like #symptom-table cannot be routed per-anchor via _redirects) ---
+/docs/real-world-patterns/patterns-overview/ /docs/decision-guide/quick-decision/ 301
+/docs/real-world-patterns/patterns-overview /docs/decision-guide/quick-decision/ 301
+/ja/docs/real-world-patterns/patterns-overview/ /ja/docs/decision-guide/quick-decision/ 301
+/ja/docs/real-world-patterns/patterns-overview /ja/docs/decision-guide/quick-decision/ 301
+
+# --- real-world-patterns/ category index deleted; its framing + the
+# --- source-projects table now live in overview/source-projects ---
+/docs/real-world-patterns/ /docs/overview/source-projects/ 301
+/docs/real-world-patterns /docs/overview/source-projects/ 301
+/ja/docs/real-world-patterns/ /ja/docs/overview/source-projects/ 301
+/ja/docs/real-world-patterns /ja/docs/overview/source-projects/ 301
