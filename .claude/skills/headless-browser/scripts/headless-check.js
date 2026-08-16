@@ -24,7 +24,29 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
+
+// Machine-wide Playwright guard: browser launches from concurrent Claude Code
+// sessions must queue, not stampede (scripts/playwright-guard.sh — same slot
+// semaphore as codex-guard.sh). Re-exec self under the guard so callers can't
+// forget it; PW_GUARD_HELD=1 marks an already-guarded context (set by the
+// guard on every path, fail-open included) so this never recurses and nested
+// guarded calls don't self-deadlock on the 1-slot default. This must run
+// before loadChromium() below — the guard should gate the install/launch work
+// too. On spawn failure (no bash?) fall through and run unguarded.
+if (process.env.PW_GUARD_HELD !== '1') {
+  const pwGuard = path.join(os.homedir(), '.claude', 'scripts', 'playwright-guard.sh');
+  if (fs.existsSync(pwGuard)) {
+    const reexec = spawnSync(
+      'bash',
+      [pwGuard, '--', process.execPath, ...process.argv.slice(1)],
+      { stdio: 'inherit' }
+    );
+    if (!reexec.error) {
+      process.exit(reexec.status === null ? 1 : reexec.status);
+    }
+  }
+}
 
 // Playwright is imported DYNAMICALLY, not with a static top-level import: this
 // skill runs standalone (symlinked into ~/.claude/skills/ without its repo), so

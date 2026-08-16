@@ -104,6 +104,10 @@ If computed styles look correct but the user's concern might be visual (layout, 
 
 **NEVER say "looks correct" without stating what specific thing you checked and what you observed.**
 
+## Global Playwright guard — cross-session queueing (automatic)
+
+`verify-styles.mjs` re-execs itself under `$HOME/.claude/scripts/playwright-guard.sh`, the machine-wide slot semaphore that serializes Playwright work across concurrent Claude Code sessions (default 1 slot; same pattern as codex-guard.sh). Nothing to do per call. If it exits **75**, that is contention, not a failed verification: another session holds the Playwright slot — wait and retry (`playwright-guard.sh status` shows slot state), never bypass the guard. Full details in the sibling `headless-browser` skill's "Global Playwright guard" section.
+
 ## Playwright self-heals — never report "Playwright is not installed"
 
 `verify-styles.mjs` resolves Playwright in this order, and **installs it on demand** if
