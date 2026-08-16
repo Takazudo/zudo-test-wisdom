@@ -297,6 +297,33 @@ reported success. If you touch the install path, preserve that property.
 
 ---
 
+## Global Playwright guard — cross-session queueing
+
+Playwright launches are serialized **machine-wide** by `$HOME/.claude/scripts/playwright-guard.sh` — a slot semaphore (default 1 slot, same pattern as codex-guard.sh) that stops concurrent Claude Code sessions from running heavy browser work simultaneously. Second session waits politely in a queue instead of thrashing the machine.
+
+- **Tier 1 is automatic**: `headless-check.js` re-execs itself under the guard (`PW_GUARD_HELD=1` marks the guarded context). Nothing to do.
+- **Tier 2 spans multiple commands** (the browser persists from `open` to `close`), so bracket the whole session with an explicit lock:
+
+  ```bash
+  PW_SESSION=$(bash $HOME/.claude/scripts/playwright-guard.sh acquire)   # waits up to 300s, prints holder PID
+  # exit 75 = timed out waiting for the slot — contention, NOT fail-open: stop here, do not run browser work
+  npx @playwright/cli@latest open http://localhost:4321/page
+  # ... snapshot / click / fill ...
+  npx @playwright/cli@latest close
+  [ -n "$PW_SESSION" ] && bash $HOME/.claude/scripts/playwright-guard.sh release "$PW_SESSION"
+  ```
+
+  The session lock auto-expires after 15 minutes (TTL) if a release is forgotten, so a crashed session can block others for at most that long. Check the `acquire` exit code before trusting empty output: empty with exit **0** means the guard is unavailable (fail-open) or you are already inside a guarded context — proceed; there is nothing to release. Empty with exit **75** means the wait timed out — that is contention (see below), and proceeding anyway would bypass the guard. While holding a session lock, run any Tier 1 check with `PW_GUARD_HELD=1` prefixed — otherwise its auto-guard queues behind your own session lock until timeout.
+- **Other Playwright work** (e2e suites, `playwright test`, ad-hoc Playwright scripts) must be wrapped explicitly:
+
+  ```bash
+  bash $HOME/.claude/scripts/playwright-guard.sh --wait 300 -- npx playwright test
+  ```
+
+- **Exit 75 = contention, not failure**: another session holds the Playwright slot. Wait and retry (`playwright-guard.sh status` shows slot state), or report it — NEVER bypass the guard by running the browser work unguarded.
+
+---
+
 ## When to Use What
 
 | Task | Recommended |

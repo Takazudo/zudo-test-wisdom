@@ -16,6 +16,31 @@
 //
 // Playwright must be importable. The script tries common locations.
 
+// Machine-wide Playwright guard: browser launches from concurrent Claude Code
+// sessions must queue, not stampede ($HOME/.claude/scripts/playwright-guard.sh
+// — same slot semaphore as codex-guard.sh). Re-exec self under the guard so
+// callers can't forget it; PW_GUARD_HELD=1 marks an already-guarded context
+// (set by the guard on every path, fail-open included) so this never recurses
+// and nested guarded calls don't self-deadlock on the 1-slot default. On spawn
+// failure fall through and run unguarded.
+if (process.env.PW_GUARD_HELD !== "1") {
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const pwGuard = join(homedir(), ".claude", "scripts", "playwright-guard.sh");
+  if (existsSync(pwGuard)) {
+    const { spawnSync } = await import("node:child_process");
+    const reexec = spawnSync(
+      "bash",
+      [pwGuard, "--", process.execPath, ...process.argv.slice(1)],
+      { stdio: "inherit" }
+    );
+    if (!reexec.error) {
+      process.exit(reexec.status === null ? 1 : reexec.status);
+    }
+  }
+}
+
 // Revisions actually present in the local Playwright browser cache(s), keyed
 // by revision number string (e.g. "1217"). Used to pick a playwright-core
 // install whose OWN required browser build is actually downloaded, instead of
