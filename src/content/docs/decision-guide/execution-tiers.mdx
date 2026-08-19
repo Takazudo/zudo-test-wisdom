@@ -85,7 +85,7 @@ Run this as a sweep, not as a cleanup. Every agent-authored bugfix regenerates t
 | Tier | Name | Default? | Definition |
 |------|------|----------|------------|
 | T0 | Inner loop | default | typecheck, lint, single/affected unit tests; seconds; what the agent runs constantly; retries 0 |
-| T1 | PR gate | default | required status checks: lint + typecheck + unit + build + CI-safe e2e; target < 10 min; **the authoritative gate**; e2e retries 1–2 with trace-on-first-retry |
+| T1 | PR gate | default | required status checks: lint + typecheck + unit + build + CI-safe e2e; target < 10 min; **the authoritative gate**; e2e retries 1–2 with trace-on-first-retry **and an upload step that retains the trace** |
 | T2 | Full-e2e split | opt-in | only when T1 exceeds its time budget; prefer keeping it required on the PR; workers tuning before sharding (shard only at ~100+ tests AND 30+ min) |
 | T3 | Scheduled re-exam | opt-in | heavy, environment/platform-bound, or external-dependency-drift tests on a schedule; runner matches the trigger -- capable hardware for heavy/platform-bound (hosted macOS on Apple silicon; self-hosted runner only as escalation), plain ubuntu matching T1 for external-dependency drift; `workflow_dispatch` for on-demand pre-merge runs; deduped issue filing on failure; also where quarantined `@flaky` tests run allowed-to-fail |
 | T4 | Local heavy lane | opt-in | only for genuinely CI-impossible lanes; split into a bounded fast pre-push pass (`b4push`, 5–10 min) and an opt-in platform-gated heavy run (`exam`); convenience, not enforcement |
@@ -150,6 +150,20 @@ Create the ruleset via `gh api -X POST repos/{owner}/{repo}/rulesets --input rul
 Exact `context` values come from pitfall 3; the `bypass_actors` entry is what pitfall 1's test push validates.
 
 Rule 7 ("red checks block the author") and the ruleset are complementary layers, not substitutes for each other. The convention layer governs the agent that authored the PR; the enforcement layer governs everyone and everything else, including the merge button and direct pushes. A strategy with only the convention layer has no gate -- see [Required Testing Behavior](./required-behavior.mdx) for Rule 7.
+
+#### A recorded trace with no upload step is not evidence
+
+The T1 row above says "e2e retries 1–2 with trace-on-first-retry". That is half a mechanism. `trace: 'on-first-retry'` writes the trace onto the CI runner's disk, and the runner is torn down when the job ends -- so with no upload step the tier pays to record evidence for the sole purpose of throwing it away. Nothing looks wrong while this is true: the gate still goes red on the real failure, and only the artifact list is empty.
+
+Measured: a PR gate ran `trace: 'retain-on-failure'` and `screenshot: 'only-on-failure'` for months with no upload step anywhere in the workflow. A later flake investigation paid a **92-execution reconstruction cost** re-running the suite to reproduce a failure CI had already captured and discarded.
+
+Retention therefore belongs in the tier's definition, not in an operations checklist somewhere else. T1 is not complete until all three hold:
+
+1. **Failure evidence is uploaded, gated on `if: failure() || cancelled()`.** A run killed at its timeout cap or cancelled by a `concurrency` group is exactly the case whose trace you want, and plain `failure()` skips it.
+2. **The uploaded path is one a reporter actually writes.** Playwright's default reporter under CI is `dot`, which produces no `playwright-report/` directory at all; uploading that path uploads nothing and the step still succeeds.
+3. **If the job invokes Playwright more than once, give each invocation its own `--output`.** Playwright empties `outputDir` at the start of every run, so a second lane deletes the first lane's traces before the upload step runs.
+
+The mechanics, the measured storage numbers behind uploading a report rather than the raw directory, and the workflow guard for point 3 are in [Recording a Trace Is Not Keeping It](../tool-patterns/playwright-patterns.mdx#recording-a-trace-is-not-keeping-it).
 
 ### T2: full-e2e split -- only when T1 overflows
 
