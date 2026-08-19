@@ -221,6 +221,8 @@ fi
 
 `FORCE_REBUILD=1` is the escape hatch for changes the hash cannot see: uncommitted tooling state, environment shifts, or external dependency updates.
 
+One input the hash above deliberately omits is the build's own output, and that omission has a cost worth knowing: a key derived from sources alone still matches after a concurrent writer truncates or deletes the artifact the marker vouches for, so where more than one process can write the build directory the key must hash the artifact's own bytes too -- see [A Built Artifact With More Than One Writer Is Shared Mutable State](../testing-levels/level-3-build-output.mdx#a-built-artifact-with-more-than-one-writer-is-shared-mutable-state).
+
 ### What this buys
 
 The port-race surface that `EADDRINUSE` and start-stagger create is a **cause** of perceived flakiness, not a symptom to quarantine. Scope-and-hash removes it at the topology level. The concrete multi-server `webServer` patterns for build-and-serve setups are covered in the Production Build Verification section of [Playwright Patterns](../tool-patterns/playwright-patterns.mdx).

@@ -594,7 +594,7 @@ Generalize the pattern: any value shared between two consumers that *should* be 
 
 </Tip>
 
-This guard catches *in-repo* divergence. It does not catch divergence between your parser and an **external tool's real output schema** -- that case needs a captured-artifact fixture rather than a hand-authored one; see [Pin Reporter-Parsing Fixtures to a Real Captured Report](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report).
+This guard catches *in-repo* divergence. It does not catch divergence between your parser and an **external tool's real output schema** -- that case needs a captured-artifact fixture rather than a hand-authored one; see [Pin Reporter-Parsing Fixtures to a Real Captured Report](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report). And when either side of the pin is read out of `dist/` rather than out of source, the pin only holds if nothing else can rewrite that artifact mid-run -- see [A Built Artifact With More Than One Writer Is Shared Mutable State](../testing-levels/level-3-build-output.mdx#a-built-artifact-with-more-than-one-writer-is-shared-mutable-state).
 
 ## The Mirror-Test Anti-Pattern
 
