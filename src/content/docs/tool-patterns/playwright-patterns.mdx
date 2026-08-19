@@ -223,6 +223,59 @@ Keep escape hatches for the local gate so a flaky machine never blocks a push: e
 
 </Tip>
 
+## `test.step` Shares One Test Timeout
+
+`test.step()` is a **reporting** construct. It groups actions under a named node in the HTML report and the trace viewer — it does not open a new timeout budget. Every step inside a `test()` draws down the same single deadline: the `timeout` your config sets (Playwright's own default is 30s; suites with heavy setup routinely raise it), or whatever `test.setTimeout()` last set for that test. Nesting two scenarios in two steps buys a tidier report and nothing else.
+
+That distinction only bites when the steps are **independent sequential scenarios** rather than phases of one scenario:
+
+```typescript
+// Anti-pattern: two independent scenarios sharing one 60s test budget.
+test("commit density stays invariant", async ({ page }) => {
+  await test.step("free mode", async () => {
+    await page.goto("/");
+    // fresh app boot + scenario -- budgeted ~20-30s by this file's own comment
+  });
+
+  await test.step("fixed mode", async () => {
+    await page.goto("/");
+    // fresh app boot + scenario -- budgeted ~20-30s by this file's own comment
+  });
+});
+```
+
+Each step is a complete scenario: its own navigation, its own app boot, its own bounded waits. The file's own comment budgeted each pass at roughly 20–30s, while the config default was 60s for the **whole test**. Two passes near the top of their stated budgets overrun that, and the failure surfaces in the second step — where nothing is individually hung. Every wait in the Fixed-mode phase is bounded and event-keyed; the phase simply started with too little of the shared budget left.
+
+That is what makes this class hard to read off a failure message: **the step that fails is not the step that is slow.** The Free-mode phase spends the budget; the Fixed-mode phase pays for it. Widening the deadline on any wait inside the second step changes nothing, because the deadline that fired belongs to the parent `test()`.
+
+### The Fix: One `test()` per Independent Scenario
+
+If two steps could each run standalone — fresh navigation, no state carried across the boundary — they are two tests. Splitting them gives each its own full budget while preserving the fresh setup they were already performing:
+
+```typescript
+test("commit density stays invariant -- free mode", async ({ page }) => {
+  await page.goto("/");
+  // ...
+});
+
+test("commit density stays invariant -- fixed mode", async ({ page }) => {
+  await page.goto("/");
+  // ...
+});
+```
+
+Splitting the pgen case this way produced, across three bundled Chromium runs, Free timings of **22.3 / 17.1 / 21.9s** and Fixed timings of **15.5 / 11.3 / 16.8s** — every one of them under 45s, against the same unchanged 60s per-test budget. The scenarios were never slow. Only their sum was.
+
+When the stages genuinely cannot be split — they share expensive state, or the later stage asserts on something the earlier one produced — keep them in one `test()` but **write the arithmetic down**: sum the worst case of every stage deadline plus setup and teardown, derive an explicit `test.setTimeout()` from that sum, and leave the sum in a comment so the next person editing a stage deadline can see what they are spending.
+
+<Warning>
+
+**Never solve this class by blindly raising the timeout.** A raise that is not backed by stage arithmetic is a guess, and it is the specific guess that hides the diagnosis: it trades a fast, legible "step 2 timed out" for a suite that is minutes slower and still times out the day one stage drifts. Raise the number only as the _output_ of the sum, never as the first response to the red.
+
+</Warning>
+
+This is the Playwright test-level shape of a budget that sums past its deadline; the runner-level shape — sequential stage deadlines totalling past a nextest or CI per-test kill deadline, where the kill also preempts the test's own diagnostic flush — is the [sequential-stage-budget entry in the flake root-cause catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog).
+
 ## `test.skip` as a Precondition — the pass-by-skip Trap
 
 `test.skip` is for genuine environment dependencies: a test that only makes sense on a specific OS, or when a particular service is reachable. Even then, audit that your gold-standard CI hosts **actually run** the spec — a skip that fires on every environment you own is a permanent **pass-by-skip**: the suite reports green because the test never executed, not because the behaviour is correct. The test is **broken, not flaky**.
