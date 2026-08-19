@@ -223,6 +223,59 @@ Keep escape hatches for the local gate so a flaky machine never blocks a push: e
 
 </Tip>
 
+## `test.step` Shares One Test Timeout
+
+`test.step()` is a **reporting** construct. It groups actions under a named node in the HTML report and the trace viewer — it does not open a new timeout budget. Every step inside a `test()` draws down the same single deadline: the `timeout` your config sets (Playwright's own default is 30s; suites with heavy setup routinely raise it), or whatever `test.setTimeout()` last set for that test. Nesting two scenarios in two steps buys a tidier report and nothing else.
+
+That distinction only bites when the steps are **independent sequential scenarios** rather than phases of one scenario:
+
+```typescript
+// Anti-pattern: two independent scenarios sharing one 60s test budget.
+test("commit density stays invariant", async ({ page }) => {
+  await test.step("free mode", async () => {
+    await page.goto("/");
+    // fresh app boot + scenario -- budgeted ~20-30s by this file's own comment
+  });
+
+  await test.step("fixed mode", async () => {
+    await page.goto("/");
+    // fresh app boot + scenario -- budgeted ~20-30s by this file's own comment
+  });
+});
+```
+
+Each step is a complete scenario: its own navigation, its own app boot, its own bounded waits. The file's own comment budgeted each pass at roughly 20–30s, while the config default was 60s for the **whole test**. Two passes near the top of their stated budgets overrun that, and the failure surfaces in the second step — where nothing is individually hung. Every wait in the Fixed-mode phase is bounded and event-keyed; the phase simply started with too little of the shared budget left.
+
+That is what makes this class hard to read off a failure message: **the step that fails is not the step that is slow.** The Free-mode phase spends the budget; the Fixed-mode phase pays for it. Widening the deadline on any wait inside the second step changes nothing, because the deadline that fired belongs to the parent `test()`.
+
+### The Fix: One `test()` per Independent Scenario
+
+If two steps could each run standalone — fresh navigation, no state carried across the boundary — they are two tests. Splitting them gives each its own full budget while preserving the fresh setup they were already performing:
+
+```typescript
+test("commit density stays invariant -- free mode", async ({ page }) => {
+  await page.goto("/");
+  // ...
+});
+
+test("commit density stays invariant -- fixed mode", async ({ page }) => {
+  await page.goto("/");
+  // ...
+});
+```
+
+Splitting the pgen case this way produced, across three bundled Chromium runs, Free timings of **22.3 / 17.1 / 21.9s** and Fixed timings of **15.5 / 11.3 / 16.8s** — every one of them under 45s, against the same unchanged 60s per-test budget. The scenarios were never slow. Only their sum was.
+
+When the stages genuinely cannot be split — they share expensive state, or the later stage asserts on something the earlier one produced — keep them in one `test()` but **write the arithmetic down**: sum the worst case of every stage deadline plus setup and teardown, derive an explicit `test.setTimeout()` from that sum, and leave the sum in a comment so the next person editing a stage deadline can see what they are spending.
+
+<Warning>
+
+**Never solve this class by blindly raising the timeout.** A raise that is not backed by stage arithmetic is a guess, and it is the specific guess that hides the diagnosis: it trades a fast, legible "step 2 timed out" for a suite that is minutes slower and still times out the day one stage drifts. Raise the number only as the _output_ of the sum, never as the first response to the red.
+
+</Warning>
+
+This is the Playwright test-level shape of a budget that sums past its deadline; the runner-level shape — sequential stage deadlines totalling past a nextest or CI per-test kill deadline, where the kill also preempts the test's own diagnostic flush — is the [sequential-stage-budget entry in the flake root-cause catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog).
+
 ## `test.skip` as a Precondition — the pass-by-skip Trap
 
 `test.skip` is for genuine environment dependencies: a test that only makes sense on a specific OS, or when a particular service is reachable. Even then, audit that your gold-standard CI hosts **actually run** the spec — a skip that fires on every environment you own is a permanent **pass-by-skip**: the suite reports green because the test never executed, not because the behaviour is correct. The test is **broken, not flaky**.
@@ -802,6 +855,257 @@ A boot stagger (delaying each fixture's start by a few seconds) narrows this rac
 
 See also the native-suite "Port races (`EADDRINUSE`)" entry in the [Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog) — same root cause, a fixed port shared across parallel processes, here specific to a dev-server's non-obvious secondary socket rather than its primary one.
 
+## `fullyParallel` Defaults to False — the Mega-File Tail
+
+The `workers` value decides how many parallel lanes a run has. **`fullyParallel` decides what is allowed into them, and its default is narrower than most people assume: it is `false`, which parallelizes across _files_ while serializing every test _within_ a file onto a single worker.** The unit of concurrency is the file, not the test.
+
+That makes the suite's wall clock a maximum, not a division:
+
+```text
+critical path = max(slowest single file, total test time ÷ workers)
+```
+
+Only the second term responds to buying cores. The first does not move at all — so once `total ÷ workers` drops below the slowest file, **every additional worker buys nothing**, and the suite's floor is one file's runtime.
+
+A real suite with 92 minutes of aggregate test time — the 46-minute two-worker step that [Aggregate Suite Budget](../decision-guide/aggregate-suite-budget.mdx) prices at 5,520 worker-seconds, converted back from wall clock to work — whose top two files ran 10:08 and 9:41:
+
+```text
+ 2 workers:  max(10:08, 92:00 ÷  2 = 46:00)  =  46:00   ← the division dominates
+ 4 workers:  max(10:08, 92:00 ÷  4 = 23:00)  =  23:00   ← still the division
+ 8 workers:  max(10:08, 92:00 ÷  8 = 11:30)  =  11:30   ← nearly a tie
+16 workers:  max(10:08, 92:00 ÷ 16 =  5:45)  =  10:08   ← the file is the floor
+```
+
+Somewhere between eight and sixteen workers this suite stops being worker-bound and becomes file-bound. Paying for the bigger runner past that point buys the doubled per-minute rate and almost no wall clock — the failure [CI Runner Sizing Rule 1](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-1-a-bigger-runner-is-a-latency-lever-not-a-cost-lever) warns about, arriving here through a config default rather than an explicit `workers` cap.
+
+<Warning>
+
+**Consolidating tests into fewer files makes this worse, and consolidation is otherwise good hygiene.** Merging six related specs into one parametrized mega-file removes duplicated setup, shortens the file list, and reads better — and it raises the first term of that max. A refactor that looks purely organizational can lift the suite's floor without touching a single assertion or worker count. If your repo has been trending toward large parametrized spec files, read the per-file durations before concluding the suite is worker-bound.
+
+</Warning>
+
+The lever is `fullyParallel`, suite-wide or per file:
+
+```typescript
+// playwright.config.ts -- every test becomes its own unit of concurrency
+export default defineConfig({
+  fullyParallel: true,
+});
+```
+
+```typescript
+// e2e/checkout-flow.spec.ts -- opt one genuinely coupled file back OUT
+import { test } from "@playwright/test";
+
+// These tests build on a cart seeded by the first one and must run in order.
+test.describe.configure({ mode: "serial" });
+```
+
+The inverse works too, while the config default stays `false`: `test.describe.configure({ mode: "parallel" })` inside a single mega-file splits just that file across workers. That is the smaller, more targeted move when exactly one or two files are the tail.
+
+### Flip It as an Experiment, Not as a Recommendation
+
+`fullyParallel: true` is not a settings improvement to apply on sight. It removes an ordering guarantee the suite has been getting for free — tests inside a file were running one at a time in source order, whether or not anyone intended that — and any test quietly depending on it starts failing intermittently rather than loudly.
+
+So run it as a matched experiment, and hold the result to **two accept criteria, both of which must pass**:
+
+1. **Wall clock.** The after-side **maximum** critical-path job time must sit under the ceiling you gate on. Compare maxima, not medians: the slowest attempt is what a PR author actually waits for.
+2. **Retries.** Retry counts and retry markers must not rise. A flip that buys wall clock by spending retry budget has bought nothing — it has converted a measurable cost into an unmeasurable one.
+
+Keep the experiment honest with the usual controls: change exactly one line, hold the lockfile, runner shape, shard matrix and selected test count fixed, take no serial opt-outs on the first pass, and run at least five attempts per side. One attempt per side measures noise.
+
+### The Counter-Case: Under the Ceiling and Still Rejected
+
+A 178-test consolidated suite (Playwright 1.59.1, two CI workers on a four-vCPU runner, fixed three-shard matrix) ran exactly that experiment — one line changed, five attempts before and five after, same selected count, no serial opt-outs:
+
+| sample | per-attempt max job seconds | median / max |
+|---|---|---|
+| before | 365, 441, 380, 313, 350 | 365s / 441s (7m21s) |
+| after | 331, 484, 362, 423, 364 | 364s / 484s (8m04s) |
+
+**Wall-clock criterion: passed.** The after-side maximum, 484s (8m04s), stayed under the 9m24s ceiling. Note what "passed" does and does not mean here — the median moved 365s → 364s and the maximum moved 441s → 484s, so the flip bought no measurable speed at all. It merely failed to break the budget.
+
+**Retry criterion: failed.** Explicit retry markers rose from 2 total to 4 total, and median retries per attempt went 0 → 1.
+
+The natural next move — exempt the offending files with `mode: "serial"` and re-run — had no target. The markers were generic `command-palette-nested-pick.spec.ts` noise that recurred on **both** sides, plus one `composer-overlay-crisp-862.spec.ts` occurrence. No repeated ordering or shared-state signature pointed at a specific file, so there was no principled set of files to exempt.
+
+`fullyParallel` was restored to `false`. That is the mechanical rule working as designed: two criteria, one passed, one failed, so the change does not land. The temptation at that moment is to accept anyway — it is under the ceiling, and four retry markers across five attempts look like noise — which is precisely how a suite acquires a retry budget nobody chose. A retry that CI absorbs is still a failure the zero-retry local gate will surface; see [Quarantining Flakes: The Retries-Asymmetry Trap](#quarantining-flakes-the-retries-asymmetry-trap).
+
+<Note>
+
+**Rejected here is not rejected forever.** The result says this suite, at this test count, on this runner shape, did not have the intra-file tail the lever exists to cut — its 178 tests already spread across enough files that per-file serialization was not the binding constraint. The arithmetic at the top of this section is what tells you when to re-run the experiment: after a consolidation refactor, after a large new parametrized spec lands, or after a worker-count increase pushes `total ÷ workers` below the slowest file's duration.
+
+</Note>
+
+## Price the Per-Test Fixture Boot
+
+A slow suite gets investigated as "which test is slow?" — a report sorted by per-test duration, worst offenders first. That question structurally cannot find the largest line item in many suites, because the largest line item is **uniform**. Setup that every test pays does not show up as an outlier; it raises the baseline everywhere by the same amount, which reads as "the app is just slow."
+
+Price it directly instead:
+
+```text
+fixture cost = per-invocation cost × invocation count
+```
+
+Two shapes of this are worth pricing separately.
+
+An **isolation helper** in `beforeEach` — `goto("/")` → clear `localStorage`/`sessionStorage` → `reload()` — costs **two full application boots per test** that the test never asked for: roughly 1,132 avoidable boots across a single run. It stays invisible in a per-test profile precisely because every test pays it equally.
+
+A **setup helper** gets priced by the same arithmetic, with numbers you can actually measure. One representative test ran 32.8s of Playwright wall time (34.33s outer); a DEBUG rerun attributed about 10.1s of that to the helper's boot portion — roughly 7.0s navigation plus 2.0s waiting for a step rail to become visible. A static audit found 77 call sites across 35 spec files:
+
+```text
+10.1s per call  ×  77 call sites  =  777.7s  =  13.0 serial minutes
+```
+
+<Warning>
+
+**That is a component price, not a wall-clock prediction.** 777.7s is the serial-equivalent cost of one component; the suite runs across multiple workers and multiple shards, which overlap, so removing the component does not subtract 13 minutes from the run. The number's job is **ranking** — it says this single helper outweighs every individual slow test in the suite, which no per-test profile would ever have surfaced. Predict wall clock by measuring a before/after run, never by subtracting a component price.
+
+</Warning>
+
+### Check Whether the Clear-Helper Is Cargo Cult
+
+Playwright's default `page` fixture already hands every test a **fresh `BrowserContext`**: its own cookie jar, its own `localStorage` and `sessionStorage`, both empty. Storage does not bleed between tests unless you deliberately arranged for it to — a worker-scoped context reused across tests, a context you created by hand, a `storageState` you loaded on purpose. A `beforeEach` that clears storage on the default fixture is clearing something that was already empty.
+
+Such helpers arrive honestly. They get written against a same-context assumption carried in from another harness, copied wholesale from a project that genuinely did reuse contexts, or added while chasing a flake and kept afterwards because the flake stopped. None of those origins is legible in the code, and by the time anyone asks, the helper has 77 call sites.
+
+The cheap experiment answers the question before you build anything:
+
+```bash
+# Delete the clear step, then run only the specs most likely to have depended on it.
+npx playwright test e2e/seed-heavy-*.spec.ts --repeat-each=3
+```
+
+Target the seed-heavy specs — the ones that write storage — not the whole suite; you want a fast answer, not a nightly. Green across repeats means the clear was cargo cult, and the answer cost one command. Building an `addInitScript` fixture to do the clearing "properly" costs a day and answers a question you never confirmed you had.
+
+### The Trap: The Helper's `goto` Is Often the Spec's Only Navigation
+
+"Just remove the helper" is where this goes wrong, because these helpers navigate:
+
+```typescript
+// e2e/helpers/isolation.ts
+import { Page } from "@playwright/test";
+
+export async function resetApp(page: Page) {
+  await page.goto("/"); // boot #1 -- and the spec's ONLY navigation
+  await page.evaluate(() => localStorage.clear());
+  await page.reload(); // boot #2
+}
+```
+
+```typescript
+// e2e/settings.spec.ts -- note the absence of any goto of its own
+import { test, expect } from "@playwright/test";
+import { resetApp } from "./helpers/isolation";
+
+test.beforeEach(async ({ page }) => {
+  await resetApp(page);
+});
+
+test("saves the theme", async ({ page }) => {
+  await page.getByRole("button", { name: "Dark" }).click();
+  await expect(page.getByTestId("theme")).toHaveText("dark");
+});
+```
+
+Delete `resetApp` and this spec never navigates anywhere. It fails on `about:blank` with a locator timeout that looks nothing like "you removed a storage clear," and the same failure lands in every spec that inherited the habit. **The navigation side effect is the de facto contract**, whatever the helper is named for.
+
+So the removal is a decomposition, not a deletion: keep the navigation, drop only the step you priced.
+
+<Note>
+
+**Some seeding steps are the test.** Telling those apart from the dead weight is the whole job, and the pricing arithmetic does not do it for you. In the worked case, the sidebar-migration specs deliberately seed stale storage and reload in order to exercise the migration path — for them, seed-and-reload is the setup the assertion depends on, and those steps stayed. The same audit's 460 `waitForLayoutFlush` calls were likewise not mass-deleted on the strength of the arithmetic: each removal needs a green run of its affected batch first, which is the ratchet described in [Ratcheting Down Wait Debt](#ratcheting-down-wait-debt) above. Price a component to decide what to **investigate**; prove each individual removal with a run.
+
+</Note>
+
+## One Canonical Setup Abstraction per Domain
+
+The section above prices one setup helper. This one is about the suite that has **two** of them for the same domain, both defensible, neither obviously wrong.
+
+Both halves arrive honestly. Function helpers come first because they are the cheapest thing to write, and consumers accumulate against them — 101 of them in the audited suite. A PageObject class arrives later because a class reads better for multi-step flows, and it collects 11. Crucially, the class does not reimplement boot; it **delegates** to the function helper. That delegation is what makes the arrangement look safe: one boot path, two spellings of it.
+
+The delegation is exactly why it is not safe. The two surfaces are equivalent only across the part the class forwards, and drift enters through the part it does not.
+
+```typescript
+// e2e/helpers/composer.ts -- surface A, 101 consumers
+import { Page, expect } from "@playwright/test";
+
+export async function openComposerWithTemplate(page: Page, template: string) {
+  await page.goto(`/composer?template=${template}`);
+  await expect(page.getByTestId("step-rail")).toBeVisible();
+}
+```
+
+```typescript
+// e2e/fixtures/composer-page-object.ts -- surface B, 11 consumers, boot delegated to A
+import { Page } from "@playwright/test";
+import { openComposerWithTemplate } from "../helpers/composer";
+
+export class ComposerPageObject {
+  constructor(private readonly page: Page) {}
+
+  async open(template: string) {
+    await openComposerWithTemplate(this.page, template); // delegation -- the shared half
+  }
+
+  async selectVariant(name: string) {
+    await this.page.getByRole("tab", { name }).click(); // behavior -- the unshared half
+  }
+}
+```
+
+Add a readiness step to surface A — wait for the canvas to paint, not just for the step rail — and every class consumer inherits it too. Add the same step to `ComposerPageObject.open` instead, because that is the file you happened to have open, and the 101 function consumers do not. Either way the review saw one correct-looking diff. Specs that import **both** styles are worse still: their boot contract depends on which call runs first, which is a property of the spec's line order rather than of anything anyone decided.
+
+The cost of leaving both surfaces standing is a review cost, and it scales with the suite. The same audit that priced the boot helper counted **77 boot-helper calls across 35 spec files** and **460 `waitForLayoutFlush` calls**. At that size, "does this spec boot the way the other 76 do?" is already hard to answer by reading. Two setup surfaces double the question without doubling the coverage.
+
+### Folding the Smaller Surface into the Larger
+
+1. **Inventory the consumers of each surface.** Count spec files, not call sites — the file is the unit you will have to run and review. Two `grep -rl` passes produce the numbers that decide everything after this, and they cost a minute.
+2. **Let consumer count choose the direction, function or class.** 101 versus 11 is not a design debate; it is arithmetic about how much migration you are signing up for. Pick the surface most consumers already use, even when the other one is the nicer abstraction — taste is worth 11 migrations, not 101.
+3. **Fold the smaller surface's useful methods into the winner.** The class was not pure overhead. Its delegating methods are noise, but the ones carrying real behavior — `selectVariant`, and whatever else the function module never grew — are the reason it existed. Move those across as functions and drop only the delegation.
+4. **Search for the dual importers before you touch anything.** Specs using both styles are where the migration actually breaks, and they are invisible in either surface's own consumer list because each list counts them as a normal consumer.
+5. **Batch-run every migrated consumer green _before_ deleting the old module.** While the old module is still in the tree, a missed migration fails loudly on the new path. Once it is deleted, the same mistake arrives as a resolution error in an unrelated file — or worse, as a spec that quietly stops matching its project and is never run again.
+
+```bash
+# Steps 1 and 4: consumer counts per surface, then the specs importing BOTH.
+grep -rl "helpers/composer" e2e --include="*.spec.ts" | wc -l
+grep -rl "ComposerPageObject" e2e --include="*.spec.ts" | wc -l
+grep -rl "ComposerPageObject" e2e --include="*.spec.ts" \
+  | xargs grep -l "helpers/composer"
+```
+
+```bash
+# Step 5: every migrated spec, in one batch, while the old module still exists.
+npx playwright test $(git diff --name-only main...HEAD -- 'e2e/**/*.spec.ts')
+```
+
+<Warning>
+
+**Do not introduce a third abstraction merely to hide the migration.** The tempting move at step 3 is a neutral wrapper that both old surfaces can call, so no consumer has to change today. It converts a bounded fold into a permanent three-surface arrangement: readiness changes start landing on the wrapper, the two original surfaces stay in the tree because nothing forces their removal any more, and the drift you set out to close gains a third place to hide. A fold is finished when a module is **deleted**, not when one is added.
+
+</Warning>
+
+### One Readiness Ladder, Stated Once
+
+What the fold protects is the boot/navigation/readiness contract, and that contract is worth stating as a single ordered ladder living in the canonical module:
+
+```typescript
+// e2e/helpers/composer.ts -- one ladder, one file, after the fold
+export async function openComposerWithTemplate(page: Page, template: string) {
+  await page.goto(`/composer?template=${template}`); // 1. navigate
+  await expect(page.getByTestId("app-shell")).toBeVisible(); // 2. shell mounted
+  await expect(page.getByTestId("step-rail")).toBeVisible(); // 3. domain ready
+}
+```
+
+Stated once, a readiness change is one diff that every consumer inherits, and the review question becomes "is this ladder right?" rather than "which of the two ladders did this spec get?" Keeping navigation on the ladder as an explicit rung matters for a second reason: it is the step [Price the Per-Test Fixture Boot](#price-the-per-test-fixture-boot) shows people deleting by accident, and a rung nobody wrote down is a rung nobody defends in review.
+
+<Note>
+
+**The worked case.** The pgen Wave-4 consolidation ran this fold: the class's useful methods moved into the function-helper module, the competing fixture module was removed, and `e2e/helpers/composer.ts` became the canonical setup surface. What validated it was the post-fold selected counts, read per project as tests/files — **default 178/63, heavy 104/36, GPU 167/38, all-selected 449/129**. Counts are the check that the fold moved consumers rather than losing them: a migration that quietly drops specs out of a project's selection reads as a clean, faster suite, right up until the missing coverage matters. Record them before you start, compare per project rather than in aggregate, and treat an unexplained drop the way [Guard against specs that match no project](#guard-against-specs-that-match-no-project) treats a zero.
+
+</Note>
+
 ## Sharded CI Runs
 
 For large test suites, shard across multiple CI runners:
@@ -860,6 +1164,12 @@ jobs:
 Each shard now writes a `blob` report instead of the default HTML report — HTML reports from separate shards can't be combined, but blob reports can. Two details matter for the failure case, which is exactly when you need the report most: `fail-fast: false` on the matrix stops GitHub Actions from cancelling the other shards the moment one fails, and `if: always()` on the upload step keeps a failed shard's blob report from being skipped (GitHub Actions skips later steps by default once a step exits non-zero). Without both, `merge-reports` — which itself runs `if: always()` — would only ever see the blob reports of shards that passed.
 
 </Note>
+
+## Composite Actions Own Setup, Not Test Selection
+
+Near-identical e2e jobs — a light shard matrix and a separate `@heavy` lane — invite folding the whole job body into one composite action. Fold the **setup** only. The pnpm and Node setup, `pnpm install`, the browser install, and the build are identical across both callers and belong in a shared `.github/actions/setup-e2e/action.yml`. Test selection does not travel with them: a composite action can own setup, but it cannot safely supply the arguments of a command its caller runs afterwards. Routing the selection string through the composite gives one file two owners, and either lane changing what it runs then means editing a file the other lane also depends on.
+
+Keep each lane's selection string in exactly one source that lane owns. In the worked case the heavy lane obtains NUL-delimited arguments from its own `scripts/ci/e2e-heavy-args.sh` and invokes Playwright itself, while the light matrix keeps its fixed three-shard command in the workflow beside it. Both callers use the same setup composite; neither can silently change what the other selects.
 
 ## Artifacts You Want to Keep Must Live Outside `outputDir`
 
@@ -921,6 +1231,91 @@ Test the seam that actually matters — *does the artifact survive a second run?
 </Warning>
 
 (Verified against Playwright 1.58.2 by running it: sentinel files placed in `test-results/` were deleted by the next run; two reports written to a sibling directory coexisted.)
+
+## Recording a Trace Is Not Keeping It
+
+`trace: 'on-first-retry'` and `screenshot: 'only-on-failure'` write evidence onto the runner's disk, and the runner is deleted when the job ends. Unless a step uploads that evidence first, the config spends time recording a trace for the sole purpose of discarding it — and nothing about the run looks wrong. The job goes red on the real failure exactly as intended; only the artifact list is empty, and nobody reads an empty artifact list until they need it.
+
+Measured: a PR gate carried `trace: 'retain-on-failure'` and `screenshot: 'only-on-failure'` for months with no `actions/upload-artifact` step anywhere in the workflow. A later flake investigation paid a **92-execution reconstruction cost** re-running the suite to reproduce a failure CI had already captured and thrown away.
+
+Retention is part of the T1 definition rather than an operations detail bolted on afterwards — see [T0 + T1: the defaults](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults). Below are the three ways a correct-looking upload still yields nothing, each of which fails silently, and then the storage ceiling that decides *what* to upload.
+
+### The CI default reporter writes no `playwright-report/`
+
+Playwright's default reporter is `list` locally and **`dot` under CI**. Neither writes an HTML report, so `playwright-report/` does not exist unless a reporter is configured to create it. An upload step pointing at that path uploads nothing: `actions/upload-artifact` logs a "No files were found" warning and **succeeds**, so the workflow stays green and the evidence gap stays invisible.
+
+The directory that does hold failure evidence by default is `outputDir` — `test-results/` — and it resolves relative to the **config file's directory**, not the working directory of the step. A monorepo job running `npx playwright test -c apps/web/playwright.config.ts` from the repo root writes to `apps/web/test-results/`; an upload step pointing at a root-level `test-results/` finds nothing and still succeeds.
+
+So pick one deliberately: configure `reporter: [['html', { open: 'never' }]]` and upload `playwright-report/`, or upload `test-results/` at its config-relative path. What never works is uploading a default-named directory no reporter was asked to write.
+
+### Gate the upload on `failure() || cancelled()`
+
+```yaml
+- uses: actions/upload-artifact@v4
+  if: failure() || cancelled()
+  with:
+    name: playwright-report-${{ strategy.job-index }}-${{ github.run_attempt }}
+    path: playwright-report/
+    retention-days: 2
+```
+
+An upload step with no `if:` is skipped the moment an earlier step exits non-zero — which is every run the artifact exists for. `if: failure()` fixes that and still misses the other half: a job killed at its `timeout-minutes` cap, or cancelled by a `concurrency` group when a new push lands, is *cancelled* rather than failed, and cancellation is exactly the evidence-loss case. The run you most want a trace from is the run that quietly produces no artifact. `if: always()` covers both as well, at the cost of uploading a report on every green run.
+
+### A second Playwright run empties `outputDir` before the upload
+
+Playwright empties `outputDir` at the start of **every** run — the section above. So a job that invokes Playwright twice, a CI-safe lane followed by a `@flaky` quarantine lane, has its second invocation delete the first invocation's trace zips and failure screenshots before the upload step ever runs. The upload can satisfy every rule above and still ship nothing but the quarantine lane's output.
+
+Worked case: an `e2e-full` job ran `pnpm test:e2e:ci:json`, then `npx playwright test --grep @flaky`, then a single `actions/upload-artifact` covering both `playwright-report/` and `test-results/` under `if: always()`. Every retention rule was satisfied and the CI-safe lane's evidence was gone anyway. Its JSON reports survived only incidentally, because `PLAYWRIGHT_JSON_OUTPUT_NAME` redirected them into `playwright-report/`, which Playwright does not clear.
+
+<Warning>
+
+**A correct upload step does not rescue an artifact from a directory another run emptied.** This is the "a unique filename does not rescue an artifact" warning one level up. The instinct on finding an empty artifact is to audit the upload step, and the upload step is fine — the wipe happens between the two lanes, before any upload runs.
+
+</Warning>
+
+The fix is one `--output` per invocation, both uploaded, plus a one-line guard so a later edit cannot silently collapse the two paths back into one:
+
+```yaml
+e2e-full:
+  runs-on: ubuntu-latest
+  env:
+    CI_OUTPUT: test-results-ci
+    FLAKY_OUTPUT: test-results-flaky
+  steps:
+    - name: Each Playwright invocation needs its own --output
+      run: '[ "$CI_OUTPUT" != "$FLAKY_OUTPUT" ]'
+    - run: pnpm test:e2e:ci:json --output="$CI_OUTPUT"
+    - run: npx playwright test --grep @flaky --output="$FLAKY_OUTPUT"
+    - uses: actions/upload-artifact@v4
+      if: failure() || cancelled()
+      with:
+        name: e2e-evidence-${{ github.run_attempt }}
+        path: |
+          ${{ env.CI_OUTPUT }}/
+          ${{ env.FLAKY_OUTPUT }}/
+        retention-days: 2
+```
+
+The guard runs first and costs nothing. It earns its line because the failure it prevents is invisible: pointing both lanes back at `test-results/` produces a green workflow with a plausible-looking artifact attached.
+
+The `path:` here ships the raw output directories to keep the two-lane mechanic visible — do not copy it verbatim. On the measured numbers in the storage-cap subsection below, raw directories blow the storage allowance on their first failed run; keep the per-invocation `--output` split, but upload the self-contained HTML report instead.
+
+The latent form is worth naming. In the worked case `@flaky` matched zero specs, so nobody had ever lost evidence to it — which is the point rather than a reprieve. A quarantine lane that matches nothing today starts destroying traces on exactly the night a real nightly failure needs one. The T1 checklist line is one sentence: **if the job invokes Playwright more than once, give each invocation its own `--output`.**
+
+### The storage cap: upload the report, not the raw directory
+
+Raw `test-results/` is not free to keep. Measured on a three-shard e2e job: **100–615 MB per failed shard, up to 1,845 MB across three shards**, against a **0.5 GB** Actions-storage allowance. Retaining the raw directory for even two days was rejected outright on those numbers.
+
+The middle path is to upload only the **self-contained HTML report** — it embeds the first-retry traces and the failure screenshots, which is what a triage session actually opens — with a short `retention-days`, gated on `failure() || cancelled()`, under unique shard and run names.
+
+<Note>
+
+**Two caveats, because this is a middle path and not a guarantee:**
+
+- **The HTML reporter writes in `onEnd`.** A hard timeout kill ends the process before `onEnd` runs, so there is no report to upload at all. That failure class has to be diagnosed from the job log instead.
+- **`retention-days` does not cap upload size.** It bounds how long an artifact is stored, so it bounds the storage bill over time — not the bytes any single failed run pushes. An unfiltered raw directory still exceeds the allowance on the day it runs.
+
+</Note>
 
 ## Mock Backend Adapter for Frontend-Only E2E
 

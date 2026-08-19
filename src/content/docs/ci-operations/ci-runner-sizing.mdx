@@ -111,6 +111,8 @@ Playwright workers scale with cores **by default**, and — from the pricing sec
 
 So the decision is purely about feedback-loop speed. Size a parallelizable job **up** when a faster PR gate is worth engineering attention; leave it small when the wait is already tolerable. Do not size up expecting the bill to shrink — for this class of work it will not.
 
+For a Playwright suite specifically, run one check before buying any cores: `fullyParallel` defaults to `false`, which serializes the tests inside each file onto a single worker, so the suite's floor is its slowest single file rather than `total ÷ workers` — and cores added past that floor buy nothing at all. See [`fullyParallel` Defaults to False — the Mega-File Tail](../tool-patterns/playwright-patterns.mdx#fullyparallel-defaults-to-false-—-the-mega-file-tail).
+
 <Tip>
 
 The cancellation breaks in two ways, and only one of them looks serial. Work that is *inherently* serial — a single-threaded build step, a serial migration — gets **no** wall-clock benefit from more vCPU; for that job a bigger runner is pure added cost. And work that is inherently parallel can be **artificially capped**: an explicit `workers: N` in `playwright.config.ts` (or a fixed numeric `--workers=N` on the CLI — a percentage like `--workers=50%` still scales with cores) pins concurrency, which removes the "workers scale with cores" leg of the cancellation. A capped job is not serial — a bigger runner can still relieve CPU starvation at the pinned count, which is Rule 3's territory and has Rule 3's ceiling — but it loses the automatic scaling this rule promises: past the point of no contention, cost keeps climbing and wall-clock stops moving. "It's Playwright" is not proof the job scales; check the config for a pinned `workers` value before sizing up.
@@ -179,6 +181,79 @@ Gate expensive lanes by two things:
 
 Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger design to make a lane *cheaper* (Rule 4). Conflating the two — trying to save money by downsizing a per-PR heavy lane instead of moving it off per-PR entirely — optimizes the rounding error and ignores the bill.
 
+## `pnpm -r` Runs in Topological Chunks
+
+The four rules above all assume the job's shape is what you think it is. For a monorepo whose test lane is one `pnpm -r run test`, that assumption usually breaks in the same place, upstream of every sizing decision: **`pnpm -r` does not fan every package out at once — it executes in topological chunks, and the next chunk cannot start until the whole previous one has drained.** One slow package is therefore a barrier, not merely a slow package. Measured on a 55-package workspace, a seven-minute worker-test suite held 12 unrelated packages behind it, and the effective parallelism of the entire fanout was **1.27× on a twelve-core box** — a machine bought for parallel work spent nearly the whole run doing one thing at a time.
+
+That ratio is the diagnostic, and it is arithmetic on numbers the run already prints:
+
+```text
+effective parallelism = Σ(per-package wall time) ÷ (run wall time)
+
+55 packages, 12 vCPU available  →  1.27×   ← cores bought, not used
+```
+
+A ratio near 1× on a many-core runner means the lane is barrier-bound — and that is Rule 1's cancellation breaking from a direction Rule 1 does not cover. The workload *is* parallelizable and nothing pinned a worker count; cores still buy nothing, because the scheduler above the workers refuses to overlap the chunks. **Check this ratio before sizing a monorepo test lane up**, or a bigger runner becomes the pure-added-cost case wearing a parallel job's clothes.
+
+### Severity scales with the package count
+
+Do not carry 1.27× into a workspace it does not describe. The same measurement on a four-package workspace with exactly one real dependency edge — so at most two chunks — found **4.41 s of idle in a 37.7 s run (11.7%)**, and **3.18 s of 36.8 s (8.6%)** on a second run. One package there accounts for 80% of the wall time, so removing the barrier entirely would save about four seconds out of thirty-eight: a refactor nobody should schedule.
+
+More packages means more chunks, and more packages stalled inside each one, so the pattern's severity scales with the package count. At 55 packages it is the dominant cost of the lane; at four it is noise. Measure your own ratio before spending anything on it.
+
+### Two levers, and the per-process startup tax
+
+Once the ratio says the lane is barrier-bound, there are two ways out.
+
+**Exclude the barrier package.** When the slow package already has its own CI job, running it inside the fanout as well pays for it twice *and* serializes everything behind it:
+
+```bash
+pnpm -r --filter '!@scope/worker-tests' run test
+```
+
+**Or remove the chunking entirely**, by moving to a single scheduler at the workspace root — a root vitest config whose `test.projects` covers every package. One scheduler distributes *test files* across workers, so there are no package chunks left to wait on. See [Project-Level Vitest Configs](../tool-patterns/vitest-patterns.mdx#project-level-vitest-configs) for the config shape.
+
+The second lever collects a bonus the first does not. `pnpm -r run test` boots one test-runner process per package, and that startup costs roughly **0.6–1 s per package** before a single test executes. Across 55 packages that is about a minute of pure process startup on every run, which no runner size reduces. A single root scheduler pays it once.
+
+### Check the edge is real before removing a barrier
+
+Where a real dependency edge exists, topological order is a correctness prerequisite, not only a throughput cost. Measured case: a package's TypeScript declaration pass imports a sibling package's types, so building the dependent first does not run slowly — it fails outright with `TS2307`. That is precisely why the workspace in question hard-codes a `WORKSPACE_BUILD_ORDER` constant as the single source of truth for the order, instead of trusting whatever order an invocation happens to produce.
+
+<Warning>
+
+**Classify the barrier before you delete it.** A barrier that exists only because one package is slow is a throughput problem, and the levers above apply to it. A barrier that exists because a dependent consumes its dependency's build output is load-bearing — and dropping topological ordering as a throughput optimization turns a slow build into a broken one.
+
+</Warning>
+
+## Timing Retros Read Job-Level Timestamps
+
+Every rule on this page sits downstream of a measurement, and the most convenient measurement available is the wrong one. `gh run list` reports workflow-level `createdAt` → `updatedAt`, and that interval **includes the time the run spent waiting for a runner.** Queue wait and execution are different signals with different owners, and a number that silently adds them together cannot support any decision above.
+
+The gap is not marginal. Measured: two runs sat **72–73 minutes in the queue** before they started executing. At workflow level, a perfectly normal 62-minute execution inside such a run reads as a **134-minute** near-death run — a number that sends someone resizing a lane whose actual duration never moved.
+
+Short jobs distort worse, proportionally. One sampled run had a **seven-second** pure-Node guard job wait **303 seconds** for a runner. At workflow level that wait is indistinguishable from work: it reads as a five-minute regression in a gate whose actual work was 232 s.
+
+### Read the jobs endpoint, not the run list
+
+The corrected measurement is job-level `startedAt` → `completedAt`, which the run's jobs endpoint reports per job:
+
+```bash
+gh api repos/{owner}/{repo}/actions/runs/<run-id>/jobs \
+  --jq '.jobs[] | {name: .name, started: .started_at, completed: .completed_at}'
+```
+
+Re-measuring does not always overturn the claim. A documented "~3 min" e2e job, re-measured this way, came back at **212 s and 242 s** — the claim survived. The re-measurement was still worth doing, because what was broken there was the protocol, not the number.
+
+Everything that aggregates runs inherits the same defect: budget dashboards, cancellation-rate stats, and especially **"X% of runs hit the timeout cap" claims need re-verification at job level before they drive a decision.** A cap-hit rate computed from workflow timestamps counts queue-heavy runs as timeouts they never were, and then argues for exactly the wrong lever — a bigger runner for a lane that was never slow. The "under 10 minutes" PR-gate budget in [Execution Tiers](../decision-guide/execution-tiers.mdx) is an execution budget in the same sense: measure it at job level, or you are tuning your lane against a queue you do not control.
+
+### An unpinned timing claim silently regresses
+
+A number with no stated source rots quietly. The "~3 min" claim above named no timestamp source, so it was right by luck — and the next person to refresh it would reach for `gh run list`, the convenient command, write a workflow-level number under the same sentence, and nothing would fail. **Pin the source next to the number**: which endpoint, which field pair, how many samples.
+
+Keeping the signals apart is what makes them comparable over time. The matched experiment behind these figures recorded queue delay, setup, and job execution separately for exactly that reason, and those signals then moved independently: per-job queue-delay maxima went from 83/17/13/14/11 s before a change to 18/14/12/14/15 s after, while critical-path job maxima stayed inside the same 313–484 s band throughout. Blended into one workflow-level number, that queue improvement would have read as an execution change nobody made.
+
+Rule 3 says diagnose the failure mode before resizing. These two sections are the sentence underneath it: **diagnose with numbers that measure the thing you are about to change** — the lane's own execution, not the scheduler above it and not the queue in front of it.
+
 ## Putting It Together
 
 | Symptom | Wrong instinct | Right lever |
@@ -190,6 +265,8 @@ Reach for a bigger runner to make a lane *faster* (Rule 1); reach for trigger de
 | e2e specs time out under load | Assume flaky, add retries | Diagnose first: CPU starvation → 2→4vCPU, only until contention clears (Rule 3); connection starvation → fix the app/serving layer, resizing won't help |
 | Monthly CI bill too high | Downsize the runners | Gate lanes by base branch + schedule (Rule 4) |
 | Need real GPU / macOS coverage | Run it per-PR on a Mac runner | Scheduled T3 macOS lane (~$110/mo, not ~$1,400/mo) |
+| `pnpm -r` fanout barely beats serial on a many-core runner | Buy more cores | Find the chunk barrier — `--filter '!pkg'`, or a single root scheduler — after confirming the edge is not a real dependency |
+| A lane looks minutes slower in a timing retro | Resize or re-tune that lane | Re-measure at job level (`startedAt` → `completedAt`); workflow timestamps include runner-queue wait |
 
 The through-line: **a runner label is a two-token edit, but choosing it well means naming the binding constraint first.** Latency, memory, CPU contention, and total cost are four different problems with four different levers, and a bigger runner is the correct answer to exactly two of them — latency (Rule 1) and CPU starvation (Rule 3) — with both answers bounded by the same config knob: the effective worker count.
 

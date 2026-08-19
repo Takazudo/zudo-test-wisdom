@@ -62,6 +62,122 @@ A green Level 3 suite against a **stale** `dist/` proves nothing -- it asserts o
 
 </Warning>
 
+## A Built Artifact With More Than One Writer Is Shared Mutable State
+
+The Warning above assumes a **single writer**: you build, then you read. That holds for a solo `pnpm build && vitest run` and stops holding the moment anything else can write `dist/` while the suite reads it. Package lifecycle hooks are the writers people miss, because nobody types them -- they fire as a side effect of commands that look read-only.
+
+Treat a built artifact the way you would treat a shared mutable variable: **enumerate every writer before you trust it.**
+
+### Enumerate the Writers
+
+Before you rely on any build-once/read-many setup, list every process that can write the artifact:
+
+- **Lifecycle hooks** -- `prepare`, `prepack`, `prepublishOnly`, `postinstall`. Nobody invokes these; the package manager does.
+- **Watchers** -- `tsup --watch`, `tsc --watch`. These write for as long as the dev server is alive.
+- **Force-rebuild scripts** -- test lanes, workspace builds, local heavy lanes that rebuild unconditionally on every invocation.
+- **The publish path** -- `npm pack`, `npm publish`, and whatever they run on your behalf.
+
+From a real pnpm monorepo, `packages/<pkg>/dist/` had four independent writers -- one from each category:
+
+| Writer | Trigger |
+|---|---|
+| `prepare` (`tsup` + `tsc -p tsconfig.build.json`) | every `pnpm install`, silently |
+| `dev:js` (`tsup --watch`) + `dev:dts` (`tsc --watch`) | for the whole life of `pnpm dev` |
+| `pnpm test` / `build:workspace` / the local heavy lane | unconditional force-rebuild |
+| `prepack` + publish | release |
+
+Nothing mechanically prevented these from overlapping, so the project fell back on a human-remembered rule in its `CLAUDE.md` -- *don't run the test lane while `pnpm dev` is live*. That is the shape of the problem: a race that only discipline prevents. What it produced, over time:
+
+- A `--watch` build wiped `dist/` and regenerated no `.d.ts` at all, until `clean` was made conditional on watch mode (`clean: !options.watch`).
+- A dead `.d.ts` watcher left `dist/*.d.ts` frozen while the JS kept updating, so the suite -- in the package's own words -- typechecks cleanly against stale types instead of failing loudly. **A green suite against an artifact that no longer matches its source, caused by concurrency, not by forgetting to build.**
+- A workspace build guard that, by its own documentation, checks existence rather than freshness: it accepts a stale artifact by design and hands the freshness question back to a human.
+
+<Warning>
+
+**An existence guard is not a cache.** `if (!existsSync("dist")) build()` detects absence, never staleness. A guard that cannot tell a fresh artifact from a stale one is not protecting the suite -- it is only protecting it from a *missing* artifact, which is the failure mode you would have noticed anyway.
+
+</Warning>
+
+### `--ignore-scripts` Is a Flag, Not a Property
+
+Here is the incident that makes the abstraction concrete. A fast-tier unit test asserted the npm tarball's file list, and passed `--ignore-scripts` precisely so the call would be read-only:
+
+```typescript
+execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: PKG_ROOT });
+```
+
+Whether that flag actually suppresses `prepare` turns out to depend on the npm version:
+
+| npm | ships with | runs `prepare` despite `--ignore-scripts`? |
+|---|---|---|
+| **10.9.4** | **Node 22 -- what CI pinned** | **YES** (`prepack` correctly skipped) |
+| 11.0.0 | -- | no |
+| 11.9.0 | Node 24 -- what local dev ran | no |
+
+Local dev ran Node 24 and saw a genuinely read-only pack. CI pinned Node 22, so the same command fired `prepare`, which ran `tsup` with `clean: true`, which deleted `dist/` outright -- while a sibling spec spawned the package's `bin/*.mjs`, whose static import of `../dist/eject/index.js` then failed with `ERR_MODULE_NOT_FOUND`. Mid-publish. The release stopped after one of three packages.
+
+<Warning>
+
+**A test's read-only-ness must not depend on a CLI flag whose behavior varies by tool version.** `--ignore-scripts` is a flag, not a property: an argument you hope the tool honors, not a guarantee the filesystem gives you. The same reasoning applies to `--dry-run`, `--no-build`, and every other opt-out whose semantics live in someone else's changelog.
+
+</Warning>
+
+### The Stray Log Line Was the Tell
+
+Months before the release broke, CI had already seen a build's own log line -- `[copy-theme-packs] dist/theme-packs/ OK` -- printed ahead of the pack's JSON, breaking `JSON.parse`. That string is emitted only from the build's `onSuccess` chain, so it was direct proof that the lifecycle was already running inside a supposedly read-only command. The fix applied at the time was a tolerant JSON scanner that skipped past the stray line. The symptom was hidden, the rebuild kept running, and it eventually took down a release.
+
+<Tip>
+
+**A stray log line before your JSON is not a formatting quirk -- it is your build talking.** When a read-only command emits output it had no business producing, find out who produced it before you make the parser more forgiving.
+
+</Tip>
+
+### The Rule: Own an Immutable Snapshot
+
+**A test that reads a built artifact must own an immutable snapshot of it**, and any build-freshness key must hash **the artifact's own bytes**, not just its sources.
+
+Two concrete shapes.
+
+**Shape 1 -- snapshot the artifact.** Pack it (`npm pack`, then extract the tarball) or copy `{bin,dist}` into a scratch directory, and point the test at the copy. Whatever the lifecycle does to the live `dist/` afterwards, the test is reading bytes no one else can reach.
+
+```typescript
+// tests/setup/snapshot-package.ts
+import { cpSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+
+const PKG_ROOT = join(__dirname, "../..");
+
+export function snapshotPackage(): string {
+  // Inside the package root on purpose -- os.tmpdir() breaks bare-specifier
+  // resolution. Prefix is gitignored and removed in teardown.
+  const dir = mkdtempSync(join(PKG_ROOT, ".artifact-snapshot-"));
+  for (const entry of ["bin", "dist", "package.json"]) {
+    cpSync(join(PKG_ROOT, entry), join(dir, entry), { recursive: true });
+  }
+  return dir;
+}
+```
+
+<Warning>
+
+**Resolution caveat.** If anything in the snapshot imports by **bare specifier**, the snapshot must live *inside the package root*, not in `os.tmpdir()`. Node resolves `node_modules` by walking up the directory tree from the importing file -- starting in a system temp directory, that walk never reaches your project, and the import fails with `ERR_MODULE_NOT_FOUND` for a reason that has nothing to do with the bug you are chasing.
+
+</Warning>
+
+**Shape 2 -- hash the output, not only the input.** If you cache builds behind a freshness marker, include the built output in the key. A key derived from sources alone still matches when a concurrent writer truncated, half-wrote, or deleted the very artifact the marker vouches for -- the sources did not change, so the marker happily accepts a `dist/` that no longer exists in the state it describes. See [Mechanism 2: skip the rebuild when nothing changed](../decision-guide/execution-tiers.mdx#making-t0-real-for-multi-fixture-e2e-mechanism-2-skip-the-rebuild-when-nothing-changed) for the freshness-hash recipe this extends.
+
+### What a Guard Against This Can Honestly Claim
+
+A mechanical guard helps: scan the default lane's specs for launched build or package-lifecycle commands -- `npm|pnpm|yarn` followed by `pack|publish|install|ci|rebuild|run build`, a bare `tsup`, and so on -- and fail any spec that launches one without an explicit annotation.
+
+Document its limit in the same breath. A string scanner catches **launched commands** only. It does not catch a shell wrapper, a script alias, or a direct `rmSync`/`writeFileSync` under `dist/`. The mechanically enforced rule is therefore **narrower** than the invariant it protects, and the docs have to say which is which: the guard enforces "no spec launches a build command"; the invariant is "no spec writes the artifact".
+
+<Danger>
+
+An overclaiming guard is worse than an honest convention. A check that reads as stronger than it is reproduces exactly the failure this section describes -- confidence in a property that nothing actually enforces.
+
+</Danger>
+
 ## Example: SSG Output Verification
 
 ```typescript
