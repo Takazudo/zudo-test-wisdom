@@ -1017,6 +1017,94 @@ test("saves the theme", async ({ page }) => {
 
 </Note>
 
+## ドメインごとに正となるセットアップ抽象を1つだけ
+
+前のセクションは、セットアップヘルパー1つに値札を付ける話でした。ここで扱うのは、同じドメインに対してそれが**2つ**あるスイートです。どちらにも言い分があり、どちらも明らかな間違いではありません。
+
+どちらも悪意なく生まれます。関数ヘルパーが先に来るのは、それが最も安く書けるからであり、消費者はそこへ積み上がっていきます — 監査対象のスイートでは101件でした。PageObjectのクラスは後から来ます。複数ステップのフローはクラスの方が読みやすいからで、そちらには11件が集まりました。肝心なのは、クラスが起動を実装し直してはいないことです。クラスは関数ヘルパーへ**委譲**します。この委譲こそが、この配置を安全に見せます：起動経路は1つ、その綴りが2通りあるだけ、というわけです。
+
+安全でない理由も、まさにその委譲です。2つのサーフェスが等価なのはクラスが転送している部分だけであり、ドリフトは転送していない部分から入り込みます。
+
+```typescript
+// e2e/helpers/composer.ts -- surface A, 101 consumers
+import { Page, expect } from "@playwright/test";
+
+export async function openComposerWithTemplate(page: Page, template: string) {
+  await page.goto(`/composer?template=${template}`);
+  await expect(page.getByTestId("step-rail")).toBeVisible();
+}
+```
+
+```typescript
+// e2e/fixtures/composer-page-object.ts -- surface B, 11 consumers, boot delegated to A
+import { Page } from "@playwright/test";
+import { openComposerWithTemplate } from "../helpers/composer";
+
+export class ComposerPageObject {
+  constructor(private readonly page: Page) {}
+
+  async open(template: string) {
+    await openComposerWithTemplate(this.page, template); // delegation -- the shared half
+  }
+
+  async selectVariant(name: string) {
+    await this.page.getByRole("tab", { name }).click(); // behavior -- the unshared half
+  }
+}
+```
+
+サーフェスAに準備完了のステップを足す — ステップレールだけでなく、キャンバスの描画も待つ — と、クラスの消費者もそれを継承します。同じステップを、たまたま開いていたのがそのファイルだったからという理由で `ComposerPageObject.open` の側に足せば、101件の関数消費者はそれを受け取りません。どちらにせよ、レビューが見たのは正しそうに見える1つの差分です。**両方**のスタイルをインポートしているスペックはさらに厄介で、その起動契約はどちらの呼び出しが先に走るかに依存します。それは誰かが決めた何かではなく、そのスペックの行順という性質にすぎません。
+
+両方のサーフェスを立たせたままにするコストはレビューのコストであり、スイートの規模に比例して膨らみます。起動ヘルパーに値札を付けたのと同じ監査は、**35のスペックファイルにまたがる77件の起動ヘルパー呼び出し**と、**460件の `waitForLayoutFlush` 呼び出し**を数えていました。この規模になると、「このスペックは残り76件と同じように起動しているか？」は、読んで答えるのがすでに難しい問いです。セットアップのサーフェスが2つあれば、カバレッジは倍にならないまま、この問いだけが倍になります。
+
+### 小さい方のサーフェスを大きい方へ畳み込む
+
+1. **それぞれのサーフェスの消費者を棚卸しする。** 数えるのは呼び出し箇所ではなくスペックファイルです — 実行もレビューもファイル単位で行うことになるからです。`grep -rl` を2回走らせればこの先のすべてを決める数字が出ますし、かかるのは1分です。
+2. **関数かクラスか、方向は消費者の数に選ばせる。** 101対11は設計論争ではなく、どれだけの移行を引き受けるかについての算術です。たとえもう一方の方が優れた抽象であっても、すでに多くの消費者が使っているサーフェスを選んでください — 好みに払う価値があるのは11件の移行であって、101件ではありません。
+3. **小さい方のサーフェスの有用なメソッドを、勝った側へ畳み込む。** クラスは純粋な無駄ではありませんでした。委譲するだけのメソッドはノイズですが、実際の振る舞いを持つもの — `selectVariant` や、関数モジュール側がついに育てなかったもの — は、そのクラスが存在した理由そのものです。それらは関数として移し、落とすのは委譲だけにしてください。
+4. **何かに手を付ける前に、両方をインポートしているスペックを探す。** 移行が実際に壊れるのはこの両方を使っているスペックであり、しかもどちらのサーフェスの消費者リストもそれを普通の消費者として1件計上するため、リストを眺めているかぎり見えません。
+5. **移行したすべての消費者を一括で走らせて緑にするまで、古いモジュールを削除しない。** 古いモジュールがまだツリーに残っている間なら、移行漏れは新しい経路の上で大きな音を立てて失敗します。削除したあとでは、同じ間違いは無関係なファイルの解決エラーとして — あるいはもっと悪いことに、どのプロジェクトにも静かに一致しなくなり、二度と実行されないスペックとして — やってきます。
+
+```bash
+# Steps 1 and 4: consumer counts per surface, then the specs importing BOTH.
+grep -rl "helpers/composer" e2e --include="*.spec.ts" | wc -l
+grep -rl "ComposerPageObject" e2e --include="*.spec.ts" | wc -l
+grep -rl "ComposerPageObject" e2e --include="*.spec.ts" \
+  | xargs grep -l "helpers/composer"
+```
+
+```bash
+# Step 5: every migrated spec, in one batch, while the old module still exists.
+npx playwright test $(git diff --name-only main...HEAD -- 'e2e/**/*.spec.ts')
+```
+
+<Warning>
+
+**移行を隠すためだけに3つ目の抽象を導入してはいけません。** ステップ3で誘惑してくるのは、古い2つのサーフェスの両方から呼べる中立のラッパーです — 今日はどの消費者も変えなくて済む、というわけです。しかしこれは、終わりのある畳み込みを恒久的な3サーフェス体制へ変えてしまいます：準備完了の変更はラッパーへ着地しはじめ、元の2つのサーフェスは削除を強制するものがもう何もないためツリーに残り、閉じようとしていたドリフトは隠れ場所を1つ増やします。畳み込みが完了するのはモジュールが**削除された**ときであって、モジュールが1つ増えたときではありません。
+
+</Warning>
+
+### 準備完了のはしごは1つ、記述も1箇所
+
+畳み込みが守っているのは、起動・ナビゲーション・準備完了の契約です。そしてその契約は、正となるモジュールの中に置かれた1つの順序付きのはしごとして書き出す価値があります：
+
+```typescript
+// e2e/helpers/composer.ts -- one ladder, one file, after the fold
+export async function openComposerWithTemplate(page: Page, template: string) {
+  await page.goto(`/composer?template=${template}`); // 1. navigate
+  await expect(page.getByTestId("app-shell")).toBeVisible(); // 2. shell mounted
+  await expect(page.getByTestId("step-rail")).toBeVisible(); // 3. domain ready
+}
+```
+
+1度だけ書かれていれば、準備完了の変更はすべての消費者が継承する1つの差分になり、レビューの問いは「このスペックは2つのはしごのどちらを受け取ったのか？」ではなく「このはしごは正しいか？」になります。ナビゲーションを明示的な段としてはしごに残しておくことには、もう1つ理由があります：それは[テストごとのフィクスチャ起動に値札を付ける](#テストごとのフィクスチャ起動に値札を付ける)が、人が事故で消してしまうと示したステップであり、どこにも書かれていない段は、レビューで誰も守らない段だからです。
+
+<Note>
+
+**実例。** pgenのWave-4統合はこの畳み込みを実行しました：クラスの有用なメソッドは関数ヘルパーのモジュールへ移り、競合していたフィクスチャのモジュールは取り除かれ、`e2e/helpers/composer.ts` が正となるセットアップサーフェスになりました。それを検証したのは、畳み込み後の選択件数を、プロジェクトごとにテスト数/ファイル数として読んだ数字です — **default 178/63、heavy 104/36、GPU 167/38、all-selected 449/129**。件数は、畳み込みが消費者を移したのであって失ったのではないことを確かめるチェックです：どこかのプロジェクトの選択からスペックが静かに落ちる移行は、欠けたカバレッジが問題になるその瞬間まで、きれいで速くなったスイートとして読めてしまいます。始める前に記録し、合計ではなくプロジェクトごとに比較し、説明のつかない減少は[いずれのプロジェクトにも一致しないスペックを防ぐ](#いずれのプロジェクトにも一致しないスペックを防ぐ)がゼロを扱うのと同じように扱ってください。
+
+</Note>
+
 ## シャードCIラン
 
 大規模なテストスイートの場合、複数のCIランナーにシャードします：
