@@ -38,6 +38,12 @@ The enforceable agent rules around graduation -- verification specs are tagged a
 | T3 | Scheduled re-exam | opt-in | heavy, environment/platform-bound, or external-dependency-drift tests on a schedule; runner matches the trigger -- capable hardware for heavy/platform-bound (hosted macOS on Apple silicon; self-hosted runner only as escalation), plain ubuntu matching T1 for external-dependency drift; `workflow_dispatch` for on-demand pre-merge runs; deduped issue filing on failure; also where quarantined `@flaky` tests run allowed-to-fail |
 | T4 | Local heavy lane | opt-in | only for genuinely CI-impossible lanes; split into a bounded fast pre-push pass (`b4push`, 5–10 min) and an opt-in platform-gated heavy run (`exam`); convenience, not enforcement |
 
+<Note>
+
+**A publish-only gate has no tier at all.** A lifecycle hook that fires only on `npm publish` -- `prepack`, `prepublishOnly` -- sits outside all five: nothing exercises it between releases, so it rots unnoticed and its first real execution happens inside an irreversible release. The answer is not a sixth tier but to give it one of these, by extracting the hook body into a named script that a PR job also calls -- see [Publish-Only Gates Are a Lane No Tier Runs](../ci-operations/publishing-pipeline.mdx#publish-only-gates-are-a-lane-no-tier-runs).
+
+</Note>
+
 ### T0 + T1: the defaults
 
 Every project gets T0 and T1, no justification needed. T0 is feedback speed -- what the agent runs constantly while implementing. T1 is **the authoritative gate**: a PR is mergeable when its required checks are green, and nothing outside the required checks blocks a merge. Everything above T1 exists to serve it, not to replace it.

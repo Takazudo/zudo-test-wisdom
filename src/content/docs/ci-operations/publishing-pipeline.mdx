@@ -1,12 +1,123 @@
 ---
-title: Publishing-Pipeline Verification for Platform-Binary npm Packages
-description: Publish-time gates for the esbuild-style meta + per-platform optionalDependencies layout -- silent skips on unpropagated tarballs, stripped executable bits, and the double-PUT publish race, three failure modes the nightly registry drift net cannot see.
+title: Publishing-Pipeline Verification
+description: The publish pipeline is a test lane no execution tier exercises -- lifecycle hooks that run only at publish time rot until a release fails on them, and a local heavy lane on a different toolchain than CI is blind by construction. Platform-binary packages add three transport failure modes on top.
 sidebar_position: 5
 ---
 
+A publish is the one pipeline stage that cannot be undone. A red check, a failed deploy, a bad build are all retryable; a version pushed to npm is permanent, and a multi-package release that dies halfway leaves the registry in a state no re-run fully repairs. That makes the publish pipeline worth verifying as a lane in its own right.
+
+This page covers it in two parts. The first is package-shape-agnostic and applies to any repo that publishes anything: gates that run only at publish time, and the toolchain gap that hides them from your local heavy lane. The second is the special case of packages that ship platform binaries, where three transport-level failure modes live between `pack` and a working install.
+
+## Publish-Only Gates Are a Lane No Tier Runs
+
+The [execution tier model](../decision-guide/execution-tiers.mdx) covers five places a test can run: the local fast pass (T0), the PR gate (T1), a split e2e suite (T2), a scheduled re-exam (T3), and the local heavy lane (T4). A lifecycle hook that runs only on `npm publish` sits outside all five. `prepack`, `prepublishOnly`, and their siblings fire on the release path and nowhere else, so nothing exercises them between releases. They rot silently, and the rot surfaces at the moment it costs the most.
+
+The shape is easy to miss, because the hook looks like a gate. In one repo, a package's `prepack` chained fifteen `check-*.mjs` contract guards plus a codegen drift check -- a serious verification suite by any measure. Grepping every workflow file and the local heavy lane for those fifteen script names returned **zero hits**. Their first-ever execution was inside a three-package lockstep publish driven by an autonomous release script: v5.6.1 died halfway through, one package already on npm and the other two stranded. A rotted check in that position reds a **release**, not a PR.
+
+<Warning>
+
+"Add a pack/publish check" is the standard advice for an npm-library repo, and it is good advice. What it omits is that the check you just added now lives in the one lane nothing runs. A gate that has never executed is not a gate -- it is an untested script whose only trigger is the next release.
+
+</Warning>
+
+### One definition, two callers
+
+The rule: **any lifecycle hook that runs only on publish must have a CI job invoking the same script under a different name.** Do not copy the hook's commands into a workflow -- that is a second definition, free to drift from the first. Extract the hook body into one named script, have the hook delegate to it, and call that same script from a PR job.
+
+```json
+{
+  "scripts": {
+    "check:prepack-contract": "node scripts/check-prepack-contract.mjs",
+    "prepack": "pnpm run check:prepack-contract"
+  }
+}
+```
+
+The release path and the PR gate are now two callers of one definition. A guard added to `check-prepack-contract.mjs` is exercised on the next PR instead of the next release, and the hook cannot quietly gain a step that CI does not run.
+
+### Make the real lifecycle path run on every PR
+
+Calling the named script proves the script works. It does not prove the *hook* works -- a typo in the `prepack` key, a package manager that fires a different hook set, or a `files` field that omits the script all break the release path while the direct call stays green. Run a pack in CI so the actual lifecycle path executes:
+
+```yaml
+# .github/workflows/pr.yml (excerpt) -- the publish-only gates, pulled into T1.
+jobs:
+  publish-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # One declaration of the toolchain major, read by CI and local dev alike.
+          node-version-file: .nvmrc
+      - run: pnpm install --frozen-lockfile
+
+      # 1. The named script the prepack hook delegates to -- the direct call.
+      - run: pnpm run check:prepack-contract
+
+      # 2. The real lifecycle path: `pack` fires `prepack`, so a green here
+      #    proves the hook itself, not a re-implementation of it.
+      - run: pnpm pack --dry-run
+
+      # 3. `prepublishOnly` is NOT fired by pack -- its commands are mapped to
+      #    CI steps explicitly. Keep these in sync with the hook.
+      - run: pnpm build
+      - run: pnpm test
+```
+
+`pnpm pack --dry-run` (or `npm pack --dry-run`) assembles the tarball the registry would receive and discards it. It costs seconds, needs no registry credentials, and fires `prepack` for real.
+
+### `prepublishOnly` is not triggered by a pack
+
+The two hooks are not symmetric, and the asymmetry is the part that gets missed:
+
+| Hook | Fired by `pack` | Fired by `publish` | How a PR job covers it |
+|---|---|---|---|
+| `prepack` | yes | yes | `pack --dry-run` in CI runs it for real |
+| `prepublishOnly` | **no** | yes | no lifecycle path reaches it -- map its commands to CI steps by hand, and write the mapping down |
+
+A pack-based PR job therefore covers `prepack` and nothing else. If `prepublishOnly` is `pnpm build && pnpm test`, the PR gate very likely runs both already -- and "very likely" is exactly the failure. Write the mapping into the workflow as a comment beside the steps standing in for the hook (step 3 above), so the next person adding a command to `prepublishOnly` can see where its CI counterpart belongs.
+
+## A Local Heavy Lane Must Run CI's Runtime
+
+The second half of the same incident explains why nobody saw it coming. The affected repo pinned `node-version: 22` at **21 separate workflow sites** and declared no local Node version anywhere -- no `.nvmrc`, no `.node-version`, no root `engines`. Local development ran Node 24 with npm 11. The behavior that killed the release was an npm 10 bug, fixed in npm 11.
+
+So the [T4 local heavy lane](../decision-guide/execution-tiers.mdx) ran the exact suite that later failed on the release path, and passed -- **not by luck, but by construction**. It was executing a toolchain in which the bug did not exist. No number of local re-runs could have surfaced it, and the same blindness covers anything else runtime-dependent.
+
+<Danger>
+
+A local heavy lane that runs a different toolchain major than CI is blind to runtime-dependent behavior **by construction**. It proves the code, not the environment. A green lane on Node 24 says nothing about a CI leg pinned to Node 22, and the gap is invisible from both ends: both lanes are green, and neither reports which runtime produced that green.
+
+</Danger>
+
+The structural fix is cheap -- declare the version once and make both sides read it:
+
+```yaml
+# Before: every workflow pins its own number, and nothing declares the local one.
+- uses: actions/setup-node@v4
+  with:
+    node-version: 22
+
+# After: .nvmrc at the repo root holds the major; nvm and setup-node both read
+# it, so the two sides cannot silently diverge.
+- uses: actions/setup-node@v4
+  with:
+    node-version-file: .nvmrc
+```
+
+The count is what makes this structural rather than cosmetic. At 21 pinned sites, keeping the numbers aligned by hand is a losing game and a new workflow silently opts out of the convention; with `node-version-file`, a new workflow cannot introduce a divergence, and bumping the major is one edit that moves CI and local dev together.
+
+<Note>
+
+This is adjacent to but distinct from **burn-in proves determinism, not CI-capability** in the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx). That one is about test *flakiness* differing across environments -- repetition on your machine cannot prove the test is stable on CI's. This one is about the *toolchain itself* differing: the code under test takes a different path, and no amount of repetition changes which path your local runtime takes.
+
+</Note>
+
+## The Platform-Binary Special Case
+
 A CLI shipped the esbuild way -- one meta package plus a set of per-platform binary packages resolved through `optionalDependencies` -- has a verification surface that neither the PR gate nor the nightly registry drift net can see: **the publish pipeline itself**. The PR gate installs from a lockfile, so it never resolves against the live registry. The [nightly drift net](./scheduled-re-exam.mdx) does resolve against the registry, but it runs once a day, on one platform, and it only ever exercises install-and-build. Between them sits an unverified gap -- `pack`, `publish`, and CDN propagation -- where three distinct failure modes live, each silent, each a property of the npm registry and client rather than of any one project.
 
-This page documents those three failure modes and the publish-time gate that closes each. The patterns are the standard ones (esbuild, swc, Biome, and Turborepo all ship binaries this way), so the gates generalize to any project distributing platform binaries through npm.
+The rest of this page documents those three failure modes and the publish-time gate that closes each. The patterns are the standard ones (esbuild, swc, Biome, and Turborepo all ship binaries this way), so the gates generalize to any project distributing platform binaries through npm.
 
 ## The Package Shape
 
@@ -151,7 +262,11 @@ This one is not a test -- it is a robustness property of the publish script. The
 
 ## Where These Sit in the Tier Model
 
-These are **release-pipeline gates**: they run once per publish, and they alert or block right at the moment the bug would otherwise ship. That makes them a different animal from the [nightly registry drift net](./scheduled-re-exam.mdx), which runs on a schedule, on one platform, and exercises install-and-build. The drift net is the scheduled cousin of these gates -- it catches a registry-side regression eventually and on one arch; these gates catch a *publish-side* regression immediately and across every platform. Failure mode 3 makes the boundary concrete: the drift net structurally cannot see a lost-ACK race at all, because that failure happens inside the publish step, before there is anything to install.
+The two halves of this page get different answers, and the difference is worth stating plainly.
+
+The publish-only lifecycle gates have no tier because they are in the wrong place, and the remedy is to move them rather than to invent a tier for them. Once `check:prepack-contract` runs on every PR, it is an ordinary T1 check that happens to also fire on release -- it stops being publish-only, and the untiered lane disappears.
+
+The three transport failure modes above cannot be moved that way. Nothing about tarball propagation, file modes inside a packed archive, or a lost publish ACK exists before there is a real release to observe, so these stay where they are. They are **release-pipeline gates**: they run once per publish, and they alert or block right at the moment the bug would otherwise ship. That makes them a different animal from the [nightly registry drift net](./scheduled-re-exam.mdx), which runs on a schedule, on one platform, and exercises install-and-build. The drift net is the scheduled cousin of these gates -- it catches a registry-side regression eventually and on one arch; these gates catch a *publish-side* regression immediately and across every platform. Failure mode 3 makes the boundary concrete: the drift net structurally cannot see a lost-ACK race at all, because that failure happens inside the publish step, before there is anything to install.
 
 The post-publish clean-room smoke -- `npx create-my-cli@<tag>` in a fresh temp directory, build a scaffold, assert the output -- sits in a third position again. It is an **alerting guard, not a gate**: by the time it runs, publish has already happened, so it cannot *prevent* a bad release, only detect one that already shipped. Wire its failures into the same [one-tracking-issue-per-workflow](./scheduled-re-exam.mdx) pattern the drift net uses, so a broken release opens exactly one tracking issue and closes it when the next release goes green.
 
