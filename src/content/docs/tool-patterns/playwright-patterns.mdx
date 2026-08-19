@@ -1017,6 +1017,94 @@ So the removal is a decomposition, not a deletion: keep the navigation, drop onl
 
 </Note>
 
+## One Canonical Setup Abstraction per Domain
+
+The section above prices one setup helper. This one is about the suite that has **two** of them for the same domain, both defensible, neither obviously wrong.
+
+Both halves arrive honestly. Function helpers come first because they are the cheapest thing to write, and consumers accumulate against them — 101 of them in the audited suite. A PageObject class arrives later because a class reads better for multi-step flows, and it collects 11. Crucially, the class does not reimplement boot; it **delegates** to the function helper. That delegation is what makes the arrangement look safe: one boot path, two spellings of it.
+
+The delegation is exactly why it is not safe. The two surfaces are equivalent only across the part the class forwards, and drift enters through the part it does not.
+
+```typescript
+// e2e/helpers/composer.ts -- surface A, 101 consumers
+import { Page, expect } from "@playwright/test";
+
+export async function openComposerWithTemplate(page: Page, template: string) {
+  await page.goto(`/composer?template=${template}`);
+  await expect(page.getByTestId("step-rail")).toBeVisible();
+}
+```
+
+```typescript
+// e2e/fixtures/composer-page-object.ts -- surface B, 11 consumers, boot delegated to A
+import { Page } from "@playwright/test";
+import { openComposerWithTemplate } from "../helpers/composer";
+
+export class ComposerPageObject {
+  constructor(private readonly page: Page) {}
+
+  async open(template: string) {
+    await openComposerWithTemplate(this.page, template); // delegation -- the shared half
+  }
+
+  async selectVariant(name: string) {
+    await this.page.getByRole("tab", { name }).click(); // behavior -- the unshared half
+  }
+}
+```
+
+Add a readiness step to surface A — wait for the canvas to paint, not just for the step rail — and every class consumer inherits it too. Add the same step to `ComposerPageObject.open` instead, because that is the file you happened to have open, and the 101 function consumers do not. Either way the review saw one correct-looking diff. Specs that import **both** styles are worse still: their boot contract depends on which call runs first, which is a property of the spec's line order rather than of anything anyone decided.
+
+The cost of leaving both surfaces standing is a review cost, and it scales with the suite. The same audit that priced the boot helper counted **77 boot-helper calls across 35 spec files** and **460 `waitForLayoutFlush` calls**. At that size, "does this spec boot the way the other 76 do?" is already hard to answer by reading. Two setup surfaces double the question without doubling the coverage.
+
+### Folding the Smaller Surface into the Larger
+
+1. **Inventory the consumers of each surface.** Count spec files, not call sites — the file is the unit you will have to run and review. Two `grep -rl` passes produce the numbers that decide everything after this, and they cost a minute.
+2. **Let consumer count choose the direction, function or class.** 101 versus 11 is not a design debate; it is arithmetic about how much migration you are signing up for. Pick the surface most consumers already use, even when the other one is the nicer abstraction — taste is worth 11 migrations, not 101.
+3. **Fold the smaller surface's useful methods into the winner.** The class was not pure overhead. Its delegating methods are noise, but the ones carrying real behavior — `selectVariant`, and whatever else the function module never grew — are the reason it existed. Move those across as functions and drop only the delegation.
+4. **Search for the dual importers before you touch anything.** Specs using both styles are where the migration actually breaks, and they are invisible in either surface's own consumer list because each list counts them as a normal consumer.
+5. **Batch-run every migrated consumer green _before_ deleting the old module.** While the old module is still in the tree, a missed migration fails loudly on the new path. Once it is deleted, the same mistake arrives as a resolution error in an unrelated file — or worse, as a spec that quietly stops matching its project and is never run again.
+
+```bash
+# Steps 1 and 4: consumer counts per surface, then the specs importing BOTH.
+grep -rl "helpers/composer" e2e --include="*.spec.ts" | wc -l
+grep -rl "ComposerPageObject" e2e --include="*.spec.ts" | wc -l
+grep -rl "ComposerPageObject" e2e --include="*.spec.ts" \
+  | xargs grep -l "helpers/composer"
+```
+
+```bash
+# Step 5: every migrated spec, in one batch, while the old module still exists.
+npx playwright test $(git diff --name-only main...HEAD -- 'e2e/**/*.spec.ts')
+```
+
+<Warning>
+
+**Do not introduce a third abstraction merely to hide the migration.** The tempting move at step 3 is a neutral wrapper that both old surfaces can call, so no consumer has to change today. It converts a bounded fold into a permanent three-surface arrangement: readiness changes start landing on the wrapper, the two original surfaces stay in the tree because nothing forces their removal any more, and the drift you set out to close gains a third place to hide. A fold is finished when a module is **deleted**, not when one is added.
+
+</Warning>
+
+### One Readiness Ladder, Stated Once
+
+What the fold protects is the boot/navigation/readiness contract, and that contract is worth stating as a single ordered ladder living in the canonical module:
+
+```typescript
+// e2e/helpers/composer.ts -- one ladder, one file, after the fold
+export async function openComposerWithTemplate(page: Page, template: string) {
+  await page.goto(`/composer?template=${template}`); // 1. navigate
+  await expect(page.getByTestId("app-shell")).toBeVisible(); // 2. shell mounted
+  await expect(page.getByTestId("step-rail")).toBeVisible(); // 3. domain ready
+}
+```
+
+Stated once, a readiness change is one diff that every consumer inherits, and the review question becomes "is this ladder right?" rather than "which of the two ladders did this spec get?" Keeping navigation on the ladder as an explicit rung matters for a second reason: it is the step [Price the Per-Test Fixture Boot](#price-the-per-test-fixture-boot) shows people deleting by accident, and a rung nobody wrote down is a rung nobody defends in review.
+
+<Note>
+
+**The worked case.** The pgen Wave-4 consolidation ran this fold: the class's useful methods moved into the function-helper module, the competing fixture module was removed, and `e2e/helpers/composer.ts` became the canonical setup surface. What validated it was the post-fold selected counts, read per project as tests/files — **default 178/63, heavy 104/36, GPU 167/38, all-selected 449/129**. Counts are the check that the fold moved consumers rather than losing them: a migration that quietly drops specs out of a project's selection reads as a clean, faster suite, right up until the missing coverage matters. Record them before you start, compare per project rather than in aggregate, and treat an unexplained drop the way [Guard against specs that match no project](#guard-against-specs-that-match-no-project) treats a zero.
+
+</Note>
+
 ## Sharded CI Runs
 
 For large test suites, shard across multiple CI runners:
