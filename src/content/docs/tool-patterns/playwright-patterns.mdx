@@ -802,6 +802,168 @@ A boot stagger (delaying each fixture's start by a few seconds) narrows this rac
 
 See also the native-suite "Port races (`EADDRINUSE`)" entry in the [Flake Root-Cause Catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog) — same root cause, a fixed port shared across parallel processes, here specific to a dev-server's non-obvious secondary socket rather than its primary one.
 
+## `fullyParallel` Defaults to False — the Mega-File Tail
+
+The `workers` value decides how many parallel lanes a run has. **`fullyParallel` decides what is allowed into them, and its default is narrower than most people assume: it is `false`, which parallelizes across _files_ while serializing every test _within_ a file onto a single worker.** The unit of concurrency is the file, not the test.
+
+That makes the suite's wall clock a maximum, not a division:
+
+```text
+critical path = max(slowest single file, total test time ÷ workers)
+```
+
+Only the second term responds to buying cores. The first does not move at all — so once `total ÷ workers` drops below the slowest file, **every additional worker buys nothing**, and the suite's floor is one file's runtime.
+
+A real suite with 46 minutes of aggregate test time, whose top two files ran 10:08 and 9:41:
+
+```text
+2 workers:  max(10:08, 46:00 ÷ 2 = 23:00)  =  23:00   ← the division dominates
+4 workers:  max(10:08, 46:00 ÷ 4 = 11:30)  =  11:30   ← nearly a tie
+8 workers:  max(10:08, 46:00 ÷ 8 =  5:45)  =  10:08   ← the file is the floor
+```
+
+Somewhere between four and eight workers this suite stops being worker-bound and becomes file-bound. Paying for the bigger runner past that point buys the doubled per-minute rate and almost no wall clock — the failure [CI Runner Sizing Rule 1](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-1-a-bigger-runner-is-a-latency-lever-not-a-cost-lever) warns about, arriving here through a config default rather than an explicit `workers` cap.
+
+<Warning>
+
+**Consolidating tests into fewer files makes this worse, and consolidation is otherwise good hygiene.** Merging six related specs into one parametrized mega-file removes duplicated setup, shortens the file list, and reads better — and it raises the first term of that max. A refactor that looks purely organizational can lift the suite's floor without touching a single assertion or worker count. If your repo has been trending toward large parametrized spec files, read the per-file durations before concluding the suite is worker-bound.
+
+</Warning>
+
+The lever is `fullyParallel`, suite-wide or per file:
+
+```typescript
+// playwright.config.ts -- every test becomes its own unit of concurrency
+export default defineConfig({
+  fullyParallel: true,
+});
+```
+
+```typescript
+// e2e/checkout-flow.spec.ts -- opt one genuinely coupled file back OUT
+import { test } from "@playwright/test";
+
+// These tests build on a cart seeded by the first one and must run in order.
+test.describe.configure({ mode: "serial" });
+```
+
+The inverse works too, while the config default stays `false`: `test.describe.configure({ mode: "parallel" })` inside a single mega-file splits just that file across workers. That is the smaller, more targeted move when exactly one or two files are the tail.
+
+### Flip It as an Experiment, Not as a Recommendation
+
+`fullyParallel: true` is not a settings improvement to apply on sight. It removes an ordering guarantee the suite has been getting for free — tests inside a file were running one at a time in source order, whether or not anyone intended that — and any test quietly depending on it starts failing intermittently rather than loudly.
+
+So run it as a matched experiment, and hold the result to **two accept criteria, both of which must pass**:
+
+1. **Wall clock.** The after-side **maximum** critical-path job time must sit under the ceiling you gate on. Compare maxima, not medians: the slowest attempt is what a PR author actually waits for.
+2. **Retries.** Retry counts and retry markers must not rise. A flip that buys wall clock by spending retry budget has bought nothing — it has converted a measurable cost into an unmeasurable one.
+
+Keep the experiment honest with the usual controls: change exactly one line, hold the lockfile, runner shape, shard matrix and selected test count fixed, take no serial opt-outs on the first pass, and run at least five attempts per side. One attempt per side measures noise.
+
+### The Counter-Case: Under the Ceiling and Still Rejected
+
+A 178-test consolidated suite (Playwright 1.59.1, two CI workers on a four-vCPU runner, fixed three-shard matrix) ran exactly that experiment — one line changed, five attempts before and five after, same selected count, no serial opt-outs:
+
+| sample | per-attempt max job seconds | median / max |
+|---|---|---|
+| before | 365, 441, 380, 313, 350 | 365s / 441s (7m21s) |
+| after | 331, 484, 362, 423, 364 | 364s / 484s (8m04s) |
+
+**Wall-clock criterion: passed.** The after-side maximum, 484s (8m04s), stayed under the 9m24s ceiling. Note what "passed" does and does not mean here — the median moved 365s → 364s and the maximum moved 441s → 484s, so the flip bought no measurable speed at all. It merely failed to break the budget.
+
+**Retry criterion: failed.** Explicit retry markers rose from 2 total to 4 total, and median retries per attempt went 0 → 1.
+
+The natural next move — exempt the offending files with `mode: "serial"` and re-run — had no target. The markers were generic `command-palette-nested-pick.spec.ts` noise that recurred on **both** sides, plus one `composer-overlay-crisp-862.spec.ts` occurrence. No repeated ordering or shared-state signature pointed at a specific file, so there was no principled set of files to exempt.
+
+`fullyParallel` was restored to `false`. That is the mechanical rule working as designed: two criteria, one passed, one failed, so the change does not land. The temptation at that moment is to accept anyway — it is under the ceiling, and four retry markers across five attempts look like noise — which is precisely how a suite acquires a retry budget nobody chose. A retry that CI absorbs is still a failure the zero-retry local gate will surface; see [Quarantining Flakes: The Retries-Asymmetry Trap](#quarantining-flakes-the-retries-asymmetry-trap).
+
+<Note>
+
+**Rejected here is not rejected forever.** The result says this suite, at this test count, on this runner shape, did not have the intra-file tail the lever exists to cut — its 178 tests already spread across enough files that per-file serialization was not the binding constraint. The arithmetic at the top of this section is what tells you when to re-run the experiment: after a consolidation refactor, after a large new parametrized spec lands, or after a worker-count increase pushes `total ÷ workers` below the slowest file's duration.
+
+</Note>
+
+## Price the Per-Test Fixture Boot
+
+A slow suite gets investigated as "which test is slow?" — a report sorted by per-test duration, worst offenders first. That question structurally cannot find the largest line item in many suites, because the largest line item is **uniform**. Setup that every test pays does not show up as an outlier; it raises the baseline everywhere by the same amount, which reads as "the app is just slow."
+
+Price it directly instead:
+
+```text
+fixture cost = per-invocation cost × invocation count
+```
+
+Two shapes of this are worth pricing separately.
+
+An **isolation helper** in `beforeEach` — `goto("/")` → clear `localStorage`/`sessionStorage` → `reload()` — costs **two full application boots per test** that the test never asked for: roughly 1,132 avoidable boots across a single run. It stays invisible in a per-test profile precisely because every test pays it equally.
+
+A **setup helper** gets priced by the same arithmetic, with numbers you can actually measure. One representative test ran 32.8s of Playwright wall time (34.33s outer); a DEBUG rerun attributed about 10.1s of that to the helper's boot portion — roughly 7.0s navigation plus 2.0s waiting for a step rail to become visible. A static audit found 77 call sites across 35 spec files:
+
+```text
+10.1s per call  ×  77 call sites  =  777.7s  =  13.0 serial minutes
+```
+
+<Warning>
+
+**That is a component price, not a wall-clock prediction.** 777.7s is the serial-equivalent cost of one component; the suite runs across multiple workers and multiple shards, which overlap, so removing the component does not subtract 13 minutes from the run. The number's job is **ranking** — it says this single helper outweighs every individual slow test in the suite, which no per-test profile would ever have surfaced. Predict wall clock by measuring a before/after run, never by subtracting a component price.
+
+</Warning>
+
+### Check Whether the Clear-Helper Is Cargo Cult
+
+Playwright's default `page` fixture already hands every test a **fresh `BrowserContext`**: its own cookie jar, its own `localStorage` and `sessionStorage`, both empty. Storage does not bleed between tests unless you deliberately arranged for it to — a worker-scoped context reused across tests, a context you created by hand, a `storageState` you loaded on purpose. A `beforeEach` that clears storage on the default fixture is clearing something that was already empty.
+
+Such helpers arrive honestly. They get written against a same-context assumption carried in from another harness, copied wholesale from a project that genuinely did reuse contexts, or added while chasing a flake and kept afterwards because the flake stopped. None of those origins is legible in the code, and by the time anyone asks, the helper has 77 call sites.
+
+The cheap experiment answers the question before you build anything:
+
+```bash
+# Delete the clear step, then run only the specs most likely to have depended on it.
+npx playwright test e2e/seed-heavy-*.spec.ts --repeat-each=3
+```
+
+Target the seed-heavy specs — the ones that write storage — not the whole suite; you want a fast answer, not a nightly. Green across repeats means the clear was cargo cult, and the answer cost one command. Building an `addInitScript` fixture to do the clearing "properly" costs a day and answers a question you never confirmed you had.
+
+### The Trap: The Helper's `goto` Is Often the Spec's Only Navigation
+
+"Just remove the helper" is where this goes wrong, because these helpers navigate:
+
+```typescript
+// e2e/helpers/isolation.ts
+import { Page } from "@playwright/test";
+
+export async function resetApp(page: Page) {
+  await page.goto("/"); // boot #1 -- and the spec's ONLY navigation
+  await page.evaluate(() => localStorage.clear());
+  await page.reload(); // boot #2
+}
+```
+
+```typescript
+// e2e/settings.spec.ts -- note the absence of any goto of its own
+import { test, expect } from "@playwright/test";
+import { resetApp } from "./helpers/isolation";
+
+test.beforeEach(async ({ page }) => {
+  await resetApp(page);
+});
+
+test("saves the theme", async ({ page }) => {
+  await page.getByRole("button", { name: "Dark" }).click();
+  await expect(page.getByTestId("theme")).toHaveText("dark");
+});
+```
+
+Delete `resetApp` and this spec never navigates anywhere. It fails on `about:blank` with a locator timeout that looks nothing like "you removed a storage clear," and the same failure lands in every spec that inherited the habit. **The navigation side effect is the de facto contract**, whatever the helper is named for.
+
+So the removal is a decomposition, not a deletion: keep the navigation, drop only the step you priced.
+
+<Note>
+
+**Some seeding steps are the test.** Telling those apart from the dead weight is the whole job, and the pricing arithmetic does not do it for you. In the worked case, the sidebar-migration specs deliberately seed stale storage and reload in order to exercise the migration path — for them, seed-and-reload is the setup the assertion depends on, and those steps stayed. The same audit's 460 `waitForLayoutFlush` calls were likewise not mass-deleted on the strength of the arithmetic: each removal needs a green run of its affected batch first, which is the ratchet described in [Ratcheting Down Wait Debt](#ratcheting-down-wait-debt) above. Price a component to decide what to **investigate**; prove each individual removal with a run.
+
+</Note>
+
 ## Sharded CI Runs
 
 For large test suites, shard across multiple CI runners:
