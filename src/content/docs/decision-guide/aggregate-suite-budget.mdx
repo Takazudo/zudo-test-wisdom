@@ -56,7 +56,7 @@ With a price, every suite decision is quotable in the currency the gate is actua
 
 - **Adding a spec file with 30 tests** costs ~294 worker-seconds — about 2.5 minutes of wall clock at two workers. That is a number a reviewer can weigh against the assertion.
 - **The 566 → ~370 plan** removes 196 tests: ~1,920 worker-seconds, ~16 minutes of wall clock recovered at two workers. The plan stops being "let's clean up the e2e suite" and becomes a 16-minute line item.
-- **A merge that folds 12 tests into 1** removes 11 tests' worth of per-test overhead — about 108 worker-seconds. If the merge takes an hour to do safely and the suite is nowhere near its budget, the price says do not bother.
+- **A merge that folds 12 tests into 1** recovers at most 11 tests' worth of unit cost — about 108 worker-seconds when the merged tests shared their entire setup (a cluster-merge), and less when per-iteration work such as navigation survives the merge (a loop-collapse), because what a merge removes is the per-test overhead, not the assertions' own work. If the merge takes an hour to do safely and the suite is nowhere near its budget, the price says do not bother.
 
 <Warning>
 
@@ -223,15 +223,16 @@ A budget nobody measures is a preference. The mechanism has two halves, and neit
   if: always()
   run: |
     tests=$(jq '[.stats.expected, .stats.unexpected, .stats.flaky, .stats.skipped] | add' results.json)
+    secs=$(jq '.stats.duration / 1000 | round' results.json)
     {
       echo "| metric | value |"
       echo "|---|---|"
       echo "| e2e tests | ${tests} |"
-      echo "| step seconds | ${SECONDS} |"
+      echo "| suite seconds | ${secs} |"
     } >> "$GITHUB_STEP_SUMMARY"
 ```
 
-`SECONDS` restarts at zero in each `run:` block's shell, so it measures this step rather than the job. The point of putting it in the step summary rather than a log line is that drift is a trend: two numbers visible on every PR page make a slow climb legible without anyone running an analysis.
+The duration comes from the reporter's own `stats.duration` (milliseconds), not from the shell: `$SECONDS` restarts at zero in every `run:` block, so in this recording step it would time the `jq` calls — a permanently near-zero number — rather than the e2e step it is meant to track. The point of putting it in the step summary rather than a log line is that drift is a trend: two numbers visible on every PR page make a slow climb legible without anyone running an analysis.
 
 **Write the rule down, including the order of remedies.** Exceeding the budget triggers a prune or a consolidation — *never* a timeout increase first. Raising the timeout has to be named explicitly as forbidden-first, because it is available, silent, and it works: it converts a suite-size problem into a permanently more expensive gate and, worse, removes the only signal that would have prompted anyone to prune. It is the default move for a developer in a hurry and for an agent asked to make CI green.
 

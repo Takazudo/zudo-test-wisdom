@@ -94,6 +94,7 @@ The table at the top of this page starts from what you changed -- two of its row
 | Not sure whether to test against real D1 or a stub | [Backend & Node.js Testing § Mock the Binding, Not the Runtime](../project-recipes/backend-testing.mdx#mock-the-binding-not-the-runtime) |
 | CI is green, but the published artifact is broken | [Publishing-Pipeline Verification](../ci-operations/publishing-pipeline.mdx) |
 | A check that only ever runs at publish time (`prepack`, `prepublishOnly`) | [Publishing-Pipeline Verification § Publish-Only Gates Are a Lane No Tier Runs](../ci-operations/publishing-pipeline.mdx#publish-only-gates-are-a-lane-no-tier-runs) |
+| The PR gate is slow, but no single test is heavy | [Aggregate Suite Budget](./aggregate-suite-budget.mdx) |
 | A build that worked last month fails today with nothing in your own diff | [Scheduled Re-exam & Night Exam § T3 as an External-Dependency Drift Net](../ci-operations/scheduled-re-exam.mdx#t3-as-an-external-dependency-drift-net) |
 | It works on your machine but breaks on preview or production | [Environment-Tiered Testing Against Deployed Targets](../ci-operations/environment-tiered-testing.mdx) |
 | An absence assertion fails in CI only, and every positive assertion in the same test passes | [Negative Assertions vs. Their Own Fixture Data](../test-integrity/negative-assertion-fixtures.mdx) |
@@ -104,3 +105,4 @@ Picking the right testing level answers what the test can see. A second decision
 
 - [Execution Tiers](./execution-tiers.mdx) — defines T0 (inner loop) through T4 (local heavy lane), when each applies, and the migration rule for moving tests between tiers.
 - [Heavy Test Decision Rule](./heavy-test-decision.mdx) — the per-test procedure for a test that feels too heavy for PR CI: demote, delete, or classify by *why* it is heavy and assign the matching tier.
+- [Aggregate Suite Budget](./aggregate-suite-budget.mdx) — the suite-level half: when every test passes the per-test rules and the gate still drowns, price tests by unit cost and let budget drift trigger a prune.

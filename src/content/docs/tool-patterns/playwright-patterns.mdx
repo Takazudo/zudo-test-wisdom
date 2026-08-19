@@ -867,15 +867,16 @@ critical path = max(slowest single file, total test time ÷ workers)
 
 Only the second term responds to buying cores. The first does not move at all — so once `total ÷ workers` drops below the slowest file, **every additional worker buys nothing**, and the suite's floor is one file's runtime.
 
-A real suite with 46 minutes of aggregate test time, whose top two files ran 10:08 and 9:41:
+A real suite with 92 minutes of aggregate test time — the 46-minute two-worker step that [Aggregate Suite Budget](../decision-guide/aggregate-suite-budget.mdx) prices at 5,520 worker-seconds, converted back from wall clock to work — whose top two files ran 10:08 and 9:41:
 
 ```text
-2 workers:  max(10:08, 46:00 ÷ 2 = 23:00)  =  23:00   ← the division dominates
-4 workers:  max(10:08, 46:00 ÷ 4 = 11:30)  =  11:30   ← nearly a tie
-8 workers:  max(10:08, 46:00 ÷ 8 =  5:45)  =  10:08   ← the file is the floor
+ 2 workers:  max(10:08, 92:00 ÷  2 = 46:00)  =  46:00   ← the division dominates
+ 4 workers:  max(10:08, 92:00 ÷  4 = 23:00)  =  23:00   ← still the division
+ 8 workers:  max(10:08, 92:00 ÷  8 = 11:30)  =  11:30   ← nearly a tie
+16 workers:  max(10:08, 92:00 ÷ 16 =  5:45)  =  10:08   ← the file is the floor
 ```
 
-Somewhere between four and eight workers this suite stops being worker-bound and becomes file-bound. Paying for the bigger runner past that point buys the doubled per-minute rate and almost no wall clock — the failure [CI Runner Sizing Rule 1](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-1-a-bigger-runner-is-a-latency-lever-not-a-cost-lever) warns about, arriving here through a config default rather than an explicit `workers` cap.
+Somewhere between eight and sixteen workers this suite stops being worker-bound and becomes file-bound. Paying for the bigger runner past that point buys the doubled per-minute rate and almost no wall clock — the failure [CI Runner Sizing Rule 1](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-1-a-bigger-runner-is-a-latency-lever-not-a-cost-lever) warns about, arriving here through a config default rather than an explicit `workers` cap.
 
 <Warning>
 
@@ -1296,6 +1297,8 @@ e2e-full:
 ```
 
 The guard runs first and costs nothing. It earns its line because the failure it prevents is invisible: pointing both lanes back at `test-results/` produces a green workflow with a plausible-looking artifact attached.
+
+The `path:` here ships the raw output directories to keep the two-lane mechanic visible — do not copy it verbatim. On the measured numbers in the storage-cap subsection below, raw directories blow the storage allowance on their first failed run; keep the per-invocation `--output` split, but upload the self-contained HTML report instead.
 
 The latent form is worth naming. In the worked case `@flaky` matched zero specs, so nobody had ever lost evidence to it — which is the point rather than a reprieve. A quarantine lane that matches nothing today starts destroying traces on exactly the night a real nightly failure needs one. The T1 checklist line is one sentence: **if the job invokes Playwright more than once, give each invocation its own `--output`.**
 
