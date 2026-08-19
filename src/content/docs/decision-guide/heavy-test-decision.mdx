@@ -14,6 +14,12 @@ Every heavy test leaves this page through one of three exits:
 - **Demote** — rewrite the assertion at a lower testing level
 - **Delete** — remove the test and watch what happens
 
+<Note>
+
+**This page routes one heavy test.** When no single test is heavy — every spec is fast, untagged, and CI-safe — and the gate still drowns because there are hundreds of them, the failure mode is aggregate rather than per-test, and none of the rules below will ever fire. See [Aggregate Suite Budget](./aggregate-suite-budget.mdx) for the suite-level counterweight: unit-cost pricing, consolidation, and a budget that triggers a prune.
+
+</Note>
+
 <Warning>
 
 **A strategy that only finds homes for heavy tests will faithfully preserve tests that should die.** If the decision rule has no demote and delete branches, every slow, redundant, or worthless test gets carried into a scheduled tier and runs forever at real cost. Branch 0 exists to filter those tests out first.
