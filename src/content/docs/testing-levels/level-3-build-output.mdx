@@ -164,7 +164,7 @@ export function snapshotPackage(): string {
 
 </Warning>
 
-**Shape 2 -- hash the output, not only the input.** If you cache builds behind a freshness marker, include the built output in the key. A key derived from sources alone still matches when a concurrent writer truncated, half-wrote, or deleted the very artifact the marker vouches for -- the sources did not change, so the marker happily accepts a `dist/` that no longer exists in the state it describes. See [Mechanism 2: skip the rebuild when nothing changed](../decision-guide/execution-tiers.mdx#mechanism-2-skip-the-rebuild-when-nothing-changed) for the freshness-hash recipe this extends.
+**Shape 2 -- hash the output, not only the input.** If you cache builds behind a freshness marker, include the built output in the key. A key derived from sources alone still matches when a concurrent writer truncated, half-wrote, or deleted the very artifact the marker vouches for -- the sources did not change, so the marker happily accepts a `dist/` that no longer exists in the state it describes. See [Mechanism 2: skip the rebuild when nothing changed](../decision-guide/execution-tiers.mdx#making-t0-real-for-multi-fixture-e2e-mechanism-2-skip-the-rebuild-when-nothing-changed) for the freshness-hash recipe this extends.
 
 ### What a Guard Against This Can Honestly Claim
 
