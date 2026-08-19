@@ -114,9 +114,44 @@ Verification complete:
 - action needed: reviewer removes @verification tag and assigns tier
 ```
 
+#### 強制：タグが一度も付かなかったスペックを捕まえる
+
+上のステップが定めているのは、すでにタグを持つスペックの扱いです。タグが一度も付かなかったスペックについては何も語りません -- そして、そこが典型的な漏れ口です。自分の修正を証明しているエージェントには、そのスペックを「ただのテスト」以外のものとして考える理由がないからです。この失敗モードは[実行ティア](./execution-tiers.mdx#検証-vs-リグレッション-暗黙の昇格はタグ体系の下で起きる)で説明しています。以下のチェックは、その強制側の半分です。
+
+このチェックが名前パターンベースなのは意図的です。検証スペックのアサーションは本物でパスするため、アサーションのレベルではリグレッションテストと区別がつきません -- しかし**ファイル名**は、たいていの場合、それが書かれるきっかけとなった欠陥・反復回数・日付を、いまも指したままです。
+
+```sh
+#!/usr/bin/env sh
+# scripts/check-untagged-verification.sh -- run it in review, or as a CI step on the PR.
+# Flags specs whose NAME says "verification artifact" while they carry no @verification
+# tag: the ones the graduation rule above can never see.
+set -eu
+
+SPEC_GLOB='tests/*.spec.ts'  # git pathspec wildcards cross '/', so nested dirs are covered
+SMELL='(bugfix|verification|issue-[0-9]+|tweak-[0-9]|round-[0-9]|[0-9]{4}-[0-9]{2}-[0-9]{2})'
+
+found=0
+for spec in $(git ls-files "$SPEC_GLOB" | grep -E "$SMELL" || true); do
+  if ! grep -q '@verification' "$spec"; then
+    echo "untagged verification suspect: $spec"
+    found=1
+  fi
+done
+
+if [ "$found" -ne 0 ]; then
+  echo
+  echo "Each file above is named after a defect, an iteration, or a date, and runs in the gate."
+  echo "Either tag it @verification and drop it from the gate, or rename it after the behavior"
+  echo "it guards and record the graduation decision in the PR description."
+  exit 1
+fi
+```
+
+`SPEC_GLOB` はプロジェクトのスペックルートに、`SMELL` は実際に使われている命名規約に合わせて調整してください。このパターンは過剰検知するように作ってあります：誤検知のコストはリネーム1回で済みますが、見逃しのコストは、誰も払うと決めていないスペックがゲートに永久に居座り続けることです。
+
 <Note>
 
-検証アーティファクトと回帰ゲートの概念、および完全な昇格ライフサイクルは[実行ティア](./execution-tiers.mdx)ページにあります。このルールが定めるのはエージェントの強制可能な行動のみです：タグを付け、昇格を提案し、自己昇格しない。
+検証アーティファクトと回帰ゲートの概念、および完全な昇格ライフサイクルは[実行ティア](./execution-tiers.mdx)ページにあります。このルールが定めるのはエージェントの強制可能な行動のみです：タグを付け、昇格を提案し、自己昇格しない -- そして、そもそもタグが一度も付かなかったスペックを捕まえるチェック。
 
 </Note>
 
@@ -217,6 +252,7 @@ $ pnpm exec playwright test --grep "@gpu" tests/gpu-render.spec.ts
 - [ ] CSS/ビジュアルの変更にはレベル5を使用した
 - [ ] テストしたものとしなかったものを報告した
 - [ ] 新しい検証スペックには `@verification` タグが付いており、自己昇格していない
+- [ ] 欠陥名・反復回数・日付にちなんだ名前のスペックを、タグなしでゲートに追加していない
 - [ ] 自分のPRの赤いチェックはすべて解決済み、またはリンクされたissueを伴う `@flaky` タグがある
 - [ ] `test.skip`、`@flaky`、または許容値の緩和はリンクされたissueなしに導入していない
 - [ ] 変更がヘビーレーン専用のコードに触れる場合、対応可能なホスト上で関連するヘビースペックを実行した

@@ -28,6 +28,58 @@ Tests **graduate** from verification to regression **explicitly -- never by defa
 
 The enforceable agent rules around graduation -- verification specs are tagged and excluded from all gates, and an agent never promotes its own verification test -- live in [Required Testing Behavior](./required-behavior.mdx).
 
+### Silent graduation happens below the tag system
+
+The graduation rule above is written for specs that carry a `@verification` tag -- it fires when someone proposes removing that tag. **A spec that never entered the tag system is invisible to it.** No tag, no proposal, no decision: the spec simply runs, on every PR, forever.
+
+That is where the leak actually happens, and it is upstream of tagging entirely. An agent is asked to fix a bug, writes a spec to prove the fix worked, and drops that spec into the gate's spec directory untagged -- not to evade the rule, but because at authoring time it looks like an ordinary test. In one measured case the spec was a one-day UI-review checklist, whose whole job was to confirm that a specific afternoon's tweaks looked right. It billed every PR from every author for three months, re-answering a question that had been settled on day one.
+
+#### The tag census: a verification set that costs nothing is the tell
+
+Census the suite by tag and by cost at the same time, because either number alone looks healthy:
+
+```sh
+pnpm exec playwright test --grep "@verification" --list | tail -1        # tagged, excluded from gates
+pnpm exec playwright test --grep-invert "@verification" --list | tail -1 # what the gate actually runs
+```
+
+The measured case came back with **30 tagged `@verification` tests costing 0 CI-seconds** -- correctly excluded from every gate, exactly as the rule prescribes -- while the real verification artifacts sat untagged inside the gate, paying full price.
+
+Read that pairing as evidence, not as a clean bill of health. A tagged verification set with a near-zero share of gate time means the tag is landing on specs someone already meant to exclude; the specs that actually needed the rule never received it. **When your `@verification` tests cost nothing, look for the verification artifacts in the untagged set.**
+
+#### Naming smells: a spec named after a fix or a date
+
+Untagged verification artifacts are hard to spot by reading assertions, because the assertions are real and they pass. They are easy to spot by **name**, because a verification spec is named after the thing it was proving, while a regression gate is named after the behavior it guards:
+
+- **`bugfix-*-verification`, `fix-*.spec.ts`, `issue-1234.spec.ts`** -- named after a defect. Only a proof is named after the bug it disproves.
+- **`*-tweak-2.spec.ts`, `*-round-3.spec.ts`** -- an iteration counter is a workflow artifact. Nothing in the product is called "tweak 2".
+- **Date-stamped names (`ui-check-2026-03-14.spec.ts`)** -- a date says the spec was about a moment, and moments do not recur.
+- **Checklist-shaped titles** -- `test('everything on the settings page looks right')` carrying fifteen unrelated assertions is a review checklist transcribed into a runner.
+
+None of these is proof on its own. Each is enough to make the spec answer the graduation question it never had to answer.
+
+#### Sweep the gate on a schedule, not once
+
+Join three columns -- tag, name, cost -- and route the intersection through the graduation decision:
+
+```sh
+# 1. the gate's spec set: what runs when nothing is excluded by tag
+pnpm exec playwright test --grep-invert "@verification" --list --reporter=json \
+  | jq -r '.. | .file? // empty' | sort -u > gate-specs.txt
+
+# 2. of those, the names that smell like verification artifacts
+grep -E '(bugfix|verification|issue-[0-9]+|tweak-[0-9]|round-[0-9]|[0-9]{4}-[0-9]{2}-[0-9]{2})' gate-specs.txt
+
+# 3. price each suspect: its test count x the suite's per-test unit cost
+pnpm exec playwright test --list <suspect.spec.ts> | tail -1
+```
+
+Column 3 turns the sweep into a number a reviewer can weigh, using the unit cost derived in [Aggregate Suite Budget](./aggregate-suite-budget.mdx#price-every-test-before-arguing-about-any-of-them): a 12-test suspect at ~9.8 worker-seconds per test costs ~118 worker-seconds -- about a minute of wall clock at two workers -- on every PR, forever.
+
+Every file column 2 returns goes through the graduation decision **explicitly** -- the same three parts as any promotion, applied retroactively: is it deterministic, which tier does it belong to, does it fit that tier's budget? A spec that cannot answer all three does not belong in the gate: tag it `@verification` and drop it, or delete it outright if the proof it was carrying is already spent.
+
+Run this as a sweep, not as a cleanup. Every agent-authored bugfix regenerates the population, so a suite swept once stays clean only until the next fix lands. The reviewer-side check that catches these at authoring time is [Rule 6's enforcement check](./required-behavior.mdx#the-four-execution-rules-rule-6-—-verification-tests-do-not-graduate-themselves).
+
 ## The Five Tiers
 
 | Tier | Name | Default? | Definition |
