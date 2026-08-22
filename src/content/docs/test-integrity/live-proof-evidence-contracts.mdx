@@ -1,0 +1,65 @@
+---
+title: Fail-Closed Live Proofs and Evidence Contracts
+sidebar_position: 4
+---
+
+Live tests against deployed systems need to answer three separate questions:
+
+1. Did the product operation succeed?
+2. Is the retained evidence complete and trustworthy?
+3. Did cleanup restore the exact pre-test state?
+
+Do not collapse these into one pass/fail bit. A useful result can be:
+
+```text
+execution: failed
+evidence: complete
+recovery: passed
+```
+
+That result identifies a product failure while proving that diagnostics were retained and temporary production state was removed.
+
+## Exercise the real lifecycle
+
+Terminal DTOs assembled directly in tests often omit authority that is created earlier in the lifecycle. Prefer fixtures that follow the production transitions:
+
+```text
+ensure -> claim -> start -> renew -> ready -> owner projection
+```
+
+Assert immutable generation authority after every transition. Also cover replacement claims, retries, rearming, legacy records, and terminal failure. This catches bugs where a terminal transition clears a lease or claim that was also the only source of provenance.
+
+## Version and validate retained evidence
+
+Treat retained test evidence as a versioned data contract. Parse it strictly, reject extra keys, bound strings and counts, and use closed enums for phases and failure reasons.
+
+A scrubber should be idempotent:
+
+```text
+scrub(raw) -> parse -> scrub == scrub(raw)
+```
+
+If a useful field is removed by the generic scrubber, do not weaken the scrubber. Project the value into a deliberately safe shape first, such as a fixed reason code or boolean, and retain only that projection.
+
+Failure output should expose a closed, non-leaking set of codes. Authored stderr, paths, titles, source text, identifiers, and arbitrary platform messages must not become evidence fields.
+
+## Prove behavior, not a lucky sample
+
+A few fast hosted runs do not prove that a workload stays below a timeout under cold-start and noisy-neighbor variance. Combine:
+
+- structural operation-count assertions;
+- local and container timing distributions;
+- fresh isolated live runs;
+- exact phase evidence when a deadline expires.
+
+A pass on retry is diagnostic evidence, not a clean success. Preserve the failed attempt and reason, then investigate the variance or hidden cold work.
+
+## Make cleanup an independent gate
+
+Run cleanup in an always-run path. Capture exact pre-state before mutation, restore it on every outcome, read it back, and probe that temporary public surfaces are hidden. Cleanup success must be reported independently from execution success.
+
+Related guidance:
+
+- [Environment-Tiered Testing](/ci-operations/environment-tiered-testing/)
+- [Deflaking Recipe](/test-integrity/deflaking-recipe/)
+- [Post-Deploy Smoke Tests](/ci-operations/post-deploy-smoke-tests/)

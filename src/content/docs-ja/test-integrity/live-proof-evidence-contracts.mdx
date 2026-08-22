@@ -1,0 +1,65 @@
+---
+title: フェイルクローズなライブ証明とエビデンス契約
+sidebar_position: 4
+---
+
+デプロイ済みシステムに対するライブテストでは、次の 3 つを別々に判定します。
+
+1. プロダクト操作は成功したか
+2. 保存したエビデンスは完全で信頼できるか
+3. クリーンアップでテスト前の状態を正確に復元できたか
+
+これらを 1 つの成否にまとめないでください。次のような結果にも価値があります。
+
+```text
+execution: failed
+evidence: complete
+recovery: passed
+```
+
+これはプロダクトの失敗を特定しつつ、診断情報が保存され、一時的な本番状態が削除されたことを証明します。
+
+## 実際のライフサイクルを通す
+
+テスト内で終端 DTO を直接組み立てると、前段のライフサイクルで作られる authority を欠落させがちです。プロダクションと同じ遷移を通る fixture を優先します。
+
+```text
+ensure -> claim -> start -> renew -> ready -> owner projection
+```
+
+各遷移後に不変の generation authority を検証します。さらに replacement claim、retry、rearm、legacy record、terminal failure も網羅します。これにより、lease や claim の消去と同時に唯一の provenance まで失う不具合を検出できます。
+
+## 保存エビデンスをバージョン化して検証する
+
+保存するテストエビデンスを、バージョン付きデータ契約として扱います。厳密に parse し、余分なキーを拒否し、文字列と件数を制限し、phase と failure reason には閉じた enum を使います。
+
+scrubber は冪等であるべきです。
+
+```text
+scrub(raw) -> parse -> scrub == scrub(raw)
+```
+
+有用な値が汎用 scrubber で削除される場合も、scrubber を弱めないでください。固定 reason code や boolean など、意図的に安全な形へ先に射影し、その射影だけを保存します。
+
+失敗出力には、閉じた非漏洩の code 集合を使います。authored stderr、path、title、source text、identifier、任意の platform message を evidence field に入れてはいけません。
+
+## 偶然うまくいったサンプルではなく挙動を証明する
+
+少数の高速な hosted run だけでは、cold start や noisy neighbor の揺らぎがある状態で timeout 未満に収まることを証明できません。次を組み合わせます。
+
+- 構造的な operation count の検証
+- ローカルと container の timing distribution
+- fresh isolated live run
+- deadline 超過時の正確な phase evidence
+
+retry 後の成功は診断エビデンスであり、完全な成功ではありません。失敗した attempt と reason を保存し、分散や隠れた cold work を調査します。
+
+## クリーンアップを独立した gate にする
+
+cleanup は always-run path で実行します。mutation 前の正確な状態を保存し、あらゆる結果で復元し、read back し、一時的な public surface が hidden であることを probe します。cleanup の成功は execution の成功と独立して報告します。
+
+関連ガイド:
+
+- [環境階層別テスト](/ja/ci-operations/environment-tiered-testing/)
+- [デフレーキング・レシピ](/ja/test-integrity/deflaking-recipe/)
+- [デプロイ後スモークテスト](/ja/ci-operations/post-deploy-smoke-tests/)
