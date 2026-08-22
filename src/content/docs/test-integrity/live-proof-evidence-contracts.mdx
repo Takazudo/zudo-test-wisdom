@@ -1,0 +1,211 @@
+---
+title: Fail-Closed Live Proofs and Evidence Contracts
+description: Three separate verdicts for a live release proof -- execution, evidence completeness, cleanup -- and the discipline behind each -- real lifecycle fixtures instead of hand-built terminal objects, a versioned scrub-safe evidence contract with closed reason codes, timing samples and pass-on-retry treated as signals, cleanup as its own always-run gate.
+sidebar_position: 4
+---
+
+## One Live Proof, Three Verdicts
+
+Most deployed-tier testing in this guide is read-only by rule: [the preview tier is read-only against shared state and production is never mutated](../ci-operations/environment-tiered-testing.mdx#what-belongs-in-each-tier). This page is about the one case that rule cannot cover -- when the operation under proof *is* a write. A publishing product's release walkthrough has to allocate a site, run a real build, publish a private preview, promote it, deliver public bytes, and compare them against the source. Nothing read-only proves that works. So the proof runs as a credentialed gate against the preview tier -- the deployed, production-equivalent staging environment that the tier table marks read-only -- inside a mutation fence that refuses every other environment before the first write, on a disposable generation it creates and tears down itself. Production stays off limits; the fence never reaches it. What this page relaxes is the preview tier's read-only row, deliberately, and only by taking on the obligations below.
+
+A proof like that is a long sequence of live mutations followed by cleanup, and the result of one run has three independent parts. Collapse them into a single pass/fail bit and you lose the ability to tell a product failure from a broken instrument.
+
+| Axis | Question | What proves it | What it may never depend on |
+| --- | --- | --- | --- |
+| **Execution** | Did the product operation succeed? | The lifecycle reached its terminal state; a closed failure kind otherwise | Whether evidence or cleanup happened to work |
+| **Evidence** | Is what was retained complete and trustworthy? | The already-scrubbed evidence parses against a versioned contract with no named issue | Whether the product succeeded |
+| **Recovery** | Did cleanup do its job? | An always-run teardown step reports its own verdict; its agreement with the in-process teardown is checked on the evidence axis | Whether the run passed, failed, or was cancelled |
+
+Worked case: a live run failed its build, tore everything down, and retained a complete root-cause trail -- and the evidence-preparation job reported "evidence incomplete". The preparer pushed the same `<label>-unproven` code for a contract violation and for a lifecycle failure, and it derived one boolean from the union of every check, so a failed product operation and a missing evidence file produced the same message. Separately, one redacted teardown sentinel (below) turned a recovery that had *passed* into `complete: false`. Nobody could read the bundle and answer "did cleanup work?" without redoing the investigation by hand.
+
+The fix is not a green job. The job goes red if *any* axis fails -- the proof step on an execution failure, the preparer on a named evidence issue or an incomplete recovery. What changes is that the uploaded evidence names the axis:
+
+```
+terminalState: failed                      # the proof step's verdict -- red on execution failure
+proofOutcome:
+  failureKind: timeout                     # closed enum, projected from the failure code
+  unconditionalRecovery:
+    attempted: true
+    complete: true                         # from the always-run recovery file; disagreement with the proof is a named issue
+validation:
+  issues: []                               # the scrubbed intermediates parsed clean
+```
+
+A failed build with complete cleanup evidence must be distinguishable from a run whose evidence is absent. The rest of this page is how each axis earns its verdict.
+
+### What fail-closed means here
+
+**A result that cannot distinguish "not run", "skipped", "unreadable" or "incomplete" from "passed" is not a proof.** Absence and ambiguity read as red. This guide already has several instances under other names -- [pass-by-skip](../tool-patterns/playwright-patterns.mdx#test-skip-as-a-precondition-—-the-pass-by-skip-trap), a [swallowed wait that becomes a silent green](./deflaking-recipe.mdx#part-2-—-the-deflaking-recipe-step-3-—-never-swallow-a-fallible-wait), the post-deploy smoke test's [`answered` latch](../ci-operations/post-deploy-smoke-tests.mdx#the-skip-path-is-where-these-tests-go-wrong) and its rule that a check which cannot fail is indistinguishable from one that is not running, and [assert the count, not the exit code](../tool-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green). A live proof adds its own: an unknown or ambiguous child exit is *platform loss*, never a quota verdict and never a pass; a missing or unparseable evidence file is a named `unproven` issue; unprovisioned credentials fail the gate instead of skipping it; a cancelled run is "did not run", not "did not fail".
+
+## Drive the Real Lifecycle; Never Hand-Build the Terminal Object
+
+Worked case: a release walkthrough reached a ready build, a ready preview, a ready deployment and byte-correct public output, then failed its strict parity gate. The gate compares the owner-facing projection of the artifact against the build request, including one immutable value -- the request version that acquired the generation, the only proof of *which* request produced the ready bytes. That value lived on the worker's build claim, a lease sub-record. The ready transition's job is to clear the claim and write the output, and it wrote the output without the field. Every successful artifact projected `null`; the gate rejected a fully successful run under one collapsed code; the root cause was proven by a manual read-only query on rows that had already been torn down.
+
+Two layers of unit tests were green, for different reasons. The gate's test fed the comparator a hand-assembled "ready" observation that *already carried the field*, hard-coded to the expected value -- a state the real state machine never emits after ready. It tested the comparator, not the pipeline. The adapter lifecycle tests *did* drive real claim → start → ready transitions, but asserted only status, attempt and worker id (`toMatchObject`), so the field was executed through and never observed. One layer watched the wrong object; the other did not watch the field.
+
+**A hand-assembled terminal DTO carries whatever its author expects it to carry.** It cannot show that the real terminal transition dropped a field, because the fixture never passes through that transition. Run the real state machine, take its real projection, and feed that to the real gate; reserve literals for negative cases derived from a real positive baseline. The structural rule behind the bug: **store provenance on the record that outlives the terminal transition.** When a success transition clears a sub-record (a claim, a lease, a lock), enumerate every field on it and decide explicitly which are copied forward before it is nulled. The tempting wrong fix -- backfill the missing value from the record's mutable version counter at read time -- would have stamped a number no request ever carried. This is the live-system shape of [self-agreement](./crypto-testing.mdx#the-same-input-same-output-trap): a fixture that encodes the expected answer cannot disagree with it.
+
+### Anchor the expectation at creation, not before the call
+
+The first fix shipped with a regression that was itself tautological. It captured the expected authority from the record *immediately before* the transition under test -- from the same mutable version field the implementation was about to copy -- so the assertion could only ever agree with the implementation. It was green for the wrong behavior (re-stamp the optimistic-concurrency version that start/renew had already advanced) and would have gone red for the right one. An integrated review caught it; a replacement claim after lease expiry had been overwriting the authority all along.
+
+```
+// tautological: the expectation is read from the same mutable field the code is about to copy
+const expected = artifact.version;          // already advanced by start/renew
+artifact = reclaim(artifact);
+expect(artifact.claim.authority).toBe(expected);   // green for the bug, red for the fix
+
+// anchored: mint the expectation once at the origin event, assert it after every transition
+const ensured = ensure(request);            // idempotent create-or-lookup of the artifact record
+const authority = ensured.version;          // captured before the first claim
+claimed = claim(ensured);                   expect(claimed.claim.authority).toBe(authority);
+started = start(claimed);                   expect(started.claim.authority).toBe(authority);
+clock.advance(halfLease); renewed = renew(started);  expect(renewed.claim.authority).toBe(authority);
+clock.advance(halfLease); renewed = renew(renewed);  expect(renewed.claim.authority).toBe(authority);
+ready = markReady(renewed);                 expect(ready.output.authority).toBe(authority);
+expect(toOwnerProjection(ready).authority).toBe(authority);
+```
+
+When a field is the subject of the change, name it in every assertion that touches the record. `toMatchObject` on the fields you already trusted is how the lifecycle layer stayed green.
+
+### What the lifecycle fixture must cover
+
+The regression that finally caught the loss is short: `ensure` (idempotent create-or-lookup of the artifact record) → claim → start → renew, twice, with a ticking clock → ready → read the owner projection → feed it to the real gate evaluator and expect an empty reason list. The conformance matrix behind it is where the distinctions live:
+
+- **Same-generation continuation vs new-generation start.** A replacement claim after lease expiry is the same request with a new worker: it *preserves* the prior claim's authority. Retry, rearm and collect-then-rehydrate are new generations: they clear claim *and* output so the next claim mints a fresh authority, and the rebuilt generation's authority must differ from the collected one.
+- **Idempotent replay** of the terminal command returns the same stored authority as the first response.
+- **Legacy records** decode absence to an explicit `null`, and `null` fails closed downstream as a distinct "missing" code -- never as a pass, never as the same code as a mismatch.
+- **Malformed values** (zero, negative, fractional, above the safe-integer range, a string, a boolean, an object) raise a corruption error through *every* read path; test it by mutating raw stored rows and reading back.
+- **Projection precedence** is explicit: stored terminal output first, then the active claim, then the mutable version only for a record that is still queued, else `null`. Never backfill an immutable authority from a mutable version field.
+
+Hand-authored fixtures are safe only when you own the contract they imitate -- the same boundary [scheduled re-exam draws for reporter fixtures](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report). A terminal state produced by someone else's transition is not a contract you own.
+
+## Evidence Is a Versioned Contract, Validated After Scrubbing
+
+Evidence *retention* -- [a recorded trace with no upload step is not evidence](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-a-recorded-trace-with-no-upload-step-is-not-evidence), upload on `failure() || cancelled()` -- is covered elsewhere. This section is about evidence *shape*, because a live proof retains evidence through a scrubber, and a scrubber and a validator can each be correct in isolation while their composition is broken.
+
+Worked case: the proof writes an already-scrubbed intermediate file; an always-run recovery step writes a second one; a credential-free preparer re-reads both, validates them, scrubs the whole bundle again and uploads only that bundle. A later hardening commit widened the scrubber's key-name rule -- a substring match that now also caught words such as `source` and `marker`. The teardown block recorded its retention sentinel under a key whose name contained `source`. After the widening, that key's value was replaced by the redaction token on disk; the validator still required it to equal a fixed sentinel; the bundle reported `retention-unproven` and `complete: false` for a recovery that had passed. Unit tests for the scrubber (does it redact secrets?) and for the validator (does it accept a good proof?) were both green. The validator's fixture had been written with plain `JSON.stringify`, not the production scrubber, and the only test that fed a scrubbed proof to the validator sat on an expected-red path and asserted merely the *absence* of two specific codes -- which cannot notice a third.
+
+<Warning>
+
+**Two fixes look obvious and are both wrong.** Adding a path exception to the scrubber weakens the one guard that keeps credentials out of an artifact that outlives the run. Teaching the validator to accept the literal redaction token as an alternative value is sound only when the value is *not itself the evidence* -- here the value (retained vs. never created) *was* the evidence, and the exception would have destroyed it.
+
+</Warning>
+
+### Project into a scrub-safe sub-contract before scrubbing
+
+Treat the scrubber's key-name pattern as part of the evidence contract: pick key names that cannot match it, and re-check every retained key whenever the pattern widens. Then project the internal teardown state into a purpose-built, versioned sub-contract *before* the generic scrubber runs, and leave the scrubber untouched:
+
+```
+// applied to the internal teardown result before scrubbing; copies only closed-enum fields
+teardown: {
+  preview: "revoked" | "absent" | "unproven",
+  site:    "tombstoned" | "absent" | "unproven",
+  retention: {
+    contract: "<product>/live-proof-retention-evidence",
+    version: 1,
+    frozenBundleRetention: "retained-under-policy" | "not-created-or-unconfirmed",
+    artifactRetention:     "retained-under-policy" | "not-created-or-unconfirmed",
+  },
+}
+// any input outside these enums -> { preview: "unproven", site: "unproven", retention: null }
+// extra keys on the input are dropped, never copied
+```
+
+The validator then parses strictly: exact key set, contract and version equality on *both* the proof and the recovery file, enum membership, and a `null` plus a named `<label>-retention-contract-unproven` issue on any deviation. A hostile string under a safe key is a contract failure, not a tolerated mismatch. Then it cross-checks: each sentinel against independent run state (was the source actually published? was an artifact created? does the run identity match the state file?), and proof against recovery -- they must carry the same version and the same sentinels, and a disagreement is the named `proof-recovery-retention-mismatch` issue on the evidence axis, never a silent downgrade of the recovery verdict. The same discipline applies across the bundle: boolean check objects validated by exact key set (check keys containing scrub words were renamed as well, not exempted), timings and counts passed through a bounded safe-integer filter with domain maxima, phase names bounded by a short anchored regex.
+
+### Prove scrub → parse → scrub is byte-identical, and why
+
+```
+scrub(raw) -> parse -> scrub  ==  scrub(raw)
+```
+
+The reason is in the pipeline above: the preparer scrubs the *whole bundle again* after validating the intermediates embedded in it. A non-idempotent rule would alter validated content after validation. Prove the property by string equality in the same test that writes the validator's fixtures through the production scrubber -- on the path that must *pass*, not only on a path that rejects for unrelated reasons -- and assert the full outcome (the command resolves; the complete issue list), not the absence of a few codes. After any change to a generic redaction rule, re-run persist → re-read → validate end to end on a green fixture before merging.
+
+### Closed, non-leaking reason codes
+
+The parity gate that failed above reported one code for a disjunction of eight predicates: `if (a || b || c ...) throw new Error("preview-not-ready")`. The boolean OR is lossy by construction, and throwing on the first group means later groups are never evaluated. That is why the root cause needed a manual query.
+
+- **Evaluate every predicate in a pure function and return the whole set**, sorted and deduplicated, drawn from an exported closed enum. The runner throws once with the joined codes. Observed values never appear in a code -- no ids, hashes, paths, origins or DTO fragments.
+- **"Missing" and "mismatch" are distinct codes.** `!==` conflates a legacy `null` with a wrong value; the domain treats them differently, so the enum must.
+- **Test the enum as a table**: `[reason, mutated input path, hostile value, coupled reasons?]`. Each row asserts the evaluator returns exactly its set; where two predicates read one input, the row declares the coupled set instead of pretending independence. Collect the union across rows and assert it equals the exported enum -- an un-emittable member fails the suite. Inject a hostile string and assert it appears neither in the serialized reasons nor in the thrown message. Keep a strict-success test so the refactor provably changed only reporting.
+- **Reduce external tool output to a phase code.** Authored stderr, third-party CLI messages, paths, titles, source text, identifiers, digests, URLs and account data stay in the ephemeral job log. Failure codes and reasons cross into evidence only when they are members of a closed trusted set; unknown ones are dropped, not copied. A classifier that reads free-text output can be spoofed by the thing it classifies -- and was, when every stabilizer error message happened to contain a token the classifier treated as "resource limit, retryable".
+
+## Timing Samples Are Not Tail Proof
+
+[Rule 3 of the deflaking recipe](./deflaking-recipe.mdx#the-three-rules-rule-3-—-if-a-test-seems-irreducibly-probabilistic-you-are-asserting-the-wrong-thing) already says to assert `elapsed < budget` rather than a sample, and [the root-cause catalog](./deflaking-recipe.mdx#part-1-—-root-cause-catalog) covers deadlines that race and stage budgets that sum past a kill deadline. A live proof adds a harder version: the deadline belongs to the product, and *passing it a few times proves nothing about the tail*.
+
+Worked case: a hosted build inside a fresh isolated container kept expiring a hard wall-clock ceiling, and the only signal was a phase-blind exit code from an outer `timeout` wrapper around six sequential phases -- so the first remediation moved work out of a phase that was not the hotspot, and the next run failed identically. After phase attribution existed, two fresh diagnostic runs finished at roughly 55–65% of the ceiling and the issue was closed as "does not reproduce". The next fresh full-lifecycle run expired in exactly that phase, about 15% *over* the ceiling. The cause was hidden cold work: on every fresh container a CSS engine ran a throwaway full compile to warm a native addon (no warm marker exists in a fresh temp dir) and then the real compile -- two compiles under variable load, a spread that warm local and container timings never show. The structural fix removed the warm-up, was proven by operation count, and passed three fresh runs; a later fresh run expired in the same phase again after its one bounded retry. The remaining single compile still has enough variance in fresh containers that samples describe possibility, not a bound.
+
+Two more evidence losses hid inside that sequence. The successful diagnostic run *did* carry per-phase timings inside the container, and an exact-key projection on the success path -- an anti-smuggling guard -- silently dropped the new field, so the operator stopped rather than infer the hotspot; review then found the failure path rebuilt its DTO by hand and dropped it too. **When you add an evidence field, add the positive test that it survives where it should.** And orchestration-side ("observer") time ran a third to a half longer than the time charged inside the deadline. The two answer different questions: only the charged total is comparable to the product's ceiling, and the observer overhead counts against the proof's own timeout -- conflating them either reports margin the product does not have or blames the product for a slow dispatch.
+
+### What replaces the sample
+
+1. **Attribute the deadline to a phase.** One monotonic absolute deadline across the whole charged sequence (a phase receives only the remaining budget; cleanup grace is bounded separately and never counted as work), and a closed per-phase reason -- `wall-time-<phase>` -- in the failure enum. Make it *trusted*: only a privileged supervisor asserts phase, timing and reason, over a channel the authored child cannot write; child stdout, stderr and exit codes are counted and discarded. Validate the envelope cross-field -- reason matches phase, phase matches exit status, per-phase durations sum to the total, post-terminal phases are zero -- and treat an absent or inconsistent envelope as platform loss, never as a quota verdict.
+2. **Require the optimization to exhibit the removed operation.** A deterministic operation-count regression (the warm-up/build pair yields one compile, not two), in unit form *and* against the real production image under a harness the image cannot influence. Local timing actively hides this class of work.
+3. **Pin the image the runs were measured on.** Rotate the runtime authority -- the image or runtime version every run handshakes against -- whenever executable behavior changes, and prove a stale one is rejected, so timing measured on one image cannot be credited to another.
+4. **Gate on fresh, isolated, retry-free runs** -- at least three, on the exact candidate image, each at or below a target with margin under the ceiling -- and keep that gate after release, because variance remains.
+
+### Retry once, on evidence, and keep the first attempt
+
+Pass-on-retry is a triage signal, not a success -- [Rule 2](./deflaking-recipe.mdx#the-three-rules-rule-2-—-it-s-ok-it-s-just-flaky-is-never-acceptable-every-accepted-flake-devalues-red) and [Retry Budgets](../decision-guide/execution-tiers.mdx#retry-budgets) already say so. The live-proof-specific part is how the retry is *gated*: exactly one, permitted only when the failed attempt's own evidence shows a trusted retryable reason from a closed allowlist **and** cleanup proven -- the temporary facade the proof deployed for the run is gone, the preview revoked, the site tombstoned. A generic "terminal failure" code carries no retryability and must not trigger it. Before retrying, run the recovery step against the first attempt's checkpoint, write its evidence to its own file, and carry it into the bundle to be validated like the second attempt's -- a retry that overwrites the first attempt's proof leaves the failure reason only in the job log, and a retry that only checkpoints the second generation leaves the first one's cleanup proven by in-process evidence alone. Acceptance samples are retry-free by definition. Verdict-level retries and mid-run session reissue are forbidden and *validated* in evidence (`verdictRetries: 0`, `reissued: false`), because a tolerance that is not recorded is one that can quietly widen.
+
+## Cleanup Is Its Own Gate
+
+The always-run shapes -- [`trap cleanup EXIT`](../project-recipes/backend-testing.mdx#post-deploy-smoke-testing-with-shell-scripts-self-cleaning-test-script) in a shell script, [`if: failure() || cancelled()`](../tool-patterns/playwright-patterns.mdx#recording-a-trace-is-not-keeping-it-gate-the-upload-on-failure-cancelled) on an upload -- are documented. A live proof needs them in layers, and it needs cleanup to *report*.
+
+### Three layers of teardown
+
+1. **In-process, in `catch` and again in `finally`.** Checkpoint mutation identity atomically (temp file + rename) before every live mutation, so a separate `recover` command can replay teardown from identity alone. Recovery must need *only* what scrubbed evidence is allowed to retain -- the first teardown path depended on a hash the scrubber removes, so a recovery started from retained evidence could not complete. A `pending` sentinel means no mutation happened and nothing is torn down. Teardown is observe-before-mutate and idempotent: read the terminal state first, mutate only what is not yet terminal, tolerate only the precise benign error code, re-read, and assert in tests that running it twice performs exactly one unpublish and one tombstone.
+2. **Again in an always-run CI step**, whose output file is validated separately and must *agree* with the in-process teardown on retention and run identity. A cancelled run is unknown, not a pass.
+3. **Reported through closed enums that never claim more than the teardown observed** -- `revoked | absent | unproven` for the preview, `tombstoned | absent | unproven` for the site, `retained-under-policy | not-created-or-unconfirmed` for residuals that may legitimately persist. A resource the proof owns outright, such as the temporary facade it deployed, can be asserted gone; logical teardown of everything else is not deletion -- say what remains and under which policy.
+
+```yaml
+- id: live-proof
+  run: node scripts/live-proof.mjs --evidence out/proof.json
+- if: always() && steps.live-proof.outcome != 'skipped'
+  run: node scripts/live-proof.mjs recover --evidence out/recovery.json   # idempotent
+- if: always()
+  run: node scripts/prepare-evidence.mjs out/   # credential-free; validates, re-scrubs, bundles; non-zero on any named issue
+- if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    path: out/evidence-bundle.json            # the doubly-scrubbed bundle only
+    if-no-files-found: error                  # an absent bundle is itself red
+```
+
+### Disposable state is torn down; shared state is restored
+
+Two different obligations hide under "cleanup". Disposable resources the proof created are *logically* torn down and their residuals accounted, as above. Shared surfaces the proof temporarily re-points -- a route target, a deployed runtime version -- are a different contract: snapshot the exact pre-state, assert it before cutting over, restore it on every outcome, read it back, and probe sentinel hosts for a hidden (not-found) response afterwards. Do not describe the first with the vocabulary of the second; "removed" and "restored" are claims, and evidence must not make a claim the teardown did not earn.
+
+The hidden-surface probes -- the public asset returns not-found, the preview returns not-found *with the old cookie* -- are **required inputs to validating a proof that claims success, not recorded annotations**. The last change in the round was making the public-hidden probe mandatory for a green proof; until then a proof could validate without proving the public surface was gone. Be equally honest about which paths run them: in the walkthrough, the HTTP read-back probes ran on the in-process success path, while the always-run recovery proved teardown by control-plane observation. Say so in the evidence rather than letting "recovery: complete" imply a probe that did not happen.
+
+### Absence is red
+
+A missing or unparseable recovery file is a named `unproven` issue, not a skipped check. The bundle upload fails when there is no bundle. Unprovisioned credentials fail the gate. And every comparison the gate makes should carry a negative control -- the live-system form of [proving the new assertion fails against the broken deploy](../ci-operations/post-deploy-smoke-tests.mdx#send-what-a-browser-sends-or-you-test-a-path-no-user-takes):
+
+<Tip>
+
+**Prove the instrument discriminates before trusting what it says.** The parity gate perturbs the candidate on every execution and requires the comparison to fail; the runtime handshake is tested by mutating each pinned authority to a stale value, one at a time, and requiring rejection -- any acceptance is itself a failure named `stale-authority-accepted`. A gate that cannot fail is indistinguishable from one that is not running.
+
+</Tip>
+
+## The Rules Together
+
+1. **Three verdicts, not one bit.** Execution, evidence completeness and recovery are computed independently and named in the retained evidence; the gate may stay red, but the file says which axis failed.
+2. **Drive the real transitions; never hand-build the terminal object.** Anchor the expected provenance at the event that creates it, assert it after every transition, and store it on the record that outlives the transition that clears the sub-record.
+3. **Evidence is a versioned contract the validator reads *after* scrubbing.** Project into collision-free, closed-enum sub-contracts before scrubbing; write fixtures through the production scrubber on the passing path; prove scrub → parse → scrub is byte-identical.
+4. **Reason codes are a closed, sorted set** with "missing" distinct from "mismatch", proven enum-complete and hostile-value-free; external output is reduced to a phase code.
+5. **Samples are not tail proof.** Attribute the deadline to a phase with a trusted envelope, prove the removed operation by count on the real image, pin the image the runs were measured on, and gate on fresh retry-free runs with margin.
+6. **Retry once, on evidence, with cleanup proven, and keep the first attempt.**
+7. **Cleanup is three layers and its own verdict**; residuals are accounted with enums that never claim more than was observed; shared surfaces the proof re-points are snapshotted, restored on every outcome and read back; hidden-surface probes are required inputs to a green proof.
+8. **Absence is red**, and every comparison carries a negative control.
+
+## Where to Go Next
+
+- [Environment-Tiered Testing](../ci-operations/environment-tiered-testing.mdx#what-belongs-in-each-tier) -- the tier table whose read-only preview row this page is the fenced exception to; production stays untouched
+- [Flake Root-Cause Catalog & Deflaking Recipe](./deflaking-recipe.mdx) -- Rule 2 on pass-on-retry, Rule 3 on asserting the invariant, and the catalog's deadline entries
+- [Post-Deploy Smoke Tests](../ci-operations/post-deploy-smoke-tests.mdx) -- the skip-path discipline and "prove the assertion fails against the broken deploy", the read-only ancestor of fail-closed
+- [Execution Tiers](../decision-guide/execution-tiers.mdx#retry-budgets) -- retry budgets and why a trace with no upload step is not evidence
+- [Scheduled Re-exam & Night Exam](../ci-operations/scheduled-re-exam.mdx) -- retry-pass detection and pinning fixtures to real captured artifacts
+- [Negative Assertions vs. Their Own Fixture Data](./negative-assertion-fixtures.mdx) -- the other way a fixture can agree with itself
