@@ -1,12 +1,12 @@
 ---
 title: フェイルクローズなライブ証明と証拠契約
-description: ライブなリリース証明は、操作は成功したか・保存した証拠は完全か・クリーンアップは役目を果たしたかという 3 つの問いに、1 ビットではなく別々の判定で答えます。終端オブジェクトを手組みせず実際のライフサイクルを通し、証拠はバージョン付きでスクラブ安全な契約と閉じた理由コードの背後に置き、タイミングのサンプルと pass-on-retry は証明ではなくシグナルとして扱い、クリーンアップを独立した always-run のゲートにします。
+description: ライブなリリース証明に対する 3 つの別々の判定 -- 実行・証拠の完全性・クリーンアップ -- と、それぞれを支える規律。手組みの終端オブジェクトではなく実際のライフサイクルフィクスチャ、閉じた理由コードを持つバージョン付きでスクラブ安全な証拠契約、シグナルとして扱うタイミングのサンプルと pass-on-retry、独立した always-run のゲートとしてのクリーンアップ。
 sidebar_position: 4
 ---
 
 ## 1 つのライブ証明に 3 つの判定
 
-このガイドのデプロイ済みティアに対するテストは、原則として読み取り専用です。[プレビューは共有状態に対して読み取り専用、本番は決して変更しない](../ci-operations/environment-tiered-testing.mdx#各ティアに何を割り当てるか)。このページが扱うのは、その原則では覆えない唯一のケース -- 証明したい操作そのものが *書き込み* である場合です。パブリッシングプロダクトのリリースウォークスルーは、サイトを割り当て、実際のビルドを走らせ、非公開プレビューを公開し、それを昇格させ、公開バイトを配信し、ソースと突き合わせなければなりません。読み取り専用の手段では、それが動くことを証明できません。そこでこの証明は、資格情報付きのゲートとしてステージングデプロイに対して走ります。最初の書き込みの前に他のあらゆる環境を拒否する mutation fence の内側で、自分で作って自分で片付ける使い捨ての generation の上で、です。これは「本番を変更しない」ルールの抜け穴ではありません。以下の義務を引き受けることでのみ居場所を得る例外です。
+このガイドのデプロイ済みティアに対するテストは、原則として読み取り専用です。[プレビューティアは共有状態に対して読み取り専用、本番は決して変更しない](../ci-operations/environment-tiered-testing.mdx#各ティアに何を割り当てるか)。このページが扱うのは、その原則では覆えない唯一のケース -- 証明したい操作そのものが *書き込み* である場合です。パブリッシングプロダクトのリリースウォークスルーは、サイトを割り当て、実際のビルドを走らせ、非公開プレビューを公開し、それを昇格させ、公開バイトを配信し、ソースと突き合わせなければなりません。読み取り専用の手段では、それが動くことを証明できません。そこでこの証明は、資格情報付きのゲートとしてプレビューティア -- ティアの表が読み取り専用と定める、デプロイ済みで本番同等のステージング環境 -- に対して走ります。最初の書き込みの前に他のあらゆる環境を拒否する mutation fence の内側で、自分で作って自分で片付ける使い捨ての generation の上で、です。本番は立ち入り禁止のままであり、フェンスが本番に届くことはありません。このページが緩めるのはプレビューティアの読み取り専用の行であり、それも意図的に、以下の義務を引き受けることでのみ緩めます。
 
 このような証明は、ライブな変更の長い連なりとそれに続くクリーンアップであり、1 回の実行結果には独立した 3 つの部分があります。これらを 1 つの成否ビットに潰すと、プロダクトの失敗と壊れた計器を区別する能力を失います。
 
@@ -14,19 +14,19 @@ sidebar_position: 4
 | --- | --- | --- | --- |
 | **実行（execution）** | プロダクト操作は成功したか | ライフサイクルが終端状態に到達したこと。さもなくば閉じた failure kind | 証拠やクリーンアップがたまたま動いたかどうか |
 | **証拠（evidence）** | 保存したものは完全で信頼できるか | スクラブ済みの証拠が、名前付きの問題なしにバージョン付き契約としてパースできること | プロダクトが成功したかどうか |
-| **復旧（recovery）** | クリーンアップは役目を果たしたか | always-run の teardown ステップが自前の判定を報告し、プロセス内 teardown と一致すること | 実行が成功・失敗・キャンセルのいずれだったか |
+| **復旧（recovery）** | クリーンアップは役目を果たしたか | always-run の teardown ステップが自前の判定を報告すること。プロセス内 teardown との一致は証拠の軸で検査される | 実行が成功・失敗・キャンセルのいずれだったか |
 
 実例：あるライブ実行はビルドに失敗し、すべてを片付け、根本原因の完全な痕跡を保存しました -- そして証拠準備ジョブは「証拠が不完全」と報告しました。preparer は契約違反にもライフサイクルの失敗にも同じ `<label>-unproven` コードを push し、全チェックの和集合から 1 つの boolean を導いていたので、プロダクト操作の失敗と証拠ファイルの欠落が同じメッセージになっていたのです。それとは別に、redact された teardown のセンチネル 1 つ（後述）が、*成功していた* recovery を `complete: false` に変えました。バンドルを読んで「クリーンアップは動いたか？」に答えるには、手作業で調査をやり直すしかありませんでした。
 
-修正はジョブを緑にすることではありません。実行が失敗すればゲートは赤のままです。変わるのは、アップロードされる証拠が軸を名指しすることです。
+修正はジョブを緑にすることではありません。*どの* 軸が失敗してもジョブは赤になります -- 実行の失敗なら証明ステップが、名前付きの証拠の問題や不完全な recovery なら preparer が。変わるのは、アップロードされる証拠が軸を名指しすることです。
 
 ```
-terminalState: failed                      # the gate verdict -- still red
+terminalState: failed                      # the proof step's verdict -- red on execution failure
 proofOutcome:
   failureKind: timeout                     # closed enum, projected from the failure code
   unconditionalRecovery:
     attempted: true
-    complete: true                         # computed from the always-run recovery file alone
+    complete: true                         # from the always-run recovery file; disagreement with the proof is a named issue
 validation:
   issues: []                               # the scrubbed intermediates parsed clean
 ```
@@ -47,23 +47,26 @@ validation:
 
 ### 期待値は呼び出し直前ではなく作成時に固定する
 
-最初の修正は、それ自体がトートロジーな回帰テストを伴って出荷されました。テスト対象の遷移の *直前* にレコードから期待する authority を取得していたのです -- そして実装は同じ可変カウンターを読んでいたので、このアサーションは正しい挙動（不変の authority を保持する）でも誤った挙動（start/renew がすでに進めた楽観的並行制御のバージョンを刻印し直す）でも通りました。統合レビューがこれを捕まえました。lease 期限切れ後の replacement claim は、ずっと authority を上書きしていたのです。
+最初の修正は、それ自体がトートロジーな回帰テストを伴って出荷されました。テスト対象の遷移の *直前* に、実装がまさにコピーしようとしていたのと同じ可変バージョンフィールドからレコードの期待する authority を取得していたのです -- そのためこのアサーションは、実装と一致することしかできませんでした。誤った挙動（start/renew がすでに進めた楽観的並行制御のバージョンを刻印し直す）に対して緑であり、正しい挙動に対しては赤になっていたでしょう。統合レビューがこれを捕まえました。lease 期限切れ後の replacement claim は、ずっと authority を上書きしていたのです。
 
 ```
-// tautological: the expectation is read from the state the code is about to reuse
+// tautological: the expectation is read from the same mutable field the code is about to copy
 const expected = artifact.version;          // already advanced by start/renew
 artifact = reclaim(artifact);
-expect(artifact.claim.authority).toBe(expected);
+expect(artifact.claim.authority).toBe(expected);   // green for the bug, red for the fix
 
 // anchored: mint the expectation once at the origin event, assert it after every transition
+const ensured = ensure(request);            // idempotent create-or-lookup of the artifact record
 const authority = ensured.version;          // captured before the first claim
-claimed = claim(ensured);       expect(claimed.claim.authority).toBe(authority);
-started = start(claimed);       renewed = renew(renew(started));
-ready   = markReady(renewed);   expect(ready.output.authority).toBe(authority);
+claimed = claim(ensured);                   expect(claimed.claim.authority).toBe(authority);
+started = start(claimed);                   expect(started.claim.authority).toBe(authority);
+clock.advance(halfLease); renewed = renew(started);  expect(renewed.claim.authority).toBe(authority);
+clock.advance(halfLease); renewed = renew(renewed);  expect(renewed.claim.authority).toBe(authority);
+ready = markReady(renewed);                 expect(ready.output.authority).toBe(authority);
 expect(toOwnerProjection(ready).authority).toBe(authority);
 ```
 
-あるフィールドが変更の主題なら、そのレコードに触れるすべてのアサーションでそのフィールドを名指ししてください。すでに信頼していたフィールドだけの `toMatchObject` こそが、最初の層が緑のままだった理由です。
+あるフィールドが変更の主題なら、そのレコードに触れるすべてのアサーションでそのフィールドを名指ししてください。すでに信頼していたフィールドだけの `toMatchObject` こそが、ライフサイクルの層が緑のままだった理由です。
 
 ### ライフサイクルフィクスチャが網羅すべきもの
 
@@ -95,17 +98,21 @@ expect(toOwnerProjection(ready).authority).toBe(authority);
 
 ```
 // applied to the internal teardown result before scrubbing; copies only closed-enum fields
-retention: {
-  contract: "<product>/live-proof-retention-evidence",
-  version: 1,
-  frozenBundleRetention: "retained-under-policy" | "not-created-or-unconfirmed",
-  artifactRetention:     "retained-under-policy" | "not-created-or-unconfirmed",
+teardown: {
+  preview: "revoked" | "absent" | "unproven",
+  site:    "tombstoned" | "absent" | "unproven",
+  retention: {
+    contract: "<product>/live-proof-retention-evidence",
+    version: 1,
+    frozenBundleRetention: "retained-under-policy" | "not-created-or-unconfirmed",
+    artifactRetention:     "retained-under-policy" | "not-created-or-unconfirmed",
+  },
 }
-// any input outside the enums -> { preview: "unproven", site: "unproven", retention: null }
+// any input outside these enums -> { preview: "unproven", site: "unproven", retention: null }
 // extra keys on the input are dropped, never copied
 ```
 
-検証器はそれから厳密にパースします。正確なキー集合、証明ファイルと recovery ファイルの *両方* での contract と version の一致、enum への所属、そして逸脱があれば `null` と名前付きの `<label>-retention-contract-unproven` 問題。安全なキーの下にある敵対的な文字列は契約違反であって、許容される mismatch ではありません。次に相互検証します。各センチネルを独立した実行状態と突き合わせ（ソースは本当に公開されたか？ アーティファクトは作られたか？ 実行の識別子は状態ファイルと一致するか？）、証明と recovery を突き合わせる -- 両者は同じ version と同じセンチネルを持たなければなりません。同じ規律がバンドル全体に及びます。boolean のチェックオブジェクトは正確なキー集合で検証し（スクラブ語を含むチェックのキーは例外扱いではなく改名されました）、タイミングと件数はドメイン上限付きの bounded safe-integer フィルタを通し、phase 名は短い anchored regex で制限します。
+検証器はそれから厳密にパースします。正確なキー集合、証明ファイルと recovery ファイルの *両方* での contract と version の一致、enum への所属、そして逸脱があれば `null` と名前付きの `<label>-retention-contract-unproven` 問題。安全なキーの下にある敵対的な文字列は契約違反であって、許容される mismatch ではありません。次に相互検証します。各センチネルを独立した実行状態と突き合わせ（ソースは本当に公開されたか？ アーティファクトは作られたか？ 実行の識別子は状態ファイルと一致するか？）、証明と recovery を突き合わせる -- 両者は同じ version と同じセンチネルを持たなければならず、不一致は証拠の軸における名前付きの `proof-recovery-retention-mismatch` 問題であって、recovery の判定を黙って格下げすることは決してありません。同じ規律がバンドル全体に及びます。boolean のチェックオブジェクトは正確なキー集合で検証し（スクラブ語を含むチェックのキーは例外扱いではなく改名されました）、タイミングと件数はドメイン上限付きの bounded safe-integer フィルタを通し、phase 名は短い anchored regex で制限します。
 
 ### scrub → parse → scrub がバイト単位で同一であることを証明する。そしてその理由
 
@@ -130,18 +137,18 @@ scrub(raw) -> parse -> scrub  ==  scrub(raw)
 
 実例：新しい隔離コンテナ内のホステッドビルドが、ハードな wall-clock 上限を超え続けていました。唯一のシグナルは、6 つの逐次 phase を包む外側の `timeout` ラッパーからの phase を知らない終了コードでした -- そのため最初の対処はホットスポットでない phase から作業を動かし、次の実行は同じように失敗しました。phase の帰属ができるようになったあと、新しい 2 回の診断実行は上限のおよそ 55〜65% で完了し、issue は「再現しない」として閉じられました。次の新しいフルライフサイクル実行は、まさにその phase で、上限を約 15% *超えて* 期限切れになりました。原因は隠れたコールド作業でした。新しいコンテナのたびに CSS エンジンがネイティブアドオンを温めるための使い捨てのフルコンパイルを走らせ（新しい temp ディレクトリには warm マーカーが存在しません）、それから本物のコンパイルを走らせていた -- 変動する負荷の下での 2 回のコンパイルという、温まったローカルやコンテナのタイミングには決して現れない広がりです。構造的な修正はこのウォームアップを取り除き、操作回数で証明され、新しい 3 回の実行を通過しました。後日の新しい実行は、1 回の有界リトライのあと、同じ phase で再び期限切れになりました。残った 1 回のコンパイルでさえ、新しいコンテナではサンプルが上限ではなく可能性しか記述できない程度の分散を持っているのです。
 
-この連なりの中には、さらに 2 つの証拠の喪失が隠れていました。成功した診断実行はコンテナ内に phase ごとのタイミングを *確かに* 持っていましたが、成功経路の exact-key 射影 -- 密輸防止のガード -- が新しいフィールドを黙って落とし、オペレーターはホットスポットを推測するのではなく立ち止まりました。その後レビューが、失敗経路も DTO を手で組み直して同じく落としていることを見つけました。**証拠フィールドを追加したら、それが残るべき場所に残ることを示す正のテストを追加してください。** そしてオーケストレーション側（「observer」）の時間は、デッドライン内で課金された時間より 3 分の 1 から半分ほど長くかかっていました。上限と比較できるのは課金された合計だけです。さもないと、余裕に見える数字が、dispatch とコールドスタートに食われるマージンになります。
+この連なりの中には、さらに 2 つの証拠の喪失が隠れていました。成功した診断実行はコンテナ内に phase ごとのタイミングを *確かに* 持っていましたが、成功経路の exact-key 射影 -- 密輸防止のガード -- が新しいフィールドを黙って落とし、オペレーターはホットスポットを推測するのではなく立ち止まりました。その後レビューが、失敗経路も DTO を手で組み直して同じく落としていることを見つけました。**証拠フィールドを追加したら、それが残るべき場所に残ることを示す正のテストを追加してください。** そしてオーケストレーション側（「observer」）の時間は、デッドライン内で課金された時間より 3 分の 1 から半分ほど長くかかっていました。この 2 つは別の問いに答えます。プロダクトの上限と比較できるのは課金された合計だけであり、observer 側のオーバーヘッドは証明自身のタイムアウトに対して数えます -- 両者を混同すると、プロダクトにはないマージンを報告するか、遅い dispatch をプロダクトのせいにするかのどちらかになります。
 
 ### サンプルの代わりになるもの
 
 1. **デッドラインを phase に帰属させる。** 課金される連なり全体にわたる単一の単調な絶対デッドライン（phase は残り予算だけを受け取り、クリーンアップの猶予は別に制限されて決して作業時間に数えない）と、失敗 enum の中の閉じた phase ごとの理由 -- `wall-time-<phase>`。これを *信頼できる* ものにします。特権を持つスーパーバイザーだけが phase・タイミング・理由を主張し、作者側の子プロセスには書けないチャネルで伝えます。子の stdout・stderr・終了コードは数えて捨てます。封筒（envelope）をフィールド横断で検証し -- 理由は phase と一致、phase は終了ステータスと一致、phase ごとの所要時間の和は合計と一致、終端 phase 以降はゼロ -- 封筒が欠けている、または矛盾していれば platform loss として扱い、決して quota の判定にはしません。
 2. **最適化には、取り除いた操作を示させる。** 決定論的な操作回数の回帰テスト（ウォームアップ／ビルドの組がコンパイル 2 回ではなく 1 回になる）を、ユニット形式 *かつ* 実際の本番イメージに対して、イメージ側が干渉できないハーネスで。ローカルのタイミングはこの種の作業を積極的に隠します。
-3. **ランタイムの authority をローテーションし、古いものが拒否されることを証明する。** あるイメージで測ったタイミングが別のイメージの手柄にならないように。
+3. **実行を計測したイメージを固定する。** 実行可能な挙動が変わるたびにランタイムの authority -- すべての実行がハンドシェイクで照合するイメージやランタイムのバージョン -- をローテーションし、古いものが拒否されることを証明します。あるイメージで測ったタイミングが別のイメージの手柄にならないように。
 4. **新しい、隔離された、リトライなしの実行でゲートする** -- 少なくとも 3 回、まさにその候補イメージ上で、それぞれ上限に対してマージンのある目標値以下で -- そしてリリース後もそのゲートを維持します。分散は残るからです。
 
 ### リトライは 1 回だけ、証拠に基づき、最初の試行を残す
 
-pass-on-retry は成功ではなくトリアージのシグナルです -- [ルール 2](./deflaking-recipe.mdx#3つのルール-ルール2-—-「flakyだから仕方ない」は決して許容されない。受け入れたflakeは、すべてredの価値を下げる。)と[リトライ予算](../decision-guide/execution-tiers.mdx#リトライ予算)がすでにそう言っています。ライブ証明に固有なのは、リトライをどう *ゲート* するかです。ちょうど 1 回、失敗した試行自身の証拠が閉じた許可リストにある信頼済みの retryable な理由を示し、**かつ** クリーンアップが証明されている（facade は削除、プレビューは revoke、サイトは tombstone）ときにだけ許可します。汎用の「terminal failure」コードは retryability を持たないので、リトライを起動してはいけません。最初の試行の recovery 証拠はリトライ前に独立したファイルへ書き、バンドルに持ち込みます -- 最初の試行の証明を上書きするリトライは、失敗理由をジョブログにしか残しません。受け入れのサンプルは定義上リトライなしです。判定レベルのリトライと実行途中のセッション再発行は禁止し、証拠の中で *検証* します（`verdictRetries: 0`、`reissued: false`）。記録されない許容は、静かに広がりうる許容だからです。
+pass-on-retry は成功ではなくトリアージのシグナルです -- [ルール 2](./deflaking-recipe.mdx#3つのルール-ルール2-—-「flakyだから仕方ない」は決して許容されない。受け入れたflakeは、すべてredの価値を下げる。)と[リトライ予算](../decision-guide/execution-tiers.mdx#リトライ予算)がすでにそう言っています。ライブ証明に固有なのは、リトライをどう *ゲート* するかです。ちょうど 1 回、失敗した試行自身の証拠が閉じた許可リストにある信頼済みの retryable な理由を示し、**かつ** クリーンアップが証明されている -- 証明がその実行のためにデプロイした一時的な facade が消え、プレビューが revoke され、サイトが tombstone されている -- ときにだけ許可します。汎用の「terminal failure」コードは retryability を持たないので、リトライを起動してはいけません。リトライの前に、最初の試行のチェックポイントに対して recovery ステップを走らせ、その証拠を独立したファイルへ書き、2 回目の試行のものと同じように検証されるようバンドルに持ち込みます -- 最初の試行の証明を上書きするリトライは失敗理由をジョブログにしか残さず、2 番目の generation しかチェックポイントしないリトライは、最初の generation のクリーンアップをプロセス内の証拠だけで証明されたままにします。受け入れのサンプルは定義上リトライなしです。判定レベルのリトライと実行途中のセッション再発行は禁止し、証拠の中で *検証* します（`verdictRetries: 0`、`reissued: false`）。記録されない許容は、静かに広がりうる許容だからです。
 
 ## クリーンアップは独立したゲート
 
@@ -151,7 +158,7 @@ always-run の形 -- シェルスクリプトの [`trap cleanup EXIT`](../projec
 
 1. **プロセス内で、`catch` の中と、さらに `finally` の中で。** あらゆるライブな変更の前に、変更の識別子をアトミックに（temp ファイル＋rename で）チェックポイントし、別の `recover` コマンドが識別子だけから teardown を再生できるようにします。recovery が必要とするのは、スクラブ済みの証拠が保持を許されているものだけでなければなりません -- 最初の teardown 経路はスクラバーが除去するハッシュに依存していたため、保持された証拠から始めた recovery は完了できませんでした。`pending` センチネルは変更が起きておらず何も片付けないことを意味します。teardown は observe-before-mutate かつ冪等です。まず終端状態を読み、まだ終端でないものだけを変更し、正確に良性のエラーコード 1 つだけを許容し、読み直し、テストでは 2 回走らせても unpublish と tombstone がちょうど 1 回ずつであることをアサートします。
 2. **always-run の CI ステップでもう一度。** その出力ファイルは別に検証され、retention と実行の識別子についてプロセス内の teardown と *一致* しなければなりません。キャンセルされた実行は不明であって、成功ではありません。
-3. **物理的な削除を決して主張しない閉じた enum で報告する** -- `revoked | absent`、`tombstoned | absent`、`retained-under-policy | not-created-or-unconfirmed`。論理的な teardown は削除ではありません。何が残り、どのポリシーの下にあるかを述べます。
+3. **teardown が観測した以上のことを決して主張しない閉じた enum で報告する** -- プレビューには `revoked | absent | unproven`、サイトには `tombstoned | absent | unproven`、正当に残りうる残存物には `retained-under-policy | not-created-or-unconfirmed`。証明が完全に所有するリソース（デプロイした一時的な facade など）は消えたとアサートできます。それ以外の論理的な teardown は削除ではありません -- 何が残り、どのポリシーの下にあるかを述べます。
 
 ```yaml
 - id: live-proof
@@ -159,7 +166,7 @@ always-run の形 -- シェルスクリプトの [`trap cleanup EXIT`](../projec
 - if: always() && steps.live-proof.outcome != 'skipped'
   run: node scripts/live-proof.mjs recover --evidence out/recovery.json   # idempotent
 - if: always()
-  run: node scripts/prepare-evidence.mjs out/   # credential-free; validates, re-scrubs, bundles
+  run: node scripts/prepare-evidence.mjs out/   # credential-free; validates, re-scrubs, bundles; non-zero on any named issue
 - if: always()
   uses: actions/upload-artifact@v4
   with:
@@ -171,7 +178,7 @@ always-run の形 -- シェルスクリプトの [`trap cleanup EXIT`](../projec
 
 「クリーンアップ」の下には、異なる 2 つの義務が隠れています。証明が作った使い捨てのリソースは、上記のとおり *論理的に* 片付け、残存物を勘定します。証明が一時的に向け替える共有の表面 -- ルートのターゲット、デプロイ済みのランタイムバージョン -- は別の契約です。正確な事前状態をスナップショットし、切り替え前にそれをアサートし、あらゆる結果で復元し、読み戻し、その後センチネルホストに対して hidden（not-found）応答を probe します。前者を後者の語彙で記述してはいけません。「removed」も「restored」も主張であり、証拠は teardown が獲得していない主張をしてはなりません。
 
-hidden-surface の probe -- 公開アセットが not-found を返す、プレビューが *古い cookie で* not-found を返す -- は、**記録された注釈ではなく、検証成功に必須の入力です**。このラウンドの最後の変更は、緑の証明に public-hidden probe を必須にすることでした。それまでは、公開面が消えたことを証明せずに証明が検証を通りえたのです。どの経路がそれを走らせるかについても同じく正直でいてください。このウォークスルーでは HTTP の読み戻し probe はプロセス内の成功経路で走り、always-run の recovery はコントロールプレーンの観測で teardown を証明していました。「recovery: complete」が起きていない probe を暗示するのに任せるのではなく、証拠の中でそう言ってください。
+hidden-surface の probe -- 公開アセットが not-found を返す、プレビューが *古い cookie で* not-found を返す -- は、**記録された注釈ではなく、成功を主張する証明を検証するのに必須の入力です**。このラウンドの最後の変更は、緑の証明に public-hidden probe を必須にすることでした。それまでは、公開面が消えたことを証明せずに証明が検証を通りえたのです。どの経路がそれを走らせるかについても同じく正直でいてください。このウォークスルーでは HTTP の読み戻し probe はプロセス内の成功経路で走り、always-run の recovery はコントロールプレーンの観測で teardown を証明していました。「recovery: complete」が起きていない probe を暗示するのに任せるのではなく、証拠の中でそう言ってください。
 
 ### 不在は赤
 
@@ -189,14 +196,14 @@ hidden-surface の probe -- 公開アセットが not-found を返す、プレ�
 2. **実際の遷移を通す。終端オブジェクトを手組みしない。** 期待する来歴はそれを作るイベントで固定し、あらゆる遷移のあとでアサートし、サブレコードをクリアする遷移より長生きするレコードに保存します。
 3. **証拠は、検証器がスクラブの *あとに* 読むバージョン付きの契約。** スクラブ前に衝突しないキー名の閉じた enum のサブ契約へ射影し、フィクスチャは本番のスクラバーで通る経路に書き、scrub → parse → scrub がバイト単位で同一であることを証明します。
 4. **理由コードは閉じたソート済みの集合**で、「missing」は「mismatch」と別であり、enum 網羅性と敵対的な値の不在が証明されています。外部の出力は phase コードに還元します。
-5. **サンプルはテールの証明ではない。** 信頼できる封筒でデッドラインを phase に帰属させ、取り除いた操作を実際のイメージ上で回数によって証明し、マージンのある新しいリトライなしの実行でゲートします。
+5. **サンプルはテールの証明ではない。** 信頼できる封筒でデッドラインを phase に帰属させ、取り除いた操作を実際のイメージ上で回数によって証明し、実行を計測したイメージを固定し、マージンのある新しいリトライなしの実行でゲートします。
 6. **リトライは 1 回だけ、証拠に基づき、クリーンアップが証明されたときに、最初の試行を残して。**
-7. **クリーンアップは 3 層で、独立した判定を持つ。** 残存物は削除を決して主張しない enum で勘定し、hidden-surface の probe は必須の入力です。
+7. **クリーンアップは 3 層で、独立した判定を持つ。** 残存物は観測した以上を決して主張しない enum で勘定し、証明が向け替える共有の表面はスナップショットを取り、あらゆる結果で復元して読み戻し、hidden-surface の probe は緑の証明に必須の入力です。
 8. **不在は赤。** そしてあらゆる比較は負のコントロールを伴います。
 
 ## 次に読むべきもの
 
-- [デプロイ済みターゲットに対する環境ティア別テスト](../ci-operations/environment-tiered-testing.mdx#各ティアに何を割り当てるか) -- ティアの表と、このページがフェンス付きの例外となる「本番を変更しない」ルール
+- [デプロイ済みターゲットに対する環境ティア別テスト](../ci-operations/environment-tiered-testing.mdx#各ティアに何を割り当てるか) -- ティアの表と、このページがフェンス付きの例外となるその読み取り専用のプレビュー行。本番には手を触れません
 - [フレイク根本原因カタログ & デフレイキングレシピ](./deflaking-recipe.mdx) -- pass-on-retry についてのルール 2、不変条件をアサートするルール 3、そしてカタログのデッドラインの項目
 - [デプロイ後のスモークテスト](../ci-operations/post-deploy-smoke-tests.mdx) -- skip パスの規律と「壊れたデプロイに対してアサーションが失敗することを証明する」、フェイルクローズの読み取り専用の祖先
 - [実行ティア](../decision-guide/execution-tiers.mdx#リトライ予算) -- リトライ予算と、なぜアップロードのないトレースは証拠にならないのか
