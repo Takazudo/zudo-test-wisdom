@@ -26,10 +26,10 @@
     "format:md:check": "pnpm dlx @takazudo/mdx-formatter --check \"src/content/**/*.{md,mdx}\"",
     "b4push": "bash scripts/run-b4push.sh",
     "setup:doc-skill": "bash scripts/setup-doc-skill.sh test-wisdom",
-    "setup:doc-skill-silent": "bash scripts/setup-doc-skill.sh --silent",
-    "setup:doc-skill:claude": "bash scripts/setup-doc-skill.sh --target claude",
-    "setup:doc-skill:codex": "bash scripts/setup-doc-skill.sh --target codex",
-    "setup:doc-skill:both": "bash scripts/setup-doc-skill.sh --target both"
+    "setup:doc-skill-silent": "bash scripts/setup-doc-skill.sh --silent test-wisdom",
+    "setup:doc-skill:claude": "bash scripts/setup-doc-skill.sh --target claude test-wisdom",
+    "setup:doc-skill:codex": "bash scripts/setup-doc-skill.sh --target codex test-wisdom",
+    "setup:doc-skill:both": "bash scripts/setup-doc-skill.sh --target both test-wisdom"
   },
   "dependencies": {
     "@takazudo/zdtp": "0.4.11",
