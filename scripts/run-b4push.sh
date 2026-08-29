@@ -6,21 +6,22 @@ set -euo pipefail
 # Step order (cheap → expensive):
 #   1. Format check (mdx)
 #   2. Category metadata check (pure-Node, reads src/ + zfb.config.ts)
-#   3. Template drift check (needs node_modules — create-zudo-doc devDep)
-#   4. Pin parity check (pure-Node, reads package.json only)
-#   5. Wrangler pin check (needs node_modules — reads the zfb platform binary)
-#   6. Type checking (zfb check)
-#   7. Build (zfb build)
-#   8. HTML validation (html-validate dist/**/*.html)
-#   9. Link check (check-links)
+#   3. Link checker tests (pure Node)
+#   4. Template drift check (needs node_modules — create-zudo-doc devDep)
+#   5. Pin parity check (pure-Node, reads package.json only)
+#   6. Wrangler pin check (needs node_modules — reads the zfb platform binary)
+#   7. Type checking (zfb check)
+#   8. Build (zfb build)
+#   9. HTML validation (html-validate dist/**/*.html)
+#  10. Link check (check-links)
 #
 # Env overrides for non-interactive use:
-#   B4PUSH_SKIP_HTML_VALIDATE=1  — skip HTML validation (step 8)
-#   B4PUSH_SKIP_LINK_CHECK=1     — skip link check (step 9)
+#   B4PUSH_SKIP_HTML_VALIDATE=1  — skip HTML validation (step 9)
+#   B4PUSH_SKIP_LINK_CHECK=1     — skip link check (step 10)
 
 START_TIME=$(date +%s)
 FAILURES=()
-TOTAL_STEPS=9
+TOTAL_STEPS=10
 CURRENT_STEP=0
 
 step() {
@@ -57,7 +58,15 @@ else
   fail "Category metadata check"
 fi
 
-# ── Step 3: Template drift check ──────────────────────
+# ── Step 3: Link checker tests ────────────────────────
+step "Link checker tests (test:links)"
+if (cd "$ROOT_DIR" && pnpm test:links); then
+  pass "Link checker tests passed"
+else
+  fail "Link checker tests"
+fi
+
+# ── Step 4: Template drift check ──────────────────────
 # Requires node_modules (reads create-zudo-doc devDep templates).
 # Run `pnpm install` first if this fails with "not found".
 step "Template drift check"
@@ -67,10 +76,10 @@ else
   fail "Template drift check"
 fi
 
-# ── Step 4: Pin parity check ──────────────────────────
+# ── Step 5: Pin parity check ──────────────────────────
 # Pure-Node: reads package.json only, no install needed.
 # Scripts check-pin-parity.mjs + check-wrangler-pin.mjs are provided by
-# the pin-guards sub-task (#68). Steps 4–5 will fail until that branch merges.
+# the pin-guards sub-task (#68). Steps 5–6 will fail until that branch merges.
 step "Pin parity check (check:pin-parity)"
 if (cd "$ROOT_DIR" && pnpm check:pin-parity); then
   pass "Pin parity check passed"
@@ -78,7 +87,7 @@ else
   fail "Pin parity check"
 fi
 
-# ── Step 5: Wrangler pin check ────────────────────────
+# ── Step 6: Wrangler pin check ────────────────────────
 # Requires node_modules (reads the zfb platform binary's embedded
 # EXPECTED_WRANGLER_VERSION). Catches a zfb bump that left the wrangler
 # pin stale, which would silently break local `zfb dev`/`preview`.
@@ -89,7 +98,7 @@ else
   fail "Wrangler pin check"
 fi
 
-# ── Step 6: Type checking ─────────────────────────────
+# ── Step 7: Type checking ─────────────────────────────
 step "Type checking (zfb check)"
 if (cd "$ROOT_DIR" && pnpm check); then
   pass "Type checking passed"
@@ -97,7 +106,7 @@ else
   fail "Type checking"
 fi
 
-# ── Step 7: Build ─────────────────────────────────────
+# ── Step 8: Build ─────────────────────────────────────
 step "Build (zfb build)"
 if (cd "$ROOT_DIR" && pnpm build); then
   pass "Build passed"
@@ -105,7 +114,7 @@ else
   fail "Build"
 fi
 
-# ── Step 8: HTML validation ───────────────────────────
+# ── Step 9: HTML validation ───────────────────────────
 step "HTML validation (html-validate)"
 if [[ "${B4PUSH_SKIP_HTML_VALIDATE:-}" == "1" ]]; then
   skip "HTML validation (B4PUSH_SKIP_HTML_VALIDATE=1)"
@@ -117,7 +126,7 @@ else
   fi
 fi
 
-# ── Step 9: Link check ───────────────────────────────
+# ── Step 10: Link check ──────────────────────────────
 step "Link check (check:links)"
 if [[ "${B4PUSH_SKIP_LINK_CHECK:-}" == "1" ]]; then
   skip "Link check (B4PUSH_SKIP_LINK_CHECK=1)"
