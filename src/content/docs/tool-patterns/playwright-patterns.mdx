@@ -1349,6 +1349,7 @@ jobs:
         with:
           name: blob-report-${{ strategy.job-index }}
           path: blob-report/
+          if-no-files-found: error   # default is warn: a shard that wrote no blob report must go red
           retention-days: 1
 
   merge-reports:
@@ -1372,12 +1373,13 @@ jobs:
         with:
           name: playwright-report
           path: playwright-report/
+          if-no-files-found: error   # default is warn: an empty merged report must go red, not green
           retention-days: 14
 ```
 
 <Note>
 
-Each shard now writes a `blob` report instead of the default HTML report — HTML reports from separate shards can't be combined, but blob reports can. Two details matter for the failure case, which is exactly when you need the report most: `fail-fast: false` on the matrix stops GitHub Actions from cancelling the other shards the moment one fails, and `if: always()` on the upload step keeps a failed shard's blob report from being skipped (GitHub Actions skips later steps by default once a step exits non-zero). Without both, `merge-reports` — which itself runs `if: always()` — would only ever see the blob reports of shards that passed.
+Each shard now writes a `blob` report instead of the default HTML report — HTML reports from separate shards can't be combined, but blob reports can. Two details matter for the failure case, which is exactly when you need the report most: `fail-fast: false` on the matrix stops GitHub Actions from cancelling the other shards the moment one fails, and `if: always()` on the upload step keeps a failed shard's blob report from being skipped (GitHub Actions skips later steps by default once a step exits non-zero). Without both, `merge-reports` — which itself runs `if: always()` — would only ever see the blob reports of shards that passed. `if-no-files-found: error` on the shard upload turns a shard that wrote no blob report into a red job instead of a quiet pass, which is the behavior you want here: a shard with no report is a shard whose result `merge-reports` cannot include.
 
 </Note>
 
@@ -1510,10 +1512,13 @@ e2e-full:
         path: |
           ${{ env.CI_OUTPUT }}/
           ${{ env.FLAKY_OUTPUT }}/
+        if-no-files-found: error   # default is warn; fires only when every listed path is empty
         retention-days: 2
 ```
 
 The guard runs first and costs nothing. It earns its line because the failure it prevents is invisible: pointing both lanes back at `test-results/` produces a green workflow with a plausible-looking artifact attached.
+
+`if-no-files-found: error` on that upload fires only when **every** listed path is empty. It catches the total miss — neither lane wrote anything — not the partial one where the quarantine lane's output uploads on its own and the run stays green.
 
 The `path:` here ships the raw output directories to keep the two-lane mechanic visible — do not copy it verbatim. On the measured numbers in the storage-cap subsection below, raw directories blow the storage allowance on their first failed run; keep the per-invocation `--output` split, but upload the self-contained HTML report instead.
 

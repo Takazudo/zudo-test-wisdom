@@ -725,7 +725,10 @@ export default defineConfig({
     path: |
       playwright-report/
       test-results/
+    if-no-files-found: error   # default is warn; fires only when both paths are empty
 ```
+
+`if-no-files-found: error` here fires only when **both** paths are empty. It does not catch the miss this warning is about, where `playwright-report/` exists and `test-results/` does not — one matching path is enough for the step to upload and stay green.
 
 The placement cuts the other way too: `outputDir` (`test-results/`) is **emptied at the start of every run**, so anything you park there to keep across runs is deleted by the next one — see [Artifacts You Want to Keep Must Live Outside `outputDir`](../tool-patterns/playwright-patterns.mdx#artifacts-you-want-to-keep-must-live-outside-outputdir).
 
