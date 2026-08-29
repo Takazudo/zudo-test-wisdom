@@ -187,6 +187,7 @@ In the worked gate, 41 V8/esbuild-heavy integration binaries shared one `max-thr
 [test-groups]
 heavy-serial-flock = { max-threads = 1 }
 heavy-serial-build = { max-threads = 1 }
+exam-heavy = { max-threads = 2 } # unchanged, from the exam lane above: its override still names this group
 
 [[profile.default.overrides]]
 # Class A: binaries that take the process-level advisory flock (checklist step 2).
@@ -200,7 +201,7 @@ filter = 'binary(dev_build_static_parity) | binary(dev_build_asset_graph)'
 test-group = 'heavy-serial-build'
 ```
 
-Three identical-SHA hosted runs of that split reduced the median **required `health` job** time from 22m22s to 18m54s -- the clock is that one job's own duration, not the gate's wall time -- while running 5,807 of 5,807 tests with zero retries and zero failures.
+Three identical-SHA hosted runs of that split reduced the median **required `health` job** time from 22m22s to 18m54s -- the clock is that one job's own duration, not the gate's wall time -- while running 5,807 of 5,807 tests with zero retries and zero failures. That interval is this one wave's own start and end; the 18m30s at the top of this section is the same job clock after every later wave, so the two figures are different endpoints, not a disagreement.
 
 The decision rule is narrow on purpose: **split only when the two classes are independently proven not to contend.** Proven means each class's isolation mechanism is identified and verified to exist (Migration Checklist step 3), not inferred from two groups happening to go green once. A split made on a guess reintroduces exactly the port and shared-state races the `max-threads = 1` group was created to suppress, and it reintroduces them as intermittent failures rather than as a config error.
 

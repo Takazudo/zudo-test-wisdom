@@ -69,10 +69,15 @@ Counts collide. A selection change that drops one test and picks up another leav
 set -euo pipefail
 
 # Replace with the suite's own list-only command (cargo nextest list,
-# playwright test --list, vitest list). Emit identity, never a bare title.
+# playwright test --list, vitest list), run once per gate lane with that
+# lane's own selection flags. Emit identity, never a bare title: nextest
+# scopes test names to their binary and the same name recurs across
+# binaries, so the identity is "<binary-id>::<test name>" -- keys[] alone
+# lets sort -u collapse a test dropped from one binary into its namesake.
 list_identities() {
   cargo nextest list --workspace --message-format json \
-    | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
+    | jq -r '."rust-suites" | to_entries[] | .key as $bin | .value.testcases | keys[] | "\($bin)::\(.)"' \
+    | sort -u
 }
 
 git checkout "$BASELINE_SHA" && list_identities > before.txt
@@ -83,7 +88,7 @@ sha256sum before.txt after.txt             # pin both digests beside the claim
 diff before.txt after.txt > identity.diff  # keep the artifact; set -e fails on any diff
 ```
 
-That diff is a bidirectional set equality, the same shape as [Ignored-Test-Manifest Parity](./scheduled-re-exam.mdx#ignored-test-manifest-parity-a-sibling-inventory-contract): a test that appeared and a test that vanished have to fail identically, or the check guards one direction only. On a Rust suite the inventory side is already mechanized — reconcile it per the [migration checklist](../tool-patterns/cargo-nextest-migration.mdx#migration-checklist-mechanical), and keep group membership honest with the [membership guard](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence), which is what stops a newly added binary from silently escaping the serialized group a split just created.
+That diff is a bidirectional set equality, the same shape as [Ignored-Test-Manifest Parity](./scheduled-re-exam.mdx#ignored-test-manifest-parity-a-sibling-inventory-contract): a test that appeared and a test that vanished have to fail identically, or the check guards one direction only. On a Rust suite the inventory side is already mechanized — reconcile it per the [migration checklist](../tool-patterns/cargo-nextest-migration.mdx#migration-checklist-mechanical), and keep group membership honest with the [membership guard](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence-enforce-heavy-group-membership-mechanically), which is what stops a newly added binary from silently escaping the serialized group a split just created.
 
 The list proves what was *selected*. Confirm what actually **executed** from the run's own JUnit: in the worked gate, 63 env-gate tests before and 63 after, splitting into the same 45 / 2 / 16 lane partitions both times. Pairing a count with a duration is the discipline [The Budget-Drift Trigger](../decision-guide/aggregate-suite-budget.mdx#the-budget-drift-trigger) already requires on every run — here it is the same pairing aimed at a before/after pair instead of at a trend.
 
@@ -91,7 +96,7 @@ The list proves what was *selected*. Confirm what actually **executed** from the
 
 A green conclusion answers "did whatever ran pass?" It does not answer "what did the run cost?", and during a speedup those are the same question. A pass-on-retry is [a triage signal, not a success](../decision-guide/execution-tiers.mdx#retry-budgets), and the retried attempt's time is part of the execution cost you are claiming to have reduced.
 
-So the audit reads the artifacts, not the check conclusion. For a Playwright suite, the retry-pass signal and its structural fallback are [Retry-Pass Detection](./scheduled-re-exam.mdx#flake-telemetry-mechanics-retry-pass-detection); for a Rust suite, the four JUnit elements that carry retry cost and the retry-tax formula over them are [Price Retries From the Real nextest JUnit Shape](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence). Hold the retry budget itself fixed across every sample: a wave that buys wall clock by spending retry budget has bought nothing.
+So the audit reads the artifacts, not the check conclusion. For a Playwright suite, the retry-pass signal and its structural fallback are [Retry-Pass Detection](./scheduled-re-exam.mdx#flake-telemetry-mechanics-retry-pass-detection); for a Rust suite, the four JUnit elements that carry retry cost and the retry-tax formula over them are [Price Retries From the Real nextest JUnit Shape](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence-price-retries-from-the-real-nextest-junit-shape). Hold the retry budget itself fixed across every sample: a wave that buys wall clock by spending retry budget has bought nothing.
 
 State the audit's scope as a count, so a reader can tell a real audit from a glance at the summary page. The worked gate's audit covered **25 JUnit files holding 50,301 `<testcase>` records, with zero flaky, failure, and error records among them** — which is also its honest caveat, because a healthy suite exercises none of the retry formulas. The audit proves absence, not that the parser would have priced a retry correctly.
 

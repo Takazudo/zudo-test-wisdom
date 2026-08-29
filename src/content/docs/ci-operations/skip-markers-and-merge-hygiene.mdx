@@ -30,7 +30,7 @@ GitHub's `squash_merge_commit_message` accepts `PR_BODY` ("default to the pull r
 
 ### Why a regular merge never trips this
 
-A regular merge commit does not do this. Its message is `Merge pull request #N from ...` plus the PR title; branch commit messages stay on their own commits, which are parents of the merge, not the merge itself. Skip detection reads the message of the commit that triggers the workflow, and that commit is the merge commit.
+A regular merge commit does not do this. Its message is `Merge pull request #N from ...` plus the PR title; branch commit messages stay on their own commits, which are parents of the merge, not the merge itself. Skip detection reads the message of the commit that triggers the workflow, and that commit is the merge commit. That holds under the default `merge_commit_message` (`PR_TITLE`); the same settings panel also offers `PR_BODY`, which copies the pull request body into a regular merge commit and reopens the channel. Derive the scan surface below for every merge method the repository allows, not only squash.
 
 This asymmetry is why a repository can carry the bug for months and only trip it occasionally: the misconfiguration is permanent, but it only fires on the merges that happen to be squashes. Every regular merge in between is a false negative that reads as evidence the setup is fine.
 
@@ -86,7 +86,10 @@ The scan surface is not a matter of taste. It falls out of two repository settin
 |---|---|---|
 | `PR_TITLE` | `BLANK` | the PR title, and nothing else |
 | `PR_TITLE` | `PR_BODY` | the PR title and the PR body |
+| `COMMIT_OR_PR_TITLE` | any | fix the setting first -- on a single-commit PR the squash title is that commit's own subject, which no PR field reveals |
 | any | `COMMIT_MESSAGES` | fix the setting first -- see below |
+
+`COMMIT_OR_PR_TITLE` is GitHub's default for the title, so a repository that only ever changed the message setting still has this row open.
 
 Two exclusions matter, and both are easy to get wrong in the direction of "scan more, just in case".
 
@@ -105,7 +108,10 @@ name: no-skip-marker
 
 on:
   # Only pull requests that can change the protected branch need this gate.
+  # The default type set omits `edited`: a title renamed after open would
+  # otherwise never be re-scanned.
   pull_request:
+    types: [opened, edited, reopened, synchronize]
     branches: [main]
 
 permissions:
@@ -192,7 +198,7 @@ Be precise about the residual case it **cannot** cover. A PR-time guard sees the
 
 <Warning>
 
-The guard is only *preventive* where a required status check exists to block on. Branch protection rules and rulesets are plan-gated: branch restrictions are available "in public repositories owned by a GitHub Free organization and in all repositories owned by an organization using GitHub Team or GitHub Enterprise Cloud", and rulesets are described as being for "customers on GitHub Team and GitHub Enterprise plans". On a **private repository on the Free plan** there is no required status check available, so a failing guard job reports and nothing more -- a red mark next to a merge button that still works. That is the difference between a declared gate and an enforced one, laid out in [Execution Tiers § Make the gate enforced, not just declared](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-make-the-gate-enforced-not-just-declared).
+The guard is only *preventive* where a required status check exists to block on. Branch protection rules and rulesets are plan-gated: on the Free plan both are available only in public repositories, and it takes GitHub Pro, Team, or Enterprise to apply them to a private one. On a **private repository on the Free plan** there is no required status check available, so a failing guard job reports and nothing more -- a red mark next to a merge button that still works. That is the difference between a declared gate and an enforced one, laid out in [Execution Tiers § Make the gate enforced, not just declared](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-make-the-gate-enforced-not-just-declared).
 
 </Warning>
 
@@ -203,6 +209,8 @@ Everything above is preventive, and prevention is the half that can be bypassed.
 ### Per workflow, not "any run exists"
 
 "Some run exists for this SHA" is a much weaker claim than it looks. A repository with five `push` workflows and a `paths` filter on each will happily produce a run for the docs lint while the deploy workflow -- the one whose absence matters -- produced nothing. Enumerate the workflows and assert one at a time.
+
+The same `paths` filter cuts the other way. A workflow whose paths the merge did not touch has no run to find, and that absence is not suppression -- derive the list per merge from the changed files against each workflow's `paths`, or restrict it to unfiltered workflows, or the assertion cries wolf on every docs-only merge and gets deleted.
 
 The second requirement is the bound. Run creation lags the merge by seconds, so a single immediate lookup races GitHub and reports a false absence. Poll to a deadline, and treat an empty result **after** the deadline as a failure, not as a no-op:
 
@@ -216,7 +224,10 @@ BASE="$1"
 SHA="$2"
 DEADLINE=$((SECONDS + 180))
 
-# Every workflow file that declares a push trigger on the target branch.
+# Every workflow file that declares a push trigger on the target branch AND
+# whose paths filter, if any, matches this merge's changed files. A workflow
+# outside its own paths has no run to find, and that is not suppression --
+# derive this list per merge or the check cries wolf on every docs-only one.
 # Enumerate them: "some run exists" is not the assertion, because a docs
 # lint firing proves nothing about the deploy workflow that did not.
 WORKFLOWS=(ci.yml deploy.yml preview.yml)
@@ -224,9 +235,11 @@ WORKFLOWS=(ci.yml deploy.yml preview.yml)
 fail=0
 for wf in "${WORKFLOWS[@]}"; do
   while :; do
+    # A transient gh failure is a retry, not an exit: under set -e a bare
+    # substitution would abort the poll with no FAIL line at all.
     count="$(gh run list --workflow="$wf" --event=push \
       --branch="$BASE" --commit="$SHA" --limit=1 \
-      --json databaseId --jq 'length')"
+      --json databaseId --jq 'length' || echo 0)"
     if [ "$count" -gt 0 ]; then
       echo "ok: $wf ran for $SHA"
       break

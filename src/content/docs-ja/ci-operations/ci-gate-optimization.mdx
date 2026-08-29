@@ -69,10 +69,15 @@ CIゲートを速くするための部品となるルールは、このガイド
 set -euo pipefail
 
 # Replace with the suite's own list-only command (cargo nextest list,
-# playwright test --list, vitest list). Emit identity, never a bare title.
+# playwright test --list, vitest list), run once per gate lane with that
+# lane's own selection flags. Emit identity, never a bare title: nextest
+# scopes test names to their binary and the same name recurs across
+# binaries, so the identity is "<binary-id>::<test name>" -- keys[] alone
+# lets sort -u collapse a test dropped from one binary into its namesake.
 list_identities() {
   cargo nextest list --workspace --message-format json \
-    | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
+    | jq -r '."rust-suites" | to_entries[] | .key as $bin | .value.testcases | keys[] | "\($bin)::\(.)"' \
+    | sort -u
 }
 
 git checkout "$BASELINE_SHA" && list_identities > before.txt
@@ -83,7 +88,7 @@ sha256sum before.txt after.txt             # pin both digests beside the claim
 diff before.txt after.txt > identity.diff  # keep the artifact; set -e fails on any diff
 ```
 
-この差分は双方向の集合一致であり、[無視テストマニフェストのパリティ](./scheduled-re-exam.mdx#兄弟インベントリ契約としての無視テストマニフェストのパリティ)とまったく同じ形です。現れたテストと消えたテストは、まったく同じように失敗しなければならず、さもなければチェックは片方向しか守っていません。Rustスイートなら、インベントリ側はすでに機械化されています — [移行チェックリスト](../tool-patterns/cargo-nextest-migration.mdx#移行チェックリスト（機械的）)に従って突き合わせ、[メンバーシップのガード](../tool-patterns/cargo-nextest-migration.mdx#移行後：証拠を失わずに最適化する)でグループ所属を正直に保ってください。それが、新しく追加されたバイナリが、分割によって作られた直列化グループから静かに抜け落ちるのを止めるものです。
+この差分は双方向の集合一致であり、[無視テストマニフェストのパリティ](./scheduled-re-exam.mdx#兄弟インベントリ契約としての無視テストマニフェストのパリティ)とまったく同じ形です。現れたテストと消えたテストは、まったく同じように失敗しなければならず、さもなければチェックは片方向しか守っていません。Rustスイートなら、インベントリ側はすでに機械化されています — [移行チェックリスト](../tool-patterns/cargo-nextest-migration.mdx#移行チェックリスト（機械的）)に従って突き合わせ、[メンバーシップのガード](../tool-patterns/cargo-nextest-migration.mdx#移行後：証拠を失わずに最適化する-重量級グループのメンバーシップを機械的に強制する)でグループ所属を正直に保ってください。それが、新しく追加されたバイナリが、分割によって作られた直列化グループから静かに抜け落ちるのを止めるものです。
 
 一覧が証明するのは、何が*選択された*かです。実際に**実行された**ものは、その実行自身のJUnitから確認してください。実測のゲートでは、env-gateテストが前も後も63件で、どちらも同じ 45 / 2 / 16 のレーン分割になりました。数と所要時間を対にすることは、[予算ドリフトのトリガー](../decision-guide/aggregate-suite-budget.mdx#予算ドリフトのトリガー)がすでに毎回の実行に要求している規律です — ここではその同じ対を、トレンドではなく前後のペアに向けているだけです。
 
@@ -91,7 +96,7 @@ diff before.txt after.txt > identity.diff  # keep the artifact; set -e fails on 
 
 グリーンという結論が答えているのは「走ったものは通ったか？」です。「その実行はいくらかかったか？」には答えておらず、高速化の最中には、この2つは同じ問いです。パスオンリトライは[成功ではなくトリアージのシグナル](../decision-guide/execution-tiers.mdx#リトライ予算)であり、リトライされた試行の時間は、あなたが削減したと主張している実行コストの一部です。
 
-だから監査は、チェックの結論ではなくアーティファクトを読みます。Playwrightスイートなら、リトライパスのシグナルとその構造的なフォールバックは[リトライパスの検知](./scheduled-re-exam.mdx#flakyテレメトリのメカニズム-リトライパスの検知)にあります。Rustスイートなら、リトライのコストを担う4つのJUnit要素と、その上のリトライ税の式は[実際のnextest JUnitの形からリトライに値札を付ける](../tool-patterns/cargo-nextest-migration.mdx#移行後：証拠を失わずに最適化する)にあります。リトライ予算そのものは、すべてのサンプルで固定してください。リトライ予算を消費して実測時間を買った波は、何も買っていません。
+だから監査は、チェックの結論ではなくアーティファクトを読みます。Playwrightスイートなら、リトライパスのシグナルとその構造的なフォールバックは[リトライパスの検知](./scheduled-re-exam.mdx#flakyテレメトリのメカニズム-リトライパスの検知)にあります。Rustスイートなら、リトライのコストを担う4つのJUnit要素と、その上のリトライ税の式は[実際のnextest JUnitの形からリトライに値札を付ける](../tool-patterns/cargo-nextest-migration.mdx#移行後：証拠を失わずに最適化する-実際のnextest-junitの形からリトライに値札を付ける)にあります。リトライ予算そのものは、すべてのサンプルで固定してください。リトライ予算を消費して実測時間を買った波は、何も買っていません。
 
 監査の範囲は数で述べてください。そうすれば読み手は、本物の監査とサマリーページの一瞥とを区別できます。実測のゲートの監査は、**25個のJUnitファイルに含まれる50,301件の `<testcase>` レコードを対象とし、そのうちflaky・failure・errorのレコードはゼロ**でした — これは同時に、その正直な但し書きでもあります。健全なスイートはリトライの式をどれも走らせないからです。監査が証明したのは不在であって、パーサーがリトライを正しく値付けできることではありません。
 

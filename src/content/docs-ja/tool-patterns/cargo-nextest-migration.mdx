@@ -187,6 +187,7 @@ Config Sketchの `heavy-serial` が1つのグループなのは、移行時に�
 [test-groups]
 heavy-serial-flock = { max-threads = 1 }
 heavy-serial-build = { max-threads = 1 }
+exam-heavy = { max-threads = 2 } # unchanged, from the exam lane above: its override still names this group
 
 [[profile.default.overrides]]
 # Class A: binaries that take the process-level advisory flock (checklist step 2).
@@ -200,7 +201,7 @@ filter = 'binary(dev_build_static_parity) | binary(dev_build_asset_graph)'
 test-group = 'heavy-serial-build'
 ```
 
-同一SHAでの3回のホステッド実行により、この分割は **必須（required）の `health` ジョブ** 時間の中央値を22m22sから18m54sへ短縮しました — ここでの時計は、ゲート全体のウォールクロックではなく、その1つのジョブ自身の所要時間です — 5,807件中5,807件のテストを実行し、リトライもゼロ、失敗もゼロでした。
+同一SHAでの3回のホステッド実行により、この分割は **必須（required）の `health` ジョブ** 時間の中央値を22m22sから18m54sへ短縮しました — ここでの時計は、ゲート全体のウォールクロックではなく、その1つのジョブ自身の所要時間です — 5,807件中5,807件のテストを実行し、リトライもゼロ、失敗もゼロでした。この区間はこの1つの波自身の始点と終点です。このセクション冒頭の18m30sは、その後のすべての波を経たあとの同じジョブ時計なので、2つの数字は異なる端点であって食い違いではありません。
 
 判断ルールは意図的に狭くしてあります：**2つのクラスが互いに競合しないことを独立に実証できたときだけ分割する。** 実証とは、各クラスの隔離メカニズムを特定し、それが実在することを確認済み（移行チェックリストのステップ3）だという意味であって、2つのグループがたまたま一度グリーンになった事実からの推測ではありません。当てずっぽうの分割は、`max-threads = 1` グループが抑え込むために作られたポートレースや共有状態のレースを、そのまま呼び戻します。しかも設定エラーとしてではなく、断続的な失敗として呼び戻すのです。
 

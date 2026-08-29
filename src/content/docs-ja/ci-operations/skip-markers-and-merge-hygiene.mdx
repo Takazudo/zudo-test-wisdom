@@ -30,7 +30,7 @@ GitHub の `squash_merge_commit_message` は `PR_BODY`（「プルリクエス�
 
 ### 通常のマージがこれを踏まない理由
 
-通常のマージコミットはこれをしない。そのメッセージは `Merge pull request #N from ...` と PR タイトルであり、ブランチのコミットメッセージはそれぞれ自分のコミットに留まる。それらはマージの親であって、マージそのものではない。スキップ検出はワークフローを起動するコミットのメッセージを読み、そのコミットとはマージコミットのことだ。
+通常のマージコミットはこれをしない。そのメッセージは `Merge pull request #N from ...` と PR タイトルであり、ブランチのコミットメッセージはそれぞれ自分のコミットに留まる。それらはマージの親であって、マージそのものではない。スキップ検出はワークフローを起動するコミットのメッセージを読み、そのコミットとはマージコミットのことだ。これはデフォルトの `merge_commit_message`（`PR_TITLE`）での話であり、同じ設定パネルには `PR_BODY` もある。それは PR 本文を通常のマージコミットにコピーし、経路を再び開く。後述のスキャン対象は、squash だけでなくリポジトリが許可するすべてのマージ方式について導出すること。
 
 この非対称性のせいで、リポジトリは何か月もこのバグを抱えたまま、たまにしか踏まない。設定ミスは恒久的だが、発火するのはたまたま squash だったマージだけである。その間の通常マージはすべて偽陰性であり、「この構成は問題ない」という証拠として読まれてしまう。
 
@@ -86,7 +86,10 @@ skip-checks: true      (also accepted as skip-checks:true)
 |---|---|---|
 | `PR_TITLE` | `BLANK` | PR タイトルのみ |
 | `PR_TITLE` | `PR_BODY` | PR タイトルと PR 本文 |
+| `COMMIT_OR_PR_TITLE` | 任意 | まず設定を直す -- コミットが 1 つだけの PR では squash のタイトルがそのコミット自身の件名になり、PR のどのフィールドにも現れない |
 | 任意 | `COMMIT_MESSAGES` | まず設定を直す -- 後述 |
+
+`COMMIT_OR_PR_TITLE` は GitHub のタイトル設定のデフォルトなので、メッセージ設定しか変えたことのないリポジトリでは、この行がまだ開いたままだ。
 
 除外すべきものが 2 つあり、どちらも「念のため広くスキャンする」方向へ間違えやすい。
 
@@ -105,7 +108,10 @@ name: no-skip-marker
 
 on:
   # Only pull requests that can change the protected branch need this gate.
+  # The default type set omits `edited`: a title renamed after open would
+  # otherwise never be re-scanned.
   pull_request:
+    types: [opened, edited, reopened, synchronize]
     branches: [main]
 
 permissions:
@@ -192,7 +198,7 @@ on:
 
 <Warning>
 
-ガードが*予防的*でありうるのは、ブロックできる必須ステータスチェックが存在する場合だけだ。ブランチ保護ルールとルールセットはプランで制限される。ブランチ制限は「GitHub Free の Organization が所有するパブリックリポジトリ、および GitHub Team か GitHub Enterprise Cloud を使う Organization が所有するすべてのリポジトリ」で有効化でき、ルールセットは「GitHub Team および GitHub Enterprise プランの顧客向け」と説明されている。**Free プランのプライベートリポジトリ**では必須ステータスチェックが使えないので、失敗したガードジョブは報告するだけで終わる -- 依然として押せるマージボタンの隣に出る赤い印だ。それが宣言されたゲートと強制されたゲートの違いであり、[実行ティア § ゲートを宣言ではなく強制にする](../decision-guide/execution-tiers.mdx#5つのティア-t0-t1-デフォルト-ゲートを宣言ではなく強制にする)で整理されている。
+ガードが*予防的*でありうるのは、ブロックできる必須ステータスチェックが存在する場合だけだ。ブランチ保護ルールとルールセットはプランで制限される。Free プランではどちらもパブリックリポジトリでしか使えず、プライベートリポジトリに適用するには GitHub Pro、Team、または Enterprise が要る。**Free プランのプライベートリポジトリ**では必須ステータスチェックが使えないので、失敗したガードジョブは報告するだけで終わる -- 依然として押せるマージボタンの隣に出る赤い印だ。それが宣言されたゲートと強制されたゲートの違いであり、[実行ティア § ゲートを宣言ではなく強制にする](../decision-guide/execution-tiers.mdx#5つのティア-t0-t1-デフォルト-ゲートを宣言ではなく強制にする)で整理されている。
 
 </Warning>
 
@@ -203,6 +209,8 @@ on:
 ### 「どれかが走った」ではなく、ワークフローごとに
 
 「この SHA に対して何かの実行が存在する」は、見た目よりずっと弱い主張だ。`push` ワークフローが 5 本あり、それぞれに `paths` フィルタが付いているリポジトリでは、ドキュメントの lint の実行は平然と生まれる一方で、不在こそが問題になるデプロイワークフローは何も生まない、ということが起こる。ワークフローを列挙し、1 本ずつアサートする。
+
+同じ `paths` フィルタは逆方向にも効く。マージが触れなかったパスのワークフローには見つけるべき実行がなく、その不在は抑制ではない。変更ファイルを各ワークフローの `paths` と突き合わせてマージごとにリストを導出するか、フィルタのないワークフローに限定すること。さもなければアサーションはドキュメントだけのマージのたびにオオカミ少年になり、削除される。
 
 2 つ目の要件は上限を設けることだ。実行の生成はマージから数秒遅れるので、1 回だけの即時参照は GitHub とレースし、偽の不在を報告する。期限までポーリングし、期限**後**の空の結果を no-op ではなく失敗として扱う。
 
@@ -216,7 +224,10 @@ BASE="$1"
 SHA="$2"
 DEADLINE=$((SECONDS + 180))
 
-# Every workflow file that declares a push trigger on the target branch.
+# Every workflow file that declares a push trigger on the target branch AND
+# whose paths filter, if any, matches this merge's changed files. A workflow
+# outside its own paths has no run to find, and that is not suppression --
+# derive this list per merge or the check cries wolf on every docs-only one.
 # Enumerate them: "some run exists" is not the assertion, because a docs
 # lint firing proves nothing about the deploy workflow that did not.
 WORKFLOWS=(ci.yml deploy.yml preview.yml)
@@ -224,9 +235,11 @@ WORKFLOWS=(ci.yml deploy.yml preview.yml)
 fail=0
 for wf in "${WORKFLOWS[@]}"; do
   while :; do
+    # A transient gh failure is a retry, not an exit: under set -e a bare
+    # substitution would abort the poll with no FAIL line at all.
     count="$(gh run list --workflow="$wf" --event=push \
       --branch="$BASE" --commit="$SHA" --limit=1 \
-      --json databaseId --jq 'length')"
+      --json databaseId --jq 'length' || echo 0)"
     if [ "$count" -gt 0 ]; then
       echo "ok: $wf ran for $SHA"
       break

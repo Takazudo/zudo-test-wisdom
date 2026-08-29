@@ -700,6 +700,8 @@ The Node side is a **bounded buffer keyed by run id**:
 
 ```typescript
 // e2e/cross-context-evidence.ts -- observer-only; nothing here is on the product path.
+// parseDiagnostic and validateRun are elided; "Validate, then apply the
+// evidence-source hierarchy" below is their entire specification.
 import type { Page } from "@playwright/test";
 
 const MAX_RECORDS_PER_RUN = 64;
@@ -741,14 +743,16 @@ export async function installEvidenceBridge(page: Page, runId: string) {
   });
 
   // Re-runs on every navigation and every attached frame, so it must be idempotent.
-  await page.addInitScript(() => {
+  // The observer stamps the run id: the product never learns it, so a record can
+  // only belong to the run whose bridge delivered it.
+  await page.addInitScript(({ runId }) => {
     if ((window as any).__evidenceBridgeInstalled) return;
     (window as any).__evidenceBridgeInstalled = true;
     addEventListener("app:export-diagnostic", (event) => {
       // Fire-and-forget: the product path never awaits the bridge.
-      void (window as any).recordDiagnostic((event as CustomEvent).detail);
+      void (window as any).recordDiagnostic({ ...(event as CustomEvent).detail, runId });
     });
-  });
+  }, { runId });
 
   return { runs, stats, terminal, attached: false };
 }
