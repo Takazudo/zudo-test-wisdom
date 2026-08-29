@@ -32,6 +32,8 @@ A freshly attached domain is not instantly reachable, so a smoke test that hard-
 
 That skip path is the single most dangerous part of the test, because **an unreachable site and a skipped test look identical from the outside** -- both are a green build with no assertions run. Three rules keep it honest.
 
+The same shape recurs one layer up, at the CI trigger itself: a suppressed workflow and a passing workflow look identical from the outside -- and there not even a run exists to open. See [CI-Skip Markers and Merge Hygiene](./skip-markers-and-merge-hygiene.mdx).
+
 ### 1. Never put an expired certificate on the skip list
 
 The most common way this breaks is a broad TLS matcher:
