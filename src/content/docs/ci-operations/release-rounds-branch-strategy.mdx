@@ -209,7 +209,7 @@ jobs:
 
 <Danger>
 
-**Never let the skip marker reach a base-`main` PR.** The `[skip test]` opt-out exists so an author can iterate quickly on a `develop`-targeting branch without waiting on the full gate every push. If that same marker could suppress the gate on a round PR, one stray commit message would ship untested code straight to the production deploy. The `base_ref == 'main'` check has to be evaluated *first* and unconditionally, exactly as above -- the invariant is that no marker, label, or convention can bypass the gate on the branch that changes production.
+**Never let the skip marker reach a base-`main` PR.** The `[skip test]` opt-out exists so an author can iterate quickly on a `develop`-targeting branch without waiting on the full gate every push. If that same marker could suppress the gate on a round PR, one stray commit message would ship untested code straight to the production deploy. The `base_ref == 'main'` check has to be evaluated *first* and unconditionally, exactly as above -- the invariant is that no marker, label, or convention can bypass the gate on the branch that changes production. Note also what this check *cannot* see: a GitHub-native `[skip ci]` suppresses the workflow itself, so this step never exists to evaluate it -- no in-workflow guard can catch that hazard, and only a required status check (which leaves the suppressed run pending) closes it -- the mechanics, and the merge-message guard that covers the squash side, are in [CI-Skip Markers and Merge Hygiene](./skip-markers-and-merge-hygiene.mdx).
 
 </Danger>
 
@@ -243,3 +243,4 @@ This slots cleanly onto the [Environment-Tiered Testing](./environment-tiered-te
 - [Execution Tiers](../decision-guide/execution-tiers.mdx) -- the T0-T4 vocabulary; the local heavy lane (T4) is the per-topic early signal that partners with the nightly schedule.
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) -- how a test earns "heavy" classification in the first place, deciding what belongs in the base-`main`-gated lane.
 - [Environment-Tiered Testing](./environment-tiered-testing.mdx) -- staging in the deploy-target sense, and where the preview-on-`develop` migration-rehearsal mapping fits.
+- [CI-Skip Markers and Merge Hygiene](./skip-markers-and-merge-hygiene.mdx) -- the second, independent reason not to squash: a squash merge can copy a CI-skip marker out of branch history and onto `main`, suppressing every `push` workflow for that commit.

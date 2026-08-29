@@ -658,6 +658,222 @@ export function assertNoConsoleErrors(errors: string[]) {
 
 </Warning>
 
+## クロスコンテキストの終端証拠：ブラウザイベントをレースし、ページ診断は Node 側に残す
+
+上のモニターは `page.on` のイベントを **Node 側**にバッファリングしています。一般化する価値があるのは、まさにその部分です。テスト対象の結果がブラウザレベルの終端イベント — ダウンロード、ポップアップ、ファイルチューザー — である場合、Playwright はそれを Node 側で観測する一方、それを説明する診断情報はページの中にあり、しかもページの実行コンテキストはまさにその境界で消えてよいことになっています。これに耐える形は、ページ側のブリッジが届けたレコードを到着した瞬間に Node 側へコピーし、加えてブラウザ自身の終端イベントをトリガーの前に登録して、赤を意味するものすべてとレースさせることです。
+
+実例：`zudo-pattern-gen` のエクスポートフロー — ファイルを生成してブラウザに引き渡すダイアログ — は、この 1 つの継ぎ目から 2 つの偽陰性を続けて生み出しました。
+
+### 同じ継ぎ目から生まれた 2 つの偽陰性
+
+1 つ目はリスナーをトリガーの前に正しくインストールしていましたが、それでもダウンロードを取りこぼしました：
+
+```typescript
+// Listener exists, but page-resident polling can still defeat it.
+const download = page.waitForEvent("download");
+await start.click();
+await expect.poll(() => readDialogStatus(page)).toBe("done");
+await download;
+```
+
+`download` の Promise はクリックの前に登録されており、[デフレイキングレシピのステップ1](../test-integrity/deflaking-recipe.mdx#part-2-—-デフレイキングレシピ-ステップ1-—-タイミング待機をイベントキーの待機に置き換える（リスナーはトリガーの前にインストール）)が要求するとおりです。バグはトリガーと消費のあいだの行にあります。`readDialogStatus` はページを読んでおり、終端の境界でダイアログの実行コンテキストが消えました。ポーリングは `Execution context was destroyed` を投げ、テストは既に観測済みのダウンロードを手に持ったまま赤になりました。プロダクトは動いていたのに、計測器自身の DOM 読み取りが証明を捨てたのです。
+
+修正版は結果を Node 側に保ちつつ、ステータスを `page.exposeFunction` 経由で届くページ側の `done` バインディングに移しました — そのうえで、実際のダウンロードのあと 1 スケジューラーターン以内にそのバインディングが届くことを要求したのです。バインディングの配送は、まさに解体されつつあるその境界を越えます。したがって、その実行を落とすのに十分なだけ遅れることがあります。判定はプロダクトではなく冗長なオブザーバーテレメトリのものになりました。同じ誤りの配置違い — 診断が、それが記述するために存在するはずの結果より上位に立ってしまったのです。
+
+2 度とも継ぎ目は 1 つでした — 結果は Node 側で観測され、証拠は死ぬことを許されたページの中に居座っている、という継ぎ目です。
+
+### ブリッジは最初のナビゲーションより前にインストールする
+
+最初のナビゲーションより前、そしてどのトリガーよりも前に、次の順序で 3 つを呼びます：
+
+1. `page.exposeFunction("recordDiagnostic", ...)` — Node 側のシンク。ページからは `window.recordDiagnostic` として到達できます。この方法でインストールされた関数はナビゲーションを越えて生き残ります。
+2. `page.addInitScript(installDiagnosticListener)` — バインディングを呼ぶページ側のリスナー。init スクリプトはドキュメントが作られたあと、ページ自身のスクリプトが 1 つも走る前に評価され、あらゆるナビゲーションと、アタッチまたはナビゲートされるあらゆる子フレームで再実行されます。
+3. そのうえで初めて `page.goto(...)` とトリガー。
+
+`exposeFunction` が先なのは、init スクリプトがドキュメント開始時点でバインディングを呼ぶからです。あとからバインディングをインストールすると、最初のドキュメントのレコードは行き場を失います。再実行という性質は両刃です。`page.evaluate` でインストールしたリスナーなら消えてしまうナビゲーションのあとでもブリッジは自力で復旧しますが、その代わりページ側は冪等でなければならず、すべてのレコードは自分が属する run id を持たなければなりません。本サイトに 1 つだけある `addInitScript` の用例 — コネクション飢餓の項にある[`page.goto()` の前に仕込む A/B フラグ](../test-integrity/deflaking-recipe.mdx#part-1-—-根本原因カタログ-6-無関係な待機を飢えさせるアプリ内バックグラウンド処理) — も、この「ドキュメントが走る前」という保証に依存しています。
+
+Node 側は **run id をキーにした境界付きバッファ**です：
+
+- **境界付き** — 実行あたりのレコード数の上限と、保持する実行数の上限。古いものから捨てます。おしゃべりなページがテストプロセスを肥大させられてはいけません。
+- **キー付き** — 放棄された過去の実行のレコードが、あとの実行の契約を満たすことは決してありません。
+- **到着時にコピー** — コールバックは配送時点で検証し、ページのハンドルではなく素のスナップショットとして保存します。既に届いたものは、コンテキストの消失では消せません。
+
+```typescript
+// e2e/cross-context-evidence.ts -- observer-only; nothing here is on the product path.
+// parseDiagnostic and validateRun are elided; "Validate, then apply the
+// evidence-source hierarchy" below is their entire specification.
+import type { Page } from "@playwright/test";
+
+const MAX_RECORDS_PER_RUN = 64;
+const MAX_RUNS = 4;
+
+export type Diagnostic = {
+  v: 1;
+  runId: string;
+  seq: number;
+  stage: "start" | "progress" | "done" | "error" | "cancel";
+  reason?: "quota" | "network" | "aborted";
+};
+
+export async function installEvidenceBridge(page: Page, runId: string) {
+  const runs = new Map<string, Diagnostic[]>();
+  const stats = { malformed: 0 };
+  let signalTerminal!: (record: Diagnostic) => void;
+  const terminal = new Promise<Diagnostic>((resolve) => {
+    signalTerminal = resolve;
+  });
+
+  // exposeFunction BEFORE addInitScript: the init script calls this binding at
+  // document start. It must never throw -- a throw rejects the page-side call and
+  // resurfaces as a page error. Malformed input is counted, and counted is red.
+  await page.exposeFunction("recordDiagnostic", (raw: unknown) => {
+    const record = parseDiagnostic(raw); // version + closed enums, per record
+    if (!record) {
+      stats.malformed += 1;
+      return;
+    }
+    // Copy on arrival: a snapshot held in Node cannot be erased by context loss.
+    const list = runs.get(record.runId) ?? [];
+    list.push(record);
+    runs.set(record.runId, list.slice(-MAX_RECORDS_PER_RUN)); // bounded per run
+    for (const stale of [...runs.keys()].slice(0, -MAX_RUNS)) runs.delete(stale);
+    if (record.runId === runId && (record.stage === "error" || record.stage === "cancel")) {
+      signalTerminal(record); // resolves the race's active-run error/cancel branch
+    }
+  });
+
+  // Re-runs on every navigation and every attached frame, so it must be idempotent.
+  // The observer stamps the run id: the product never learns it, so a record can
+  // only belong to the run whose bridge delivered it.
+  await page.addInitScript(({ runId }) => {
+    if ((window as any).__evidenceBridgeInstalled) return;
+    (window as any).__evidenceBridgeInstalled = true;
+    addEventListener("app:export-diagnostic", (event) => {
+      // Fire-and-forget: the product path never awaits the bridge.
+      void (window as any).recordDiagnostic({ ...(event as CustomEvent).detail, runId });
+    });
+  }, { runId });
+
+  return { runs, stats, terminal, attached: false };
+}
+
+export type Evidence = Awaited<ReturnType<typeof installEvidenceBridge>>;
+```
+
+<Note>
+
+このブリッジは**観測専用**です。ページは診断を発火したら先へ進みます。プロダクトの経路が `recordDiagnostic` を await することはなく、ブラウザ自身のイベントが既に冗長にしたレコードをアサーションが待つこともありません。プロダクトが待たなければならない計装は、もはや計装ではありません — それはテスト時にだけ走る、独自の故障モードを持つ 2 本目のプロダクト経路です。
+
+</Note>
+
+### 終端イベントはトリガーの前に登録し、そのうえでレースする
+
+`page.waitForEvent("download")` はクリックより前に置きます — Playwright 自身のダウンロードガイドもクリックの前に待機を開始しますし、[ステップ1](../test-integrity/deflaking-recipe.mdx#part-2-—-デフレイキングレシピ-ステップ1-—-タイミング待機をイベントキーの待機に置き換える（リスナーはトリガーの前にインストール）)が理由を既に導いています。このパターンが足すのはその次です。ページを読むのではなく、4 つのブランチの**レース**を行います。
+
+1. 終端イベントそのもの — Playwright が Node 側に届ける `download`。
+2. アクティブな実行のエラーまたはキャンセルの証拠 — **この** run id のレコードが失敗ステージを報告したときにバッファが解決する Promise。
+3. ページのクラッシュまたはクローズ。
+4. 1 つだけの絶対デッドライン。
+
+ブランチ 3 はブランチ 1 を救うためのものではありません。`page.waitForEvent` はページがクラッシュまたはクローズすれば既に reject します。これがあるのは結果に**名前を付ける**ためです。死んだページと失敗したプロダクトは別の判定であり、証拠はそのどちらなのかを述べなければならないからです。
+
+クリーンアップは決定的で、どのブランチが勝っても走ります — デッドラインには `clearTimeout`、クラッシュとクローズのハンドラーには `page.off` です。レースより長生きしたタイマーはワーカーのイベントループを起こしたまま、解体済みのフィクスチャに向けて発火します。長生きしたハンドラーは、複数のステップで使い回されるページに積み上がっていきます。そして、レースのどのブランチも `.catch(() => null)` で包みません。それは[ステップ3](../test-integrity/deflaking-recipe.mdx#part-2-—-デフレイキングレシピ-ステップ3-—-フォールブルな待機を握りつぶさない)、つまり本物のタイムアウトをサイレントなグリーンに変える行為です。絶対デッドラインは新しい予算ではなく、テスト自身の予算からマージンを引いた値にします — `test()` の中のすべてのステップは[同一の 1 つのタイムアウト](#test-step-は1つのテストタイムアウトを共有する)を食い合うので、それ以上のデッドラインは決して発火できません。
+
+```typescript
+// e2e/export.spec.ts
+import { test, expect } from "@playwright/test";
+import { attachEvidenceOnce, installEvidenceBridge, validateRun } from "./cross-context-evidence";
+
+const EXPORT_DEADLINE_MS = 20_000; // sits under this test's own timeout, with margin
+
+test("export delivers a file", async ({ page }, testInfo) => {
+  const runId = crypto.randomUUID();
+  const evidence = await installEvidenceBridge(page, runId); // before the first navigation
+  await page.goto("/export");
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onDead!: () => void;
+  const dead = new Promise<never>((_resolve, reject) => {
+    onDead = () => reject(new Error("page crashed or closed during export"));
+  });
+  page.on("crash", onDead);
+  page.on("close", onDead);
+
+  try {
+    const download = page.waitForEvent("download"); // registered BEFORE the trigger
+    await page.getByRole("button", { name: "Export" }).click();
+
+    // Nothing reads the page between the trigger and the race: the execution
+    // context is allowed to disappear right here. No branch is ever swallowed.
+    const outcome = await Promise.race([
+      download.then((value) => ({ kind: "download" as const, value })),
+      evidence.terminal.then((record): never => {
+        throw new Error(`export reported ${record.stage}: ${record.reason ?? "unspecified"}`);
+      }),
+      dead,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("export deadline exceeded")), EXPORT_DEADLINE_MS);
+      }),
+    ]);
+
+    validateRun(evidence, runId); // required minimum evidence; malformed is red
+    expect(outcome.value.suggestedFilename()).toMatch(/\.zip$/);
+    // The page-side "done" record is redundant here: the browser already delivered.
+  } finally {
+    clearTimeout(timer); // deterministic on every branch, winner or not
+    page.off("crash", onDead);
+    page.off("close", onDead);
+    await attachEvidenceOnce(testInfo, evidence, runId);
+  }
+});
+```
+
+### 検証してから、証拠ソースの階層を適用する
+
+検証は 1 つの契約の両面であり、どちらも上の例に名前として現れています。`parseDiagnostic` は到着した 1 レコードを検査します — バージョンフィールドと、閉じた集合から取られた stage と reason です。`validateRun` は判定の前に実行全体を検査します — アクティブな run id の `start` レコードが存在すること、`seq` が厳密に増加し終端ステージのあとに何も記録されていないこと、そして `stats.malformed` がゼロであること。どちらも規律を再定義しません。[証拠はバージョン付きの契約である](../test-integrity/live-proof-evidence-contracts.mdx#証拠はバージョン付きの契約であり、スクラブ後に検証する)ことと[理由コードは閉じた、漏れない集合である](../test-integrity/live-proof-evidence-contracts.mdx#証拠はバージョン付きの契約であり、スクラブ後に検証する-閉じた、漏れない理由コード)ことが、既にそれを定めています。アクティブな実行の証拠が壊れていれば赤です。認識できない stage 文字列こそ、閉じた enum が捕まえるために存在するものであり、それを「たぶん大丈夫」と読むことは、契約が取り除いた曖昧さを呼び戻す行為だからです。なお、上の例が本体を省いているのはこの 2 つの関数だけで、いま挙げた規則がその中身のすべてです。
+
+そこで残るのが、2 つの偽陰性が取り違えた問い — どのソースが決めるのか、です：
+
+| 証拠のソース | このパターンでの実体 | 判定における重み |
+| --- | --- | --- |
+| 権威あるプロダクト／ブラウザの結果 | Playwright が Node 側に届ける実際の `download` イベント | 合格を決めるのはこれ。冗長なソースがこれを覆すことはない |
+| 必須の最小限の診断証拠 | この run id に対する妥当なアクティブ実行の `start` レコード | 存在し、かつ妥当でなければ赤 |
+| 任意の冗長なオブザーバーテレメトリ | ダウンロードのあとに届くページ側の `done` コールバック | 到着を必須にしてはならない。ただし内容は依然として拘束する — `error` や `cancel` のレコードは赤 |
+
+<Warning>
+
+**両面を必ず言うこと。片面だけならこの節は「診断を無視せよ」と読まれます。** 妥当なアクティブ実行が存在し、ブラウザが実際の終端イベントを届けたなら、その実行は合格です。冗長なページ側の `done` が同じスケジューラーターンで届く必要はありません — そもそも届かなくても構いません。*そのうえで*、観測されたエラーやキャンセルのレコード、壊れた証拠、クラッシュやクローズ、絶対デッドラインの超過は、いずれも依然として赤です。冗長なテレメトリの「到着」要求をゆるめることは、それが実際に届いたときに述べる内容をゆるめることではありません。
+
+</Warning>
+
+### 凍結し、finally で 1 度だけ添付する
+
+証拠は添付の前に凍結します。遅れて起きたナビゲーションで init スクリプトが再実行されれば、添付を書いている最中でもバッファにレコードが積まれえます。そして、自分が記述すると称する実行と一致しない添付は、無いよりも悪いものです。アクティブな実行のレコードをスナップショットし、壊れたレコードを数え、直列化してから添付する — それも 1 度だけ、証拠オブジェクト上のフラグで守って、2 つの出口経路が同じ名前で 2 つの添付を書いてしまわないようにします。
+
+```typescript
+// e2e/cross-context-evidence.ts (continued)
+import type { TestInfo } from "@playwright/test";
+
+export async function attachEvidenceOnce(testInfo: TestInfo, evidence: Evidence, runId: string) {
+  if (evidence.attached) return; // two exit paths must not write two attachments
+  evidence.attached = true;
+  // Freeze first: a late init-script re-run must not mutate what this describes.
+  const frozen = JSON.stringify({
+    runId,
+    malformed: evidence.stats.malformed,
+    records: [...(evidence.runs.get(runId) ?? [])],
+  });
+  try {
+    await testInfo.attach("export-evidence.json", { body: frozen, contentType: "application/json" });
+  } catch (attachError) {
+    // Never rethrow from finally: that would replace the failure under investigation.
+    testInfo.annotations.push({ type: "evidence-attach-failed", description: String(attachError) });
+  }
+}
+```
+
+ヘルパー内部の `try`/`catch` こそが本質的に重要な部分です。`finally` ブロックが例外を投げると、テストがまさに報告しようとしていたエラーがストレージの苦情に置き換わり、元の失敗は消えます。添付は独自の判定を持つ独立した関心事であり、アノテーションとして記録され、実行そのものの判定を覆い隠すことは決して許されません — [teardown の 3 層](../test-integrity/live-proof-evidence-contracts.mdx#クリーンアップは独立したゲート-teardown-の-3-層)で、クリーンアップがプロダクトの判定に畳み込まれず自前の判定を報告するのと同じ分離です。そして添付は、依然としてランナーのディスクに書かれただけのものです。ジョブが終わったあとに誰かが読める証拠になるには、[トレースを記録しても残したことにはならない](#トレースを記録しても残したことにはならない)のアップロードゲートが必要です。
+
 ## CI画像インターセプトによる高速化
 
 CIでは、大きな画像のネットワークリクエストがテストを遅くします。インターセプトして小さなプレースホルダーに置き換えます：
@@ -1256,10 +1472,11 @@ Playwrightのデフォルトレポーターは、ローカルでは `list`、**C
   with:
     name: playwright-report-${{ strategy.job-index }}-${{ github.run_attempt }}
     path: playwright-report/
+    if-no-files-found: error   # default is warn: an upload that finds nothing must go red, not green
     retention-days: 2
 ```
 
-`if:` を持たないアップロードステップは、先行するステップが非ゼロで終了した瞬間にスキップされます——それは、アーティファクトが存在する理由であるすべてのランです。`if: failure()` はそこを直しますが、もう半分を取りこぼします：`timeout-minutes` の上限で殺されたジョブや、新しいプッシュが来たときに `concurrency` グループでキャンセルされたジョブは、失敗ではなく*キャンセル*であり、そのキャンセルこそが証拠消失そのもののケースです。最もトレースが欲しいランが、静かにアーティファクトを1つも残さないランになります。`if: always()` も両方をカバーしますが、グリーンのランごとにレポートをアップロードするコストを払うことになります。
+`if:` を持たないアップロードステップは、先行するステップが非ゼロで終了した瞬間にスキップされます——それは、アーティファクトが存在する理由であるすべてのランです。`if: failure()` はそこを直しますが、もう半分を取りこぼします：`timeout-minutes` の上限で殺されたジョブや、新しいプッシュが来たときに `concurrency` グループでキャンセルされたジョブは、失敗ではなく*キャンセル*であり、そのキャンセルこそが証拠消失そのもののケースです。最もトレースが欲しいランが、静かにアーティファクトを1つも残さないランになります。`if: always()` も両方をカバーしますが、グリーンのランごとにレポートをアップロードするコストを払うことになります。`actions/upload-artifact@v4` の既定は `warn` なので、前節の「`playwright-report/` が存在しない」ケースは「No files were found」とログを出して終了コード0になります——それを赤にするのが `if-no-files-found: error` です。
 
 ### 2回目のPlaywright実行が、アップロードの前に `outputDir` を空にする
 

@@ -464,6 +464,8 @@ Never use an in-page `setTimeout` as a fallback. It runs inside the browser's ow
 
 </Warning>
 
+Listener-first is necessary but not sufficient. When the signal is a browser-level terminal event — a download, a popup, a file chooser that Playwright observes in Node — the page's execution context is allowed to disappear at the very boundary that produces it, so anything reading page DOM after the wait has been registered can throw `Execution context was destroyed` and discard an outcome that was already observed. Register the wait, trigger, then race it; never poll the page in between. See [Cross-Context Terminal Evidence](../tool-patterns/playwright-patterns.mdx#cross-context-terminal-evidence-race-the-browser-event-keep-page-diagnostics-in-node).
+
 #### Hardened variant: atomic listener + click in a single `evaluate`
 
 The install-then-trigger pattern above still leaves a narrow gap: between `page.evaluate()` resolving and `page.click()` firing, an unrelated event of the same name could land and flip the flag before the click that is supposed to cause it. For most navigations this window is negligible, but when it isn't, register the listener **and** perform the click inside a single `page.evaluate` call, so both happen synchronously in the page's own event loop with no round-trip in between:
@@ -537,6 +539,8 @@ Steps 1-4 all presume the signal to wait on already exists — a framework event
 The `dataset.hydrated` flag used in [Hydration races](#part-1-—-root-cause-catalog-5-hydration-races) above is exactly this kind of signal: it is not a Playwright or browser primitive, it is application code deliberately set once an island's hydration runtime finishes wiring up its event handlers. The same convention shows up as `data-hydrated` on `[data-island]` in [the hydration mis-nesting variant](../decision-guide/common-failure-pattern.mdx#the-hydration-mis-nesting-variant) elsewhere in this guide — one island-lifecycle attribute, read by two different tests for two different purposes.
 
 An untestable wait is a product-code observability gap, not a spec problem. Once the signal exists, wait on it the same way as Step 1: install the listener or poll before triggering the action, trigger, then await.
+
+One caveat on where the added signal lives. A page-resident signal — a `window` flag, a data attribute, a custom event — vanishes with the execution context, so it cannot describe a transition that destroys that context. When the transition is a browser-level terminal event, keep the signal but retain it Node-side over a `page.exposeFunction` bridge, and let the browser's own event be the authoritative one: [Cross-Context Terminal Evidence](../tool-patterns/playwright-patterns.mdx#cross-context-terminal-evidence-race-the-browser-event-keep-page-diagnostics-in-node).
 
 <Note>
 

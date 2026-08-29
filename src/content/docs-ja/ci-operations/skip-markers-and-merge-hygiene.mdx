@@ -1,0 +1,301 @@
+---
+title: CI スキップマーカーとマージ衛生
+description: 何も走らなかったがゆえに、何も赤くならないままマージが着地することがある -- CI スキップマーカーが squash マージに乗って保護ブランチへ到達する経路、ガードを置くべき場所、そしてマージが実際にワークフローを起動したことを証明する方法。
+sidebar_position: 7
+---
+
+[デプロイ後のスモークテスト](./post-deploy-smoke-tests.mdx#skip-パスこそがこの種のテストの壊れどころ)は、1 つ下の層で支配的な洞察を述べている。到達できないサイトと skip されたテストは外から見て区別がつかない、というものだ。このページは同じ形を 1 つ**上**の層、トリガーそのもので扱う -- 抑制されたワークフローと成功したワークフローは外から見て区別がつかない。どちらも「何も赤くないマージ」である。
+
+だが 2 つのケースは同じだけ回復可能ではない。skip されたテストは、少なくとも開いて読める実行を 1 つ残す。抑制されたワークフローは何も残さない。実行もログもアノテーションもチェックもない。下流の読み手 -- Actions タブを眺める人間も、赤を監視する bot も -- は不在を見て、それを成功と読む。
+
+このページの動機になった失敗は実在し、そして退屈だ。だからこそ生き延びた。zudolab/zudo-text#5361 では、PR ファーストのエージェントワークフローが、件名の末尾が `[skip ci]` で終わる空の開始コミットで毎回ブランチを開いていた -- 差分が空のドラフト PR で、確実に green になる CI 実行を焼かないための意図的な措置である。その件名はその後、何もしないまま何か月もブランチ履歴に残り続けた。リポジトリは `squash_merge_commit_message: COMMIT_MESSAGES` で設定されていた。それらのブランチの 1 つが初めて **squash** マージで入ったとき、GitHub はすべてのブランチコミット件名を squash コミットの本文へコピーし、マーカーは `main` に着地し、そのコミットに対する `push` トリガーのワークフローは -- 本番デプロイを含めて -- すべて静かに抑制された。誰かが手を打つまでに 2 回起きた。
+
+## 不変条件：保護ブランチに CI スキップマーカーを載せない
+
+これはワークフローの性質ではなく、着地したコミットの性質として述べる。
+
+**保護ブランチに着地するコミットは、そのメッセージのどこにも CI スキップキーワードを含んではならない。**
+
+これを標語ではなく使える不変条件にしているものが 3 つある。
+
+- **これはマージコミットの話であって、ブランチのコミットの話ではない。**ブランチ履歴にマーカーが含まれること自体は許される -- そこに置く正当な理由は存在し、上のインシデントはまさにその一例だ。禁じられているのは、マーカーが保護ブランチに到達することである。代わりにブランチコミットへルールを向けるのが、これを間違える最も一般的なやり方であり、そのコストは高い。マーカー付きの開始コミットを作るワークフローが開くすべての PR を壊してしまう。
+- **マージ前にテストできる。**マージコミットメッセージになるテキストは、リポジトリのマージ設定とプルリクエスト自身のフィールドで完全に決まり、どちらも `pull_request` 時点で読める。マージが起きるのを待つ必要はどこにもない。
+- **条件付きで強制できる。**マーカーを見つけたジョブは失敗できる。だがその失敗がマージを*ブロック*するかどうかは必須ステータスチェックの有無に依存し、それはワークフローレベルではなくプランレベルの能力だ。この区別は後述の[チャネルを取り締まるより、チャネルを消す](#チャネルを取り締まるより、チャネルを消す)で扱う。
+
+## 伝播経路：squash マージはすべてのコミット件名をコピーする
+
+ブランチ履歴のマーカーが保護ブランチへ到達しうる経路のうち、実務上効いてくるのはリポジトリ設定である。
+
+GitHub の `squash_merge_commit_message` は `PR_BODY`（「プルリクエストの本文をデフォルトにする」）、`COMMIT_MESSAGES`（「ブランチのコミットメッセージをデフォルトにする」）、`BLANK`（「空のコミットメッセージをデフォルトにする」）を取る。`COMMIT_MESSAGES` の下では、squash はブランチのコミット件名を 1 つの squash コミットの**本文**へ連結する。ブランチ上のすべての件名が -- 誰も意識していない空の開始コミットも含めて -- ベースブランチに着地するメッセージへそのままコピーされる。
+
+### 通常のマージがこれを踏まない理由
+
+通常のマージコミットはこれをしない。そのメッセージは `Merge pull request #N from ...` と PR タイトルであり、ブランチのコミットメッセージはそれぞれ自分のコミットに留まる。それらはマージの親であって、マージそのものではない。スキップ検出はワークフローを起動するコミットのメッセージを読み、そのコミットとはマージコミットのことだ。これはデフォルトの `merge_commit_message`（`PR_TITLE`）での話であり、同じ設定パネルには `PR_BODY` もある。それは PR 本文を通常のマージコミットにコピーし、経路を再び開く。後述のスキャン対象は、squash だけでなくリポジトリが許可するすべてのマージ方式について導出すること。
+
+この非対称性のせいで、リポジトリは何か月もこのバグを抱えたまま、たまにしか踏まない。設定ミスは恒久的だが、発火するのはたまたま squash だったマージだけである。その間の通常マージはすべて偽陰性であり、「この構成は問題ない」という証拠として読まれてしまう。
+
+<Note>
+
+[リリースラウンド § ラウンドの出荷](./release-rounds-branch-strategy.mdx#モデル-1-つの恒久ブランチ、短命なラウンド-ラウンドの出荷)は、無関係な理由からすでにリリース境界での squash に反対している。squash されたラウンドは、重い失敗の二分探索が依存するコミット単位の履歴を破壊するからだ。マーカーの伝播は、同じ方針を支持する 2 つ目の独立した理由になる。異なる方向から来た 2 つの論証が同じ方針に着地するのは、その方針が効いている良い兆候だ。
+
+</Note>
+
+### インシデントからの証拠
+
+| コミット | マージ方式 | メッセージ中のマーカー | ワークフローの実行 |
+|---|---|---|---|
+| `a81aa72a`（`tauri-app/**` に触れる） | squash | あり、本文 1 行目 | **ゼロ** |
+| `49e613a0` | squash | あり、本文 1 行目 | **ゼロ** |
+| 対照コミット | 通常マージ | なし | CI + Preview Deploy + Deploy Web Editor、すべて green |
+
+1 つ目のコミットのパスは、本番デプロイワークフローの `push` / `paths` トリガーに一致していた。そのデプロイは走らず、そしてそれを告げる赤はどこにも出なかった。
+
+## スキップ検出はメッセージ全体を読む
+
+GitHub のドキュメントは、ワークフローは「push におけるコミットメッセージ、またはプルリクエストの HEAD コミットに、以下の文字列のいずれかを追加すると起動されない」と述べている。*コミットメッセージ*と書かれているのであって、件名でも 1 行目でもない。インシデントで観測されたマーカーは**本文 1 行目**にあり、そして効いた。
+
+`skip-checks` トレーラーがこの問いを独立に決着させる。GitHub は同じ指示のトレーラー形式も受け付けるが、そのトレーラーは「コミットメッセージの末尾に含め、2 つの空行を先行させる」必要がある。メッセージの最後尾に置くことを要求される形式は、メッセージ全体が読まれる場合にしか成立しない。
+
+ネイティブの指示は 1 つではなく 6 通りある。
+
+```text
+[skip ci]
+[ci skip]
+[no ci]
+[skip actions]
+[actions skip]
+
+skip-checks: true      (also accepted as skip-checks:true)
+```
+
+<Warning>
+
+スキップ指示が適用されるのは `push` と `pull_request` イベントであり、それ以外には適用されない。GitHub は「コミットメッセージに `[skip ci]` を追加しても、`on: pull_request_target` で起動されるワークフローが走るのは止められない」と明示している。この例外は小さいが、このページのガードが立てる唯一の足場だ -- 後述のガードワークフローのトリガーに関する注記を参照。
+
+</Warning>
+
+## ガードを置く場所、置かない場所
+
+ガードは `pull_request` 時点で、**マージコミットメッセージに到達しうるテキストを、過不足なくスキャンする。**この文の前半も後半も仕事をしている。
+
+### スキャン対象はマージ設定から導出する
+
+スキャン対象は好みの問題ではない。2 つのリポジトリ設定から導かれる。
+
+| `squash_merge_commit_title` | `squash_merge_commit_message` | スキャンするテキスト |
+|---|---|---|
+| `PR_TITLE` | `BLANK` | PR タイトルのみ |
+| `PR_TITLE` | `PR_BODY` | PR タイトルと PR 本文 |
+| `COMMIT_OR_PR_TITLE` | 任意 | まず設定を直す -- コミットが 1 つだけの PR では squash のタイトルがそのコミット自身の件名になり、PR のどのフィールドにも現れない |
+| 任意 | `COMMIT_MESSAGES` | まず設定を直す -- 後述 |
+
+`COMMIT_OR_PR_TITLE` は GitHub のタイトル設定のデフォルトなので、メッセージ設定しか変えたことのないリポジトリでは、この行がまだ開いたままだ。
+
+除外すべきものが 2 つあり、どちらも「念のため広くスキャンする」方向へ間違えやすい。
+
+- **ブランチのコミット件名はスキャンしない。**マーカー付きの開始コミットを正当に作るワークフローがあれば、そのワークフローが開くすべてのプルリクエストが落ちることになる。ブランチ履歴のスキャンは、不変条件が一度も課していないルールを強制する行為だ。
+- **設定が本文をコミットメッセージから締め出しているなら、PR 本文もスキャンしない。**それをスキャンすると、まさにこの危険を*文書化している*プルリクエストで偽の失敗が出る。ガードを追加するプルリクエスト自身がその筆頭で、その本文は防ごうとしているマーカーを必然的に引用する。
+
+マージ設定が実際にコミットメッセージへコピーするテキストを特定し、それだけをスキャンする。防御的な過剰スキャンはこのガードのより安全な版ではない。それは、誰かが消すまで狼少年を続けるガードだ。
+
+### ガードのワークフロー
+
+```yaml
+# .github/workflows/no-skip-marker.yml
+# Refuse a pull request whose merge commit message could carry a CI-skip
+# instruction onto the protected branch.
+name: no-skip-marker
+
+on:
+  # Only pull requests that can change the protected branch need this gate.
+  # The default type set omits `edited`: a title renamed after open would
+  # otherwise never be re-scanned.
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-skip-marker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout step. This job reads pull request metadata only, which is
+      # what makes the pull_request_target variant below safe to use.
+      - name: Reject CI-skip instructions in the merge-message surface
+        env:
+          # Untrusted pull request text enters through env and is quoted on
+          # use. Never interpolate ${{ github.event.pull_request.* }} straight
+          # into a run: line -- a PR title is attacker-controlled shell input.
+          #
+          # Scan surface for squash_merge_commit_title: PR_TITLE plus
+          # squash_merge_commit_message: BLANK -- the title, and nothing else.
+          # Under squash_merge_commit_message: PR_BODY, also add
+          #   PR_BODY: ${{ github.event.pull_request.body }}
+          # here and to the surface below. Never scan branch commit subjects.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # The full native marker set, plus the skip-checks trailer in both
+          # accepted spellings. Matching only [skip ci] leaves five open doors.
+          markers='\[(skip ci|ci skip|no ci|skip actions|actions skip)\]'
+          trailer='skip-checks: ?true'
+
+          # Concatenate exactly the fields the merge settings copy into the
+          # commit message. Append "$PR_BODY" here under PR_BODY settings.
+          surface="$PR_TITLE"
+
+          if printf '%s\n' "$surface" | grep -Eiq "$markers"; then
+            echo "::error::CI-skip marker in text that reaches the merge commit message."
+            exit 1
+          fi
+          if printf '%s\n' "$surface" | grep -Eiq "$trailer"; then
+            echo "::error::skip-checks trailer in text that reaches the merge commit message."
+            exit 1
+          fi
+          echo "No CI-skip instruction in the merge-message surface."
+```
+
+ガードは `pull_request` に乗っており、`pull_request` はスキップ指示が抑制する 2 つのイベントの 1 つだ。つまり、**ヘッドコミット**がマーカーを持つプルリクエストは、ガードそのものを抑制する。リポジトリに必須ステータスチェックがあれば、それは fail-closed になる -- GitHub はスキップされたワークフローのチェックを pending のまま残し、プルリクエストはマージできない。必須チェックがなければ、ガードは単に走らず、誰にも知らされない。
+
+同じジョブを `pull_request_target` に向ければ、その穴は塞がる。スキップ指示はそのイベントに届かないからだ。
+
+```yaml
+on:
+  # Skip instructions apply to push and pull_request only, so a marked PR
+  # head commit cannot suppress a pull_request_target run.
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+```
+
+<Danger>
+
+`pull_request_target` のジョブは**ベース**リポジトリのコンテキストで、そのシークレットと書き込み可能なトークンを持って、外部の人間が制御するプルリクエストに対して走る。ここで安全なのは理由がただ 1 つ、このジョブがメタデータだけを読み、プルリクエストのコードに一切触れないからだ。`permissions: contents: read` を保ち、`actions/checkout` ステップを置かず、このワークフローにビルド・インストール・テストのステップを決して追加しない。PR のコードを実行した瞬間、それはガードであることをやめ、脆弱性になる。
+
+</Danger>
+
+### このガードはリリースラウンドの skip-test ガードではない
+
+[リリースラウンド § 本番安全の不変条件](./release-rounds-branch-strategy.mdx#重い-ci-をベースブランチでゲートする-本番安全の不変条件)には、プルリクエストのヘッドコミットから `[skip test]` マーカーを読み、自分のステップを走らせるかどうかを決めるワークフローが載っている。ざっと読むと、それは上の助言の正反対に見える -- ブランチのコミット件名をスキャンしており、このページはそれをするなと言っているからだ。だが両者は矛盾していない。扱っているマーカーの種類が違う。
+
+- **プロジェクト独自の** `[skip test]` は、このプロジェクトが発明した規約だ。GitHub はそれを何も知らないので、ワークフローは起動し、チェックアウトし、ヘッドコミットを検査して判断するところまで到達する。ブランチのコミットテキストを読むことがそれを実装する唯一の方法であり、あちらでそうするのは正しい。
+- **GitHub ネイティブの** `[skip ci]` はワークフローそのものを抑制する。実行が存在しないので、それを観測できるステップも存在しない。ワークフロー内のガードでは防げない。だからこそ防御は、マーカーがトリガーに届かない*別の*ワークフローでなければならず、そしてそのワークフローはブランチ履歴ではなくマージメッセージの対象範囲をスキャンしなければならない。
+
+一方は、走っているワークフローがブランチについて読むフラグだ。もう一方は、そもそもワークフローを起動するかどうかについて GitHub へ与える指示だ。ジョブの内側から尊重も拒否もできるのは、前者だけである。
+
+## チャネルを取り締まるより、チャネルを消す
+
+設定が修正であり、ガードは保険だ。`squash_merge_commit_message: BLANK` にすれば本文の伝播は完全に消える -- マーカーを運ぶテキストが存在しないので、この失敗モードは検出されるのではなく、存在しなくなる。ワークフローを 1 行も書く前に、すべてのリポジトリでまずこれを取る。
+
+ガードが元を取るのは、設定ではカバーできないところだ。
+
+- **設定のドリフト。**リポジトリ設定は管理権限を持つ誰かが Web フォームで編集するもので、それが起きたことをリポジトリの中の何も記録しない。ワークフローディレクトリのガードは、意図をバージョン管理された形で残す証拠になる。
+- **まだ設定を直していないリポジトリ。**ガードは十分に安いので、設定の棚卸しを進めながら全リポジトリに配れる。
+
+カバー**できない**残余ケースについては正確に述べる。PR 時点のガードはプルリクエストのフィールドを見るのであって、マージ時点で与えられるマージメッセージは見えない。`gh pr merge --squash --subject "..." --body "..."` はリポジトリのデフォルトを、ガードが一度もアクセスできなかったテキストで上書きする。ガードが走った時点でそのテキストは存在しなかったからだ。マージ前に評価されるものは、何もこのギャップを閉じられない。閉じられるのは 2 つある。入力ではなく結果を観測する後述の[マージが実際にワークフローを走らせたか検証する](#マージが実際にワークフローを走らせたか検証する)と、マージメッセージそのものを所有し、したがってマーカー付きのものを渡されえないマージ自動化だ。
+
+<Warning>
+
+ガードが*予防的*でありうるのは、ブロックできる必須ステータスチェックが存在する場合だけだ。ブランチ保護ルールとルールセットはプランで制限される。Free プランではどちらもパブリックリポジトリでしか使えず、プライベートリポジトリに適用するには GitHub Pro、Team、または Enterprise が要る。**Free プランのプライベートリポジトリ**では必須ステータスチェックが使えないので、失敗したガードジョブは報告するだけで終わる -- 依然として押せるマージボタンの隣に出る赤い印だ。それが宣言されたゲートと強制されたゲートの違いであり、[実行ティア § ゲートを宣言ではなく強制にする](../decision-guide/execution-tiers.mdx#5つのティア-t0-t1-デフォルト-ゲートを宣言ではなく強制にする)で整理されている。
+
+</Warning>
+
+## マージが実際にワークフローを走らせたか検証する
+
+ここまではすべて予防であり、予防は迂回されうる側の半分だ。もう半分は事後のアサーションである。**ターゲットブランチへの `push` トリガーを宣言しているワークフローそれぞれについて、マージコミットに対する実行が存在しなければならない。**
+
+### 「どれかが走った」ではなく、ワークフローごとに
+
+「この SHA に対して何かの実行が存在する」は、見た目よりずっと弱い主張だ。`push` ワークフローが 5 本あり、それぞれに `paths` フィルタが付いているリポジトリでは、ドキュメントの lint の実行は平然と生まれる一方で、不在こそが問題になるデプロイワークフローは何も生まない、ということが起こる。ワークフローを列挙し、1 本ずつアサートする。
+
+同じ `paths` フィルタは逆方向にも効く。マージが触れなかったパスのワークフローには見つけるべき実行がなく、その不在は抑制ではない。変更ファイルを各ワークフローの `paths` と突き合わせてマージごとにリストを導出するか、フィルタのないワークフローに限定すること。さもなければアサーションはドキュメントだけのマージのたびにオオカミ少年になり、削除される。
+
+2 つ目の要件は上限を設けることだ。実行の生成はマージから数秒遅れるので、1 回だけの即時参照は GitHub とレースし、偽の不在を報告する。期限までポーリングし、期限**後**の空の結果を no-op ではなく失敗として扱う。
+
+```bash
+#!/usr/bin/env bash
+# Assert that a merge commit actually triggered its push-driven workflows.
+# Usage: verify-merge-ran.sh <base-branch> <merge-sha>
+set -euo pipefail
+
+BASE="$1"
+SHA="$2"
+DEADLINE=$((SECONDS + 180))
+
+# Every workflow file that declares a push trigger on the target branch AND
+# whose paths filter, if any, matches this merge's changed files. A workflow
+# outside its own paths has no run to find, and that is not suppression --
+# derive this list per merge or the check cries wolf on every docs-only one.
+# Enumerate them: "some run exists" is not the assertion, because a docs
+# lint firing proves nothing about the deploy workflow that did not.
+WORKFLOWS=(ci.yml deploy.yml preview.yml)
+
+fail=0
+for wf in "${WORKFLOWS[@]}"; do
+  while :; do
+    # A transient gh failure is a retry, not an exit: under set -e a bare
+    # substitution would abort the poll with no FAIL line at all.
+    count="$(gh run list --workflow="$wf" --event=push \
+      --branch="$BASE" --commit="$SHA" --limit=1 \
+      --json databaseId --jq 'length' || echo 0)"
+    if [ "$count" -gt 0 ]; then
+      echo "ok: $wf ran for $SHA"
+      break
+    fi
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      echo "FAIL: no push run for $wf on $SHA -- the trigger was suppressed" >&2
+      fail=1
+      break
+    fi
+    sleep 10
+  done
+done
+
+exit "$fail"
+```
+
+### 古い gh 向けのフォールバック
+
+`gh run list --commit` は gh 2.87.3 に存在する。CI イメージや固定されたツールチェーンのように古い CLI がピン留めされている場合は、REST API を直接叩いてワークフローパスで絞り込む。
+
+```bash
+# Same assertion, without --commit: count push runs for one workflow file.
+gh api "repos/{owner}/{repo}/actions/runs?head_sha=$SHA&event=push" \
+  --jq '[.workflow_runs[] | select(.path == ".github/workflows/deploy.yml")] | length'
+```
+
+<Note>
+
+元のインシデントでは、マージ後のウォッチャーが実際に気付いており、「No CI detected on the merge target branch」と報告していた。誰も動かなかったのは、その文が警報ではなく、静かなリポジトリについての状態メモのように読めるからだ。不在を証拠とする検出は、何を見たかではなく、それが何を意味するかを述べる文言を必要とする。「deploy ワークフローが `a81aa72a` に対して走らなかった」は同じ事実であり、そして片付けて忘れることが不可能だ。
+
+</Note>
+
+## 一般的な教訓：トリガーが発火したことをアサートする
+
+ここで再利用できる半分は、GitHub Actions の話ではない。
+
+**パイプラインを流れるデータによってトリガーを抑制されうるパイプラインは、トリガーが発火したという明示的なアサーションを必要とする。**コミットメッセージはデータだ。それはマージを通ってトリガー自身の入力へ流れ込む。つまり、テストされる対象の側が、それをテストするかどうかの判断へチャネルを持っているということだ。この種のループはどれも、外から見て成功と区別のつかない状態 -- 何も走っていない green -- を生む。
+
+同じ形はあらゆるスケールで再現し、同じ修正がそれぞれで効く。
+
+- [不正な `workers` 値がゼロ件のテストを収集した](../tool-patterns/playwright-patterns.mdx#不正な-workers-値はゼロ件のテストを実行してgreenで終了する)がゆえに green を報告するスイート -- 終了コードではなく収集件数をアサートする。
+- [すべてのテストが `test.skip` でオプトアウトした](../tool-patterns/playwright-patterns.mdx#前提条件としての-test-skip-—-pass-by-skip-という罠)がゆえに green を報告するスイート -- 関心のあるスペックが実際に実行されたことをアサートする。
+- [skip パスが障害を飲み込んだ](./post-deploy-smoke-tests.mdx#skip-パスこそがこの種のテストの壊れどころ)がゆえに green を報告するスモークテスト -- アサートが走ったことをアサートする。
+- ワークフローが 1 つも起動しなかったがゆえに green を報告するマージ -- 実行が存在することをアサートする。
+
+いずれの場合も、終了コードは答えられない問いを突きつけられている。green の結果は、走ったものが通ったことを証明する。何かが走ったことは決して証明しない。そのギャップこそ[テスト完全性](../test-integrity/index.mdx)の主題そのものであり、ワークフローの抑制はその最も広いインスタンスだ。欠けている証拠が静かなログ 1 行ではなく、実行そのものだからである。
+
+## 次に読む
+
+- [デプロイ後のスモークテスト § skip パスこそがこの種のテストの壊れどころ](./post-deploy-smoke-tests.mdx#skip-パスこそがこの種のテストの壊れどころ) -- 同じ偽 green の形を、1 つ下の層、単一のテストの内側で扱う。
+- [リリースラウンド § ラウンドの出荷](./release-rounds-branch-strategy.mdx#モデル-1-つの恒久ブランチ、短命なラウンド-ラウンドの出荷) -- リリース境界で squash しないというルール。マーカーの伝播ではなく二分探索から論じたもの。
+- [リリースラウンド § 本番安全の不変条件](./release-rounds-branch-strategy.mdx#重い-ci-をベースブランチでゲートする-本番安全の不変条件) -- このページが混同を避けたい、プロジェクト独自のスキップマーカー。
+- [実行ティア § ゲートを宣言ではなく強制にする](../decision-guide/execution-tiers.mdx#5つのティア-t0-t1-デフォルト-ゲートを宣言ではなく強制にする) -- 報告はできるがブロックできないジョブが、まだゲートではない理由。
+- [テスト完全性](../test-integrity/index.mdx) -- この失敗が属するカテゴリ。スイートが人を欺くやり方。
+- [Playwright パターン § 不正な `workers` 値はゼロ件のテストを実行して green で終了する](../tool-patterns/playwright-patterns.mdx#不正な-workers-値はゼロ件のテストを実行してgreenで終了する) -- スイート内側の兄弟。収集件数ゼロの green。
+- [Playwright パターン § 前提条件としての `test.skip`](../tool-patterns/playwright-patterns.mdx#前提条件としての-test-skip-—-pass-by-skip-という罠) -- もう 1 つの兄弟。全テストがオプトアウトしたための green。
+- [Skipping workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs) -- ネイティブのマーカー集合、`skip-checks` トレーラー、`push` / `pull_request` のみという適用範囲（2026-08-29 検証）。
+- [Repositories REST API](https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28) -- スキャン対象を導出する元になる `squash_merge_commit_title` と `squash_merge_commit_message` の値（2026-08-29 検証）。
+- [About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) と [About rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) -- Free プランのプライベートリポジトリに、ブロックできる必須ステータスチェックが存在しない理由（2026-08-29 検証）。

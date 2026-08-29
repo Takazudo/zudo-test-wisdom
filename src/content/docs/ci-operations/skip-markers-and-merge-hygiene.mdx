@@ -1,0 +1,301 @@
+---
+title: CI-Skip Markers and Merge Hygiene
+description: A merge can land with nothing red because nothing ran -- how a CI-skip marker rides a squash merge onto a protected branch, where the guard belongs, and how to prove that a merge actually triggered its workflows.
+sidebar_position: 7
+---
+
+[Post-Deploy Smoke Tests](./post-deploy-smoke-tests.mdx#the-skip-path-is-where-these-tests-go-wrong) states the governing insight one layer down: an unreachable site and a skipped test look identical from the outside. This page is the same shape one layer **up**, at the trigger itself -- a suppressed workflow and a passing workflow look identical from the outside. Both are a merge with nothing red.
+
+The two cases are not equally recoverable. A skipped test at least produced a run you can open and read. A suppressed workflow leaves nothing behind at all: no run, no log, no annotation, no check. Every downstream reader -- a human scanning the Actions tab, a bot watching for a red mark -- sees an absence and reads it as success.
+
+The failure that motivates this page is real, and it is boring, which is exactly why it survived. In zudolab/zudo-text#5361 a PR-first agent workflow opened every branch with an empty start commit whose subject ended in `[skip ci]` -- deliberately, so that an empty-diff draft PR would not burn a guaranteed-green CI run. That subject then sat in branch history for months, doing nothing. The repository was configured with `squash_merge_commit_message: COMMIT_MESSAGES`. The first time one of those branches went in on a **squash** merge, GitHub copied every branch commit subject into the squash commit body, the marker landed on `main`, and every `push`-triggered workflow for that commit -- including a production deploy -- was silently suppressed. It happened twice before anyone acted on it.
+
+## The Invariant: No CI-Skip Marker on a Protected Branch
+
+State it as a property of the landed commit, not of the workflow:
+
+**No commit that lands on a protected branch may contain a CI-skip keyword anywhere in its message.**
+
+Three things make that a usable invariant rather than a slogan.
+
+- **It is about the merge commit, not the branch commits.** Branch history is allowed to contain markers -- there are legitimate reasons to put one there, and the incident above is one of them. What is forbidden is the marker arriving on the protected branch. Aiming the rule at branch commits instead is the single most common way to get this wrong, and it is expensive: it breaks every PR the marked-start-commit workflow ever opens.
+- **It is testable before the merge.** The text that will become the merge commit message is fully determined by the repository's merge settings plus the pull request's own fields, and both are readable at `pull_request` time. Nothing about this needs to wait for the merge to happen.
+- **It is enforceable, conditionally.** A job that finds a marker can fail; whether that failure *blocks* the merge depends on having a required status check, which is a plan-level capability, not a workflow-level one. That distinction gets its own treatment in [Prefer Removing the Channel Over Policing It](#prefer-removing-the-channel-over-policing-it) below.
+
+## The Propagation Channel: Squash Merge Copies Every Subject
+
+Of the routes by which a marker in branch history can reach a protected branch, the one that matters in practice is a repository setting.
+
+GitHub's `squash_merge_commit_message` accepts `PR_BODY` ("default to the pull request's body"), `COMMIT_MESSAGES` ("default to the branch's commit messages"), or `BLANK` ("default to a blank commit message"). Under `COMMIT_MESSAGES`, squashing concatenates the branch's commit subjects into the **body** of the single squash commit. Every subject on the branch -- including the empty start commit nobody thinks about -- is copied verbatim into a message that lands on the base branch.
+
+### Why a regular merge never trips this
+
+A regular merge commit does not do this. Its message is `Merge pull request #N from ...` plus the PR title; branch commit messages stay on their own commits, which are parents of the merge, not the merge itself. Skip detection reads the message of the commit that triggers the workflow, and that commit is the merge commit. That holds under the default `merge_commit_message` (`PR_TITLE`); the same settings panel also offers `PR_BODY`, which copies the pull request body into a regular merge commit and reopens the channel. Derive the scan surface below for every merge method the repository allows, not only squash.
+
+This asymmetry is why a repository can carry the bug for months and only trip it occasionally: the misconfiguration is permanent, but it only fires on the merges that happen to be squashes. Every regular merge in between is a false negative that reads as evidence the setup is fine.
+
+<Note>
+
+[Release Rounds § Shipping a round](./release-rounds-branch-strategy.mdx#the-model-one-permanent-branch-short-lived-rounds-shipping-a-round) already argues against squashing at the release boundary, for an unrelated reason: a squashed round destroys the per-commit history that heavy-failure bisection depends on. Marker propagation is a second, independent reason to keep the same rule. Two arguments landing on the same policy from different directions is a good sign the policy is load-bearing.
+
+</Note>
+
+### The evidence from the incident
+
+| Commit | Merge style | Marker in message | Workflow runs |
+|---|---|---|---|
+| `a81aa72a` (touched `tauri-app/**`) | squash | yes, on body line 1 | **zero** |
+| `49e613a0` | squash | yes, on body line 1 | **zero** |
+| control commit | regular merge | no | CI + Preview Deploy + Deploy Web Editor, all green |
+
+The first commit's paths matched a production deploy workflow's `push` / `paths` trigger. That deploy did not run, and nothing anywhere went red to say so.
+
+## Skip Detection Reads the Whole Message
+
+GitHub's documentation says a workflow "won't be triggered if you add any of the following strings to the commit message in a push, or the HEAD commit of a pull request". It says *the commit message* -- not the subject, not the first line. The observed marker in the incident was on **body line 1**, and it worked.
+
+The `skip-checks` trailer settles the question independently. GitHub accepts a trailer form of the same instruction, and the trailer "should be included at the end of your commit message and be preceded by two empty lines". A form that is required to sit at the very end of the message can only work if the whole message is read.
+
+The full native instruction set is six forms, not one:
+
+```text
+[skip ci]
+[ci skip]
+[no ci]
+[skip actions]
+[actions skip]
+
+skip-checks: true      (also accepted as skip-checks:true)
+```
+
+<Warning>
+
+Skip instructions apply to the `push` and `pull_request` events, and to nothing else. GitHub is explicit that "adding `[skip ci]` to a commit message won't stop a workflow that's triggered `on: pull_request_target` from running". That exemption is small but it is the one lever this page's guard can stand on -- see the trigger note under the guard workflow below.
+
+</Warning>
+
+## Where to Put the Guard, and Where Not To
+
+The guard scans, at `pull_request` time, **exactly the text that can reach the merge commit message, and nothing else.** Both halves of that sentence do work.
+
+### Derive the scan surface from the merge settings
+
+The scan surface is not a matter of taste. It falls out of two repository settings:
+
+| `squash_merge_commit_title` | `squash_merge_commit_message` | Text to scan |
+|---|---|---|
+| `PR_TITLE` | `BLANK` | the PR title, and nothing else |
+| `PR_TITLE` | `PR_BODY` | the PR title and the PR body |
+| `COMMIT_OR_PR_TITLE` | any | fix the setting first -- on a single-commit PR the squash title is that commit's own subject, which no PR field reveals |
+| any | `COMMIT_MESSAGES` | fix the setting first -- see below |
+
+`COMMIT_OR_PR_TITLE` is GitHub's default for the title, so a repository that only ever changed the message setting still has this row open.
+
+Two exclusions matter, and both are easy to get wrong in the direction of "scan more, just in case".
+
+- **Not the branch commit subjects.** A workflow that legitimately creates a marked start commit would then fail every single pull request it opens. Scanning branch history enforces a rule the invariant never made.
+- **Not the PR body, once the settings keep the body out of the commit message.** Scanning it produces false failures on precisely the pull requests that *document* this hazard -- including the pull request that adds the guard, whose body necessarily quotes the markers it is guarding against.
+
+Pin down which text the merge settings actually copy into the commit message, then scan that. Defensive over-scanning is not a safer version of this guard; it is a guard that cries wolf until someone deletes it.
+
+### The guard workflow
+
+```yaml
+# .github/workflows/no-skip-marker.yml
+# Refuse a pull request whose merge commit message could carry a CI-skip
+# instruction onto the protected branch.
+name: no-skip-marker
+
+on:
+  # Only pull requests that can change the protected branch need this gate.
+  # The default type set omits `edited`: a title renamed after open would
+  # otherwise never be re-scanned.
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-skip-marker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout step. This job reads pull request metadata only, which is
+      # what makes the pull_request_target variant below safe to use.
+      - name: Reject CI-skip instructions in the merge-message surface
+        env:
+          # Untrusted pull request text enters through env and is quoted on
+          # use. Never interpolate ${{ github.event.pull_request.* }} straight
+          # into a run: line -- a PR title is attacker-controlled shell input.
+          #
+          # Scan surface for squash_merge_commit_title: PR_TITLE plus
+          # squash_merge_commit_message: BLANK -- the title, and nothing else.
+          # Under squash_merge_commit_message: PR_BODY, also add
+          #   PR_BODY: ${{ github.event.pull_request.body }}
+          # here and to the surface below. Never scan branch commit subjects.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # The full native marker set, plus the skip-checks trailer in both
+          # accepted spellings. Matching only [skip ci] leaves five open doors.
+          markers='\[(skip ci|ci skip|no ci|skip actions|actions skip)\]'
+          trailer='skip-checks: ?true'
+
+          # Concatenate exactly the fields the merge settings copy into the
+          # commit message. Append "$PR_BODY" here under PR_BODY settings.
+          surface="$PR_TITLE"
+
+          if printf '%s\n' "$surface" | grep -Eiq "$markers"; then
+            echo "::error::CI-skip marker in text that reaches the merge commit message."
+            exit 1
+          fi
+          if printf '%s\n' "$surface" | grep -Eiq "$trailer"; then
+            echo "::error::skip-checks trailer in text that reaches the merge commit message."
+            exit 1
+          fi
+          echo "No CI-skip instruction in the merge-message surface."
+```
+
+The guard rides on `pull_request`, and `pull_request` is one of the two events skip instructions suppress. So a pull request whose **head commit** carries a marker suppresses the guard itself. Where the repository has a required status check, that is fail-closed -- GitHub leaves the skipped workflow's checks in a pending state and the pull request cannot merge. Where it does not, the guard simply never runs, and nobody is told.
+
+Pointing the same job at `pull_request_target` removes that hole, because skip instructions do not reach that event:
+
+```yaml
+on:
+  # Skip instructions apply to push and pull_request only, so a marked PR
+  # head commit cannot suppress a pull_request_target run.
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+```
+
+<Danger>
+
+A `pull_request_target` job runs in the **base** repository's context, with its secrets and a writable token, against a pull request an outsider controls. It is safe here for one reason only: this job reads metadata and never touches the pull request's code. Keep `permissions: contents: read`, keep the `actions/checkout` step absent, and never add a build, install, or test step to this workflow. The moment it executes PR code, it stops being a guard and becomes the vulnerability.
+
+</Danger>
+
+### This guard is not the release-rounds skip-test guard
+
+[Release Rounds § The production-safety invariant](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch-the-production-safety-invariant) shows a workflow that reads a `[skip test]` marker off the pull request's head commit and decides whether to run its own steps. Read quickly, that looks like the opposite of the advice above -- it scans branch commit subjects, which this page says not to do. The two are not in conflict, because they are about two different kinds of marker.
+
+- A **project-level** `[skip test]` is a convention this project invented. GitHub knows nothing about it, so the workflow still starts, still checks out, and gets to inspect the head commit and decide. Reading branch commit text is the only way to implement it, and doing so is correct there.
+- A **GitHub-native** `[skip ci]` suppresses the workflow itself. There is no run, so there is no step that could observe it. No in-workflow guard can defend against it, which is why the defence has to be a *different* workflow whose trigger the marker cannot reach -- and why that workflow must scan the merge-message surface rather than branch history.
+
+One is a flag a running workflow reads about the branch. The other is an instruction to GitHub about whether to start a workflow at all. Only the first can ever be honoured, or refused, from inside a job.
+
+## Prefer Removing the Channel Over Policing It
+
+The setting is the fix; the guard is the backstop. Setting `squash_merge_commit_message: BLANK` eliminates body propagation outright -- there is no text to carry a marker, so the failure mode does not exist rather than being detected. Take that first, on every repository, before writing any workflow.
+
+The guard then earns its keep on what the setting cannot cover:
+
+- **Settings drift.** Repository settings are edited in a web form by whoever has admin, and nothing in the repository records that it happened. A guard in the workflow directory is version-controlled evidence of the intent.
+- **Repositories you have not fixed yet.** The guard is cheap enough to land everywhere while the settings audit proceeds.
+
+Be precise about the residual case it **cannot** cover. A PR-time guard sees the pull request's fields; it does not see a merge message supplied at merge time. `gh pr merge --squash --subject "..." --body "..."` overrides the repository defaults with text the guard never had access to, because that text did not exist when the guard ran. Nothing evaluated before the merge can close that gap. Two things can: the post-merge verification in [Verify the Merge Actually Ran Its Workflows](#verify-the-merge-actually-ran-its-workflows) below, which observes the outcome rather than the input, and merge automation that owns the merge message itself and therefore cannot be handed a marked one.
+
+<Warning>
+
+The guard is only *preventive* where a required status check exists to block on. Branch protection rules and rulesets are plan-gated: on the Free plan both are available only in public repositories, and it takes GitHub Pro, Team, or Enterprise to apply them to a private one. On a **private repository on the Free plan** there is no required status check available, so a failing guard job reports and nothing more -- a red mark next to a merge button that still works. That is the difference between a declared gate and an enforced one, laid out in [Execution Tiers § Make the gate enforced, not just declared](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-make-the-gate-enforced-not-just-declared).
+
+</Warning>
+
+## Verify the Merge Actually Ran Its Workflows
+
+Everything above is preventive, and prevention is the half that can be bypassed. The other half is an assertion made after the fact: **for each workflow that declares a `push` trigger on the target branch, a run must exist for the merge commit.**
+
+### Per workflow, not "any run exists"
+
+"Some run exists for this SHA" is a much weaker claim than it looks. A repository with five `push` workflows and a `paths` filter on each will happily produce a run for the docs lint while the deploy workflow -- the one whose absence matters -- produced nothing. Enumerate the workflows and assert one at a time.
+
+The same `paths` filter cuts the other way. A workflow whose paths the merge did not touch has no run to find, and that absence is not suppression -- derive the list per merge from the changed files against each workflow's `paths`, or restrict it to unfiltered workflows, or the assertion cries wolf on every docs-only merge and gets deleted.
+
+The second requirement is the bound. Run creation lags the merge by seconds, so a single immediate lookup races GitHub and reports a false absence. Poll to a deadline, and treat an empty result **after** the deadline as a failure, not as a no-op:
+
+```bash
+#!/usr/bin/env bash
+# Assert that a merge commit actually triggered its push-driven workflows.
+# Usage: verify-merge-ran.sh <base-branch> <merge-sha>
+set -euo pipefail
+
+BASE="$1"
+SHA="$2"
+DEADLINE=$((SECONDS + 180))
+
+# Every workflow file that declares a push trigger on the target branch AND
+# whose paths filter, if any, matches this merge's changed files. A workflow
+# outside its own paths has no run to find, and that is not suppression --
+# derive this list per merge or the check cries wolf on every docs-only one.
+# Enumerate them: "some run exists" is not the assertion, because a docs
+# lint firing proves nothing about the deploy workflow that did not.
+WORKFLOWS=(ci.yml deploy.yml preview.yml)
+
+fail=0
+for wf in "${WORKFLOWS[@]}"; do
+  while :; do
+    # A transient gh failure is a retry, not an exit: under set -e a bare
+    # substitution would abort the poll with no FAIL line at all.
+    count="$(gh run list --workflow="$wf" --event=push \
+      --branch="$BASE" --commit="$SHA" --limit=1 \
+      --json databaseId --jq 'length' || echo 0)"
+    if [ "$count" -gt 0 ]; then
+      echo "ok: $wf ran for $SHA"
+      break
+    fi
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+      echo "FAIL: no push run for $wf on $SHA -- the trigger was suppressed" >&2
+      fail=1
+      break
+    fi
+    sleep 10
+  done
+done
+
+exit "$fail"
+```
+
+### The fallback for older gh
+
+`gh run list --commit` is present in gh 2.87.3. Where an older CLI is pinned -- a CI image, a locked toolchain -- query the REST API directly and filter on the workflow path:
+
+```bash
+# Same assertion, without --commit: count push runs for one workflow file.
+gh api "repos/{owner}/{repo}/actions/runs?head_sha=$SHA&event=push" \
+  --jq '[.workflow_runs[] | select(.path == ".github/workflows/deploy.yml")] | length'
+```
+
+<Note>
+
+In the source incident, a post-merge watcher **did** notice, and reported "No CI detected on the merge target branch". Nobody acted on it, because the sentence reads like a status note about a quiet repository rather than an alarm. Absence-of-evidence findings need wording that says what they mean, not what they saw: "deploy workflow did not run for `a81aa72a`" is the same fact and is impossible to file away.
+
+</Note>
+
+## The General Lesson: Assert That the Trigger Fired
+
+The reusable half of this is not about GitHub Actions.
+
+**A pipeline whose trigger can be suppressed by data flowing through the pipeline needs an explicit assertion that the trigger fired.** Commit messages are data. They travel through the merge into the trigger's own input, which means the thing being tested has a channel into the decision about whether to test it. Any such loop produces a state that is indistinguishable from success from the outside: green with nothing run.
+
+The same shape recurs at every scale, and the same fix works at each:
+
+- A suite that reports green because [a bad `workers` value collected zero tests](../tool-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green) -- assert the collected count, not the exit code.
+- A suite that reports green because [every test opted out through `test.skip`](../tool-patterns/playwright-patterns.mdx#test-skip-as-a-precondition-—-the-pass-by-skip-trap) -- assert that the specs you care about actually executed.
+- A smoke test that reports green because [its skip path swallowed the outage](./post-deploy-smoke-tests.mdx#the-skip-path-is-where-these-tests-go-wrong) -- assert that assertions ran.
+- A merge that reads as green because no workflow started -- assert that the run exists.
+
+In each case the exit code is being asked a question it cannot answer. A green result proves that whatever ran, passed. It never proves that anything ran. That gap is the whole subject of [Test Integrity](../test-integrity/index.mdx), and workflow suppression is its widest instance, because the missing evidence is not a quiet log line -- it is the entire run.
+
+## Where to Go Next
+
+- [Post-Deploy Smoke Tests § The Skip Path Is Where These Tests Go Wrong](./post-deploy-smoke-tests.mdx#the-skip-path-is-where-these-tests-go-wrong) -- the same false-green shape one layer down, inside a single test.
+- [Release Rounds § Shipping a round](./release-rounds-branch-strategy.mdx#the-model-one-permanent-branch-short-lived-rounds-shipping-a-round) -- the never-squash rule at the release boundary, argued from bisection rather than from marker propagation.
+- [Release Rounds § The production-safety invariant](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch-the-production-safety-invariant) -- the project-level skip marker this page is careful not to be confused with.
+- [Execution Tiers § Make the gate enforced, not just declared](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-make-the-gate-enforced-not-just-declared) -- why a job that reports but cannot block is not yet a gate.
+- [Test Integrity](../test-integrity/index.mdx) -- the category this failure belongs to: the ways a suite deceives you.
+- [Playwright Patterns § A Bad `workers` Value Runs Zero Tests and Exits Green](../tool-patterns/playwright-patterns.mdx#a-bad-workers-value-runs-zero-tests-and-exits-green) -- the in-suite sibling: green with zero tests collected.
+- [Playwright Patterns § `test.skip` as a Precondition](../tool-patterns/playwright-patterns.mdx#test-skip-as-a-precondition-—-the-pass-by-skip-trap) -- the other in-suite sibling: green because every test opted out.
+- [Skipping workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs) -- the native marker set, the `skip-checks` trailer, and the `push` / `pull_request`-only scope (verified 2026-08-29).
+- [Repositories REST API](https://docs.github.com/en/rest/repos/repos?apiVersion=2022-11-28) -- the `squash_merge_commit_title` and `squash_merge_commit_message` values the scan surface is derived from (verified 2026-08-29).
+- [About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) and [About rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) -- why a private Free-plan repository has no required status check to block on (verified 2026-08-29).
