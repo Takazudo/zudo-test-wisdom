@@ -5,7 +5,7 @@
 #   2. Pin parity check (pure-Node, reads package.json only)
 #   3. Category metadata check (pure-Node, reads src/ + zfb.config.ts)
 #   4. Format check (pnpm format:md:check — pnpm dlx, no install needed)
-#   5. Type check (pnpm check) + wrangler pin check
+#   5. Link checker regressions + type check + wrangler pin check
 #   6. Build the zfb docs site (full clone) + link check
 #   7. HTML validate
 #   8. Build doc history JSONs
@@ -154,6 +154,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # zfb production HTML uses unquoted href/id attributes. Keep the local
+      # compatibility patch covered until zudolab/zudo-doc#3720 lands upstream.
+      - name: Run link checker regression tests
+        run: pnpm test:links
 
       # Backstop for the local b4push gate: catch a zfb bump that left the
       # wrangler pin stale (would silently break local `zfb dev`/`preview`).
