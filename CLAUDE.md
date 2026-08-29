@@ -33,7 +33,7 @@ Top-level directories under `src/content/docs/`. Directories with header nav ent
 - `decision-guide/` - Which level to use, common failure patterns, required behaviors
 - `tool-patterns/` - Patterns organized around a specific tool, not a project shape (Vitest, Playwright, visual regression, browser-in-container verification, cargo-nextest)
 - `project-recipes/` - Patterns organized around a repo/project shape, not a single tool (backend, Tauri, remark/rehype plugins, built-site integrity)
-- `ci-operations/` - Running suites across CI, deploys, and releases (environment-tiered testing, smoke tests, scheduled re-exam, branch strategy, publishing, runner sizing)
+- `ci-operations/` - Running suites across CI, deploys, and releases (environment-tiered testing, smoke tests, scheduled re-exam, branch strategy, publishing, runner sizing, CI-skip markers and merge hygiene)
 - `test-integrity/` - Ways tests deceive (flakes, false greens, self-agreement, fixture traps) and the discipline preventing them
 - `tools-reference/` - Quick reference of tools per testing level
 
