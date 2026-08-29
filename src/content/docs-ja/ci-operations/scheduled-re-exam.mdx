@@ -725,7 +725,10 @@ export default defineConfig({
     path: |
       playwright-report/
       test-results/
+    if-no-files-found: error   # default is warn; fires only when both paths are empty
 ```
+
+ここでの `if-no-files-found: error` が発火するのは、**両方**のパスが空だったときだけです。この警告が扱っている取りこぼし——`playwright-report/` は存在するが `test-results/` は存在しない——は捕まえられません。1つでも一致するパスがあれば、ステップはアップロードしてグリーンのままになります。
 
 配置の問題は逆向きにも切れます：`outputDir`（`test-results/`）は**毎回のラン開始時に空にされる**ため、ラン間で残すつもりでそこに置いたものは次のランに削除されます——[残したいアーティファクトは `outputDir` の外に置かなければならない](../tool-patterns/playwright-patterns.mdx#残したいアーティファクトは-outputdir-の外に置かなければならない)を参照。
 
