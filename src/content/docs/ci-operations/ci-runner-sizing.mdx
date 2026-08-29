@@ -254,6 +254,8 @@ Keeping the signals apart is what makes them comparable over time. The matched e
 
 Rule 3 says diagnose the failure mode before resizing. These two sections are the sentence underneath it: **diagnose with numbers that measure the thing you are about to change** — the lane's own execution, not the scheduler above it and not the queue in front of it.
 
+The full experiment protocol these measurements feed — which clock is the target, how many identical-SHA samples decide a keep or a revert, and how to prove that the faster gate still runs the same tests — is [CI Gate Optimization](./ci-gate-optimization.mdx).
+
 ## Putting It Together
 
 | Symptom | Wrong instinct | Right lever |
@@ -278,3 +280,4 @@ The through-line: **a runner label is a two-token edit, but choosing it well mea
 - [Execution Tiers](../decision-guide/execution-tiers.mdx) — the T0–T4 model these sizing rules serve.
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) — how environment- and platform-incapable tests reach the scheduled macOS tier.
 - [Scheduled Re-exam and Night Exam](./scheduled-re-exam.mdx) — how the scheduled (T3) macOS job is actually built.
+- [CI Gate Optimization](./ci-gate-optimization.mdx) — the acceptance protocol these timing rules feed: naming the clock, the median-of-three sample rule, and the identity proof that a faster gate did not quietly lose coverage.

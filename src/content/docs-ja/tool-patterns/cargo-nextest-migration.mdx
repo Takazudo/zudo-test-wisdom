@@ -323,3 +323,4 @@ test-group = 'heavy-serial-build'
 - [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx#同じルール、rust構文) — このnextest設定が実行する `#[ignore]` 理由文字列タグ分類の全体（`env-gate:`、`heavy:`、`flaky:`、`verification:`、`pending-feature:`）と、Rustのflakeがどう隔離されるか
 - [実行ティア](../decision-guide/execution-tiers.mdx) — この移行がRustスイート上で実装可能にするために存在する、リトライ予算
 - [フレイク根本原因カタログ & デフレイキングレシピ](../test-integrity/deflaking-recipe.mdx) — nextestがバイナリをまたいで並列化した瞬間に表面化する、ネイティブスイートのflake原因（ポートレース、暗黙の直列化、共有状態）
+- [CIゲートの最適化](../ci-operations/ci-gate-optimization.mdx) — このセクションの分割実験が1つの波として収まる、ゲート全体のプロトコル。時計に名前を付けること、3本の中央値というサンプルのルール、そして速くなったスイートが依然として同じテストを走らせていることのアイデンティティによる証明

@@ -1,0 +1,159 @@
+---
+title: CI Gate Optimization
+description: The acceptance protocol for a CI speedup -- which clock is the target, how many samples decide a keep or a revert, and how to prove the faster gate still runs exactly the same tests.
+sidebar_position: 8
+---
+
+## The Gap This Page Fills
+
+Every component rule for making a CI gate faster is already written down in this guide, spread across four pages. [Execution Tiers](../decision-guide/execution-tiers.mdx#the-five-tiers) owns the authoritative T1 budget the gate is measured against; [CI Runner Sizing](./ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps) owns the measurement and insists it be taken at job level; [Aggregate Suite Budget](../decision-guide/aggregate-suite-budget.mdx#the-budget-drift-trigger) owns the rule that a duration is only readable next to a test count; [cargo-nextest § After Migration](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence) owns the serialization split and the retry evidence for a Rust suite.
+
+What none of them owns is the **acceptance contract** those rules exist to serve: *make the gate faster without changing what is tested.* Split across four pages, they leave four holes that an optimization can finish faster and green straight through, having proven none of it. The number that improved may not be the number anyone waits on. The improvement may be one lucky hosted sample. The suite may have quietly dropped a test and picked up another in its place. And a pass-on-retry may be paying for part of the speedup off the books.
+
+This page is the protocol that closes those four holes — eight steps, each naming only what is new and pointing at the mechanic that already exists. The worked numbers throughout come from the zudo-front-builder PR-gate optimization ([Takazudo/zudo-front-builder#2701](https://github.com/Takazudo/zudo-front-builder/pull/2701)), and each is labelled by the clock it belongs to, because that is Step 1.
+
+## Step 1: Define the Clocks Up Front
+
+"The gate got faster" is three different claims wearing one sentence, and they move independently:
+
+| Clock | What it measures | What improving it buys |
+|---|---|---|
+| Required critical-path job | that one job's `startedAt` → `completedAt` | merge latency — the check a PR actually waits on |
+| Complete gate wall | first job start to last job finish across the whole workflow | the end of the run, optional dependent jobs included |
+| Billed runner-minutes | execution minutes summed over every job in the run | the bill, and nothing else |
+
+They come apart in ordinary topologies. An optional artifact or browser consumer that depends on the required job **finishes after it**, so the wall keeps running for minutes after merge is already unblocked — improving the required job is a real latency win that barely moves the wall. In the other direction, path-gating an optional matrix removes billed minutes while both latency numbers stay exactly where they were. Which job counts as *required* is not a matter of opinion either: it is whatever the enforcement layer blocks on, and [Execution Tiers § Make the gate enforced, not just declared](../decision-guide/execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-make-the-gate-enforced-not-just-declared) is how you read that out of the API instead of assuming it.
+
+Naming the clock also decides which levers are eligible. A latency target admits a bigger runner ([Rule 1](./ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-1-a-bigger-runner-is-a-latency-lever-not-a-cost-lever)); a cost target does not, and answers to trigger design instead ([Rule 4](./ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-4-cost-control-comes-from-trigger-design-not-runner-choice)). Declare the target clock in the first line of the plan, and label every number after it with the clock it came from.
+
+## Step 2: Establish a Job- and Step-Level Baseline
+
+Before the first change, record a baseline a later reader can re-derive: the numbers **plus their provenance — which run IDs, which timestamp field pair, and how many samples per wave.** The command, and why it is not `gh run list`, is [Read the jobs endpoint, not the run list](./ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps-read-the-jobs-endpoint-not-the-run-list); why the provenance has to travel with the number is [An unpinned timing claim silently regresses](./ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps-an-unpinned-timing-claim-silently-regresses). An optimization is a chain of timing claims, so it inherits that failure mode at every link, not only at the end.
+
+Go one level below the job, to the steps the waves will actually land on. Setup, install, and preamble steps are where fixed cost hides, and a job-level number cannot tell a 40-second setup saving from a 40-second test saving — which is precisely the distinction Step 3 needs in order to attribute anything.
+
+Two boundaries on the baseline. The budget it is compared against is T1's, from [the five tiers](../decision-guide/execution-tiers.mdx#the-five-tiers) — the gate's own target, not a number invented for the experiment. And the baseline must be hosted: a local run is [T4 territory, convenience rather than enforcement](../decision-guide/execution-tiers.mdx#the-five-tiers-t4-local-heavy-lane----convenience-not-enforcement), measured on a machine carrying none of the contention the gate actually runs under.
+
+## Step 3: Make One Attributable Wave at a Time
+
+Ship the changes in waves, one attributable change class per wave, and record a **forecast before the wave and a measurement after it**. The forecast is not ceremony — it is the only thing that makes an underdelivering change visible at all.
+
+In the worked gate that mattered immediately. One fold expected to be the headline win came back at roughly **19 s net on the required-job clock** — real, but far under its forecast — while a guarded preamble cleanup nobody had flagged as significant produced the decisive fixed-cost reduction. A baseline-versus-final report would have credited the two equally, and the next project would have copied the wrong change.
+
+So: **a wave that cannot be attributed has not been measured.** Bundling five changes into one run buys a single number no future decision can use, and avoiding it costs nothing, because the samples Step 4 requires are per-wave anyway.
+
+## Step 4: Take Enough Samples, and Say Which Statistic Decided
+
+Hosted execution varies materially even after queue time is removed — separating those signals is the whole point of [Timing Retros](./ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps) — so one hosted run cannot decide a concurrency or topology change, and one local run is not even in the running.
+
+<Warning>
+
+**A latency claim is the median over at least three identical-SHA hosted samples.** Same SHA, same runner shape, same selected test count, one change per side. The median is the right statistic for a claim about a job's *typical* duration, and it is what decides keep or revert.
+
+**A claim about the tail is a different claim and takes a different statistic.** [Flipping `fullyParallel`](../tool-patterns/playwright-patterns.mdx#fullyparallel-defaults-to-false-—-the-mega-file-tail-flip-it-as-an-experiment-not-as-a-recommendation) compares **maxima over at least five attempts**, because the slowest attempt is what a PR author actually waits for. Neither rule displaces the other — pick the one that matches the sentence you intend to write.
+
+</Warning>
+
+Retain every sample's artifacts, not only the winner's: the losing sample is the one Step 6 needs the moment a retry turns up in it. And remember what a sample is. It describes what happened; it never establishes a bound — [Timing Samples Are Not Tail Proof](../test-integrity/live-proof-evidence-contracts.mdx#timing-samples-are-not-tail-proof) is the harder version of this rule, for when the deadline belongs to the product rather than to your patience.
+
+One sample is easy to leave on the table. When the pipeline already ran the same suite twice on one commit — a required check plus an equivalent sibling leg, or a re-triggered workflow — that pair is a [twin-leg comparison](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-the-twin-leg-comparison-same-commit-same-suite-one-leg-red) you have already paid for. Read it before buying another run.
+
+## Step 5: Prove Exact Test Identity, Not Counts
+
+Counts collide. A selection change that drops one test and picks up another leaves the total untouched, so "63 before, 63 after" is a necessary condition that proves nothing on its own. The acceptance is stricter: **equal count *and* a zero-byte diff of the canonicalized identity lists, stored as an artifact, with the sorted list's SHA-256 pinned beside the claim.** Identity, not title — two specs can share a title, which is exactly why [cross-run triage keys on identity](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title).
+
+```bash
+# Prove the selected test set is unchanged. Equal COUNT is not enough: a dropped
+# identity replaced by a new one keeps the total green. Canonicalize identities,
+# diff both directions, and pin the sorted list's hash next to the claim.
+set -euo pipefail
+
+# Replace with the suite's own list-only command (cargo nextest list,
+# playwright test --list, vitest list). Emit identity, never a bare title.
+list_identities() {
+  cargo nextest list --workspace --message-format json \
+    | jq -r '."rust-suites"[].testcases | keys[]' | sort -u
+}
+
+git checkout "$BASELINE_SHA" && list_identities > before.txt
+git checkout "$CANDIDATE_SHA" && list_identities > after.txt
+
+wc -l < before.txt; wc -l < after.txt      # equal count: necessary, not sufficient
+sha256sum before.txt after.txt             # pin both digests beside the claim
+diff before.txt after.txt > identity.diff  # keep the artifact; set -e fails on any diff
+```
+
+That diff is a bidirectional set equality, the same shape as [Ignored-Test-Manifest Parity](./scheduled-re-exam.mdx#ignored-test-manifest-parity-a-sibling-inventory-contract): a test that appeared and a test that vanished have to fail identically, or the check guards one direction only. On a Rust suite the inventory side is already mechanized — reconcile it per the [migration checklist](../tool-patterns/cargo-nextest-migration.mdx#migration-checklist-mechanical), and keep group membership honest with the [membership guard](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence), which is what stops a newly added binary from silently escaping the serialized group a split just created.
+
+The list proves what was *selected*. Confirm what actually **executed** from the run's own JUnit: in the worked gate, 63 env-gate tests before and 63 after, splitting into the same 45 / 2 / 16 lane partitions both times. Pairing a count with a duration is the discipline [The Budget-Drift Trigger](../decision-guide/aggregate-suite-budget.mdx#the-budget-drift-trigger) already requires on every run — here it is the same pairing aimed at a before/after pair instead of at a trend.
+
+## Step 6: Audit Failures, Retries, and What the Retries Cost
+
+A green conclusion answers "did whatever ran pass?" It does not answer "what did the run cost?", and during a speedup those are the same question. A pass-on-retry is [a triage signal, not a success](../decision-guide/execution-tiers.mdx#retry-budgets), and the retried attempt's time is part of the execution cost you are claiming to have reduced.
+
+So the audit reads the artifacts, not the check conclusion. For a Playwright suite, the retry-pass signal and its structural fallback are [Retry-Pass Detection](./scheduled-re-exam.mdx#flake-telemetry-mechanics-retry-pass-detection); for a Rust suite, the four JUnit elements that carry retry cost and the retry-tax formula over them are [Price Retries From the Real nextest JUnit Shape](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence). Hold the retry budget itself fixed across every sample: a wave that buys wall clock by spending retry budget has bought nothing.
+
+State the audit's scope as a count, so a reader can tell a real audit from a glance at the summary page. The worked gate's audit covered **25 JUnit files holding 50,301 `<testcase>` records, with zero flaky, failure, and error records among them** — which is also its honest caveat, because a healthy suite exercises none of the retry formulas. The audit proves absence, not that the parser would have priced a retry correctly.
+
+One ordering rule carries over from incident work: **preserve the artifacts before any rerun.** [The gate operator's playbook](../test-integrity/deflaking-recipe.mdx#red-ci-you-don-t-own-—-the-gate-operator-s-playbook) makes this a rule because a rerun overwrites or expires exactly the evidence that made an occurrence readable — and inside an experiment, that evidence is also the wave's measurement.
+
+## Step 7: Report the Waves Honestly, and Label Every Win
+
+Two reporting rules, both about resisting a tidy narrative.
+
+**Report the waves that underdelivered, with their forecasts.** The ~19 s fold above belongs in the report beside the preamble cleanup that actually carried the result. A report of only the wins cannot be reused, because the next reader cannot see which changes were expensive to make and cheap in effect.
+
+**Label each win as latency, cost-only, or both.** Path-gating an optional matrix off unrelated PRs is a cost-only win: billed minutes fall, merge latency does not move, and calling it "a faster gate" makes the whole report unreadable. The lever for a cost-only win is trigger design — [Rule 4](./ci-runner-sizing.mdx#the-four-runner-sizing-rules-rule-4-cost-control-comes-from-trigger-design-not-runner-choice) at the runner level, and [gating heavy CI by base branch](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch) at the branch level.
+
+## Step 8: Final Acceptance Re-runs the Complete Gate
+
+The last wave's samples are not the acceptance. Re-run the **complete gate on the final SHA** — every job, required and optional — because waves compose in ways their individual samples never show, and no wave's run ever contained the final tree.
+
+Then assert the half that lives after the merge button. A merge that reads as green because no workflow started is the widest false green there is, and the per-workflow bounded poll that rules it out is [Verify the Merge Actually Ran Its Workflows](./skip-markers-and-merge-hygiene.mdx#verify-the-merge-actually-ran-its-workflows). A gate optimization that touched triggers, `paths` filters, or job dependencies has been editing exactly the surface that decides whether those post-merge runs exist at all.
+
+<Warning>
+
+**Never slim the source lane before the destination has run green.** [The Migration Rule](../decision-guide/execution-tiers.mdx#the-migration-rule) is written for a test moving between tiers, and a gate optimization that moves work off the required job into an optional or scheduled lane is that same move wearing a performance justification. Take the work out of the fast lane only after the lane inheriting it has run it green at least once.
+
+</Warning>
+
+## The Worked Result
+
+| Clock | Baseline | Final |
+|---|---:|---:|
+| Required `health` job | 24m23s | 18m30s |
+| Complete gate wall | 25m40s | 19m42s |
+
+Both rows are baseline-to-final across every wave of the zudo-front-builder PR-gate optimization ([Takazudo/zudo-front-builder#2701](https://github.com/Takazudo/zudo-front-builder/pull/2701)). Across the measured samples through the final run: 25 JUnit files, 50,301 `<testcase>` records, zero retry / failure / error records, and the relevant-path test inventory unchanged.
+
+<Note>
+
+[cargo-nextest § After Migration](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence) quotes **22m22s → 18m54s** from this same gate, and the two are not in conflict. That figure is the median required `health` job over three identical-SHA samples of the **serialization-split experiment alone** — one wave, measured at its own start and end. The 24m23s → 18m30s row above is the same job clock measured across **every** wave, from the original baseline to the final SHA. Same clock, different endpoints. Whenever two pages quote one gate, label both the clock and the interval, or the smaller number reads as a contradiction of the larger.
+
+</Note>
+
+## Putting It Together
+
+| Symptom | Wrong instinct | Right lever |
+|---|---|---|
+| "The gate is slow" | Optimize the number `gh run list` prints | Name the clock first (Step 1) — required job, complete wall, and billed minutes are three claims, and workflow timestamps blend queue wait into all of them |
+| One hosted run came back faster | Ship it | Median over ≥3 identical-SHA hosted samples (Step 4); one sample is noise wearing a decision's clothes |
+| An optional consumer still finishes minutes after the required job | The gate did not really improve | It did, on the required-job clock — the wall is a separate claim, so report both rather than blending them (Step 1) |
+| Five changes shipped, one measurement, gate is faster | Credit all five | One attributable wave at a time, forecast recorded before and measured after (Step 3) |
+| Test count is identical before and after | Coverage is proven unchanged | Zero-byte diff of canonicalized identities + pinned SHA-256, then JUnit partition confirmation (Step 5) |
+| Final check is green | The run cost what the job duration says | Audit reporter-native retry records in the artifacts; hold the retry budget fixed across samples (Step 6) |
+| The bill is the problem, latency is fine | Downsize the runners | Trigger design — base-branch gating and schedules — reported explicitly as a cost-only win (Step 7, Rule 4) |
+| Required job is fast now | Declare success | Re-run the complete gate on the final SHA, then assert the post-merge push workflows actually ran (Step 8) |
+
+The through-line: **every step here turns a number into a claim somebody else can check.** A clock with no name, a sample with no statistic, a count with no identity list, and a green check with no artifact audit are all the same defect — a result that cannot be wrong, and therefore cannot be right either.
+
+## Where to Go Next
+
+- [CI Runner Sizing § Timing Retros Read Job-Level Timestamps](./ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps) — the measurement every step here stands on, and why the convenient command is the wrong one.
+- [Execution Tiers](../decision-guide/execution-tiers.mdx) — the T1 budget the gate is optimized against, the retry budget held fixed across samples, and the migration rule Step 8 pairs with.
+- [Aggregate Suite Budget § The Budget-Drift Trigger](../decision-guide/aggregate-suite-budget.mdx#the-budget-drift-trigger) — count beside duration on every run, and the ordered remedies when the budget is exceeded.
+- [cargo-nextest § After Migration: Optimize Without Losing Evidence](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence) — one wave of this protocol worked end to end on a Rust suite, with the JUnit retry shape underneath Step 6.
+- [CI-Skip Markers and Merge Hygiene § Verify the Merge Actually Ran Its Workflows](./skip-markers-and-merge-hygiene.mdx#verify-the-merge-actually-ran-its-workflows) — Step 8's post-merge assertion, and the false green it exists to catch.
+- [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) — test identity, the twin-leg comparison, and the artifacts-before-rerun rule this protocol borrows.
+- [Live-Proof Evidence Contracts § Timing Samples Are Not Tail Proof](../test-integrity/live-proof-evidence-contracts.mdx#timing-samples-are-not-tail-proof) — what replaces a sample when the deadline belongs to the product rather than to your patience.
+- [Release Rounds § Gating Heavy CI by Base Branch](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch) — the branch-level form of the cost-only lever Step 7 makes you label.
