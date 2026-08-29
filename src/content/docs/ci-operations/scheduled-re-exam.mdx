@@ -504,6 +504,8 @@ Synthetic fixtures are safe only when **you own the contract**. For a third-part
 
 </Warning>
 
+The same rule has a second instance one tool over: nextest's `junit.xml` nests every retried attempt as a `<flakyFailure>`, `<flakyError>`, `<rerunFailure>`, or `<rerunError>` child, and [pricing retries from that real shape](../tool-patterns/cargo-nextest-migration.mdx#after-migration-optimize-without-losing-evidence-price-retries-from-the-real-nextest-junit-shape) needs a captured report -- a healthy suite emits none of those elements, so a hand-authored fixture is the only thing a naive parser will ever have been tested against.
+
 ## Flake Telemetry Mechanics
 
 Two rules stated elsewhere on this site are policy, not mechanism: [Execution Tiers](../decision-guide/execution-tiers.mdx) says pass-on-retry is a triage signal, not a success, and the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) says a quarantined `@flaky` test still runs allowed-to-fail in the scheduled tier so fresh failure data keeps flowing into its tracking issue. Neither page says how a passed-after-retry test gets detected, or how that data actually reaches an issue. What follows is the mechanics a downstream project built and hardened to make both rules real.
