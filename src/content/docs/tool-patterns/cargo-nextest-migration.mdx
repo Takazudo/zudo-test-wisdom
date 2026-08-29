@@ -167,6 +167,157 @@ jobs:
 
 `file-exam-issue.sh` is the same [one-tracking-issue-per-workflow](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run) pattern from Scheduled Re-exam — the dedup-by-label-and-title, comment-vs-create, and close-on-green logic all port unchanged. Only the failure-extraction step differs: parse the `junit.xml` produced by `[profile.exam.junit]` above instead of Playwright's JSON reporter.
 
+## After Migration: Optimize Without Losing Evidence
+
+Everything above gets the suite migrated and *correct*. What follows is what the same suite needs once it is also the gate's critical path. Two things break here that a green run never reports: a single `max-threads = 1` group quietly over-serializes classes that never actually contended, and the JUnit report that would prove what a run cost gets overwritten by the next command in the same job.
+
+The worked numbers in this section come from one Rust gate, each labelled by lane and by clock: **63** `#[ignore]`d env-gate tests across three lanes, **5,807** workspace tests, and **457** required-features tests; **25** audited JUnit files holding **50,301** `<testcase>` records, with zero flaky, failure, and error records among them; an **18m30s** required `health` job inside a **19m42s** complete-gate wall time.
+
+### Split Serialization Along Proven Contention Classes
+
+`heavy-serial` in the Config Sketch is one group because the migration had one question to answer: which binaries used to run one at a time? Once the suite is green, that group is usually holding two or more *different* contention classes together, and the whole group runs at the speed of their union.
+
+In the worked gate, 41 V8/esbuild-heavy integration binaries shared one `max-threads = 1` group. Twenty-four of them had adopted the process-level advisory `flock` from step 2 of the Migration Checklist above; the remaining seventeen were build-only binaries that never take it. Those two classes do not contend with each other -- only within themselves -- so two independent `max-threads = 1` groups can admit one flock adopter and one build-only binary *concurrently* while preserving serialization inside each class:
+
+```toml
+# .config/nextest.toml -- REPLACES the Config Sketch's `heavy-serial` group and
+# its single override. Paste this fragment in their place rather than beside
+# them: a second [test-groups] header in the same file is invalid TOML, and a
+# binary claimed by two overrides is a configuration error, not a wider group.
+[test-groups]
+heavy-serial-flock = { max-threads = 1 }
+heavy-serial-build = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# Class A: binaries that take the process-level advisory flock (checklist step 2).
+filter = 'binary(dev_serve_e2e) | binary(dev_serve_injected_routes_e2e)'
+test-group = 'heavy-serial-flock'
+
+[[profile.default.overrides]]
+# Class B: build-only binaries that never take the flock. Disjoint from Class A
+# by construction -- no binary() name appears in both filters.
+filter = 'binary(dev_build_static_parity) | binary(dev_build_asset_graph)'
+test-group = 'heavy-serial-build'
+```
+
+Three identical-SHA hosted runs of that split reduced the median **required `health` job** time from 22m22s to 18m54s -- the clock is that one job's own duration, not the gate's wall time -- while running 5,807 of 5,807 tests with zero retries and zero failures.
+
+The decision rule is narrow on purpose: **split only when the two classes are independently proven not to contend.** Proven means each class's isolation mechanism is identified and verified to exist (Migration Checklist step 3), not inferred from two groups happening to go green once. A split made on a guess reintroduces exactly the port and shared-state races the `max-threads = 1` group was created to suppress, and it reintroduces them as intermittent failures rather than as a config error.
+
+Accept the split on evidence, and state the evidence: the **median over at least three identical-SHA hosted runs**, with **test identity unchanged** (key the comparison on [test identity, not test title](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title)), **zero new retries**, and every artifact still retained. The median is the right statistic for a claim about a job's typical duration; a claim about the *tail* is a different claim needing a different one -- [flipping `fullyParallel`](./playwright-patterns.mdx#fullyparallel-defaults-to-false-—-the-mega-file-tail-flip-it-as-an-experiment-not-as-a-recommendation) compares **maxima over at least five attempts** for exactly that reason, and this section does not displace it. Read the durations from [job-level timestamps](../ci-operations/ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps), and hold the [retry budget](../decision-guide/execution-tiers.mdx#retry-budgets) fixed across every sample -- a split that buys wall clock by spending retry budget has bought nothing.
+
+### Enforce Heavy-Group Membership Mechanically
+
+Both `binary(...)` filters above are handwritten lists, and handwritten lists drift. The failure is asymmetric: a stale entry naming a deleted binary is loud, while a *newly added* integration test that nobody classified is silent -- it lands in the default group, runs fully parallel against the very binaries the groups exist to serialize, and the suite stays green until it does not.
+
+The guard is a check that runs in the same gate, over five steps:
+
+1. **Derive the candidate set from every integration-test source file** -- the `tests/*.rs` targets across the workspace, not the `#[ignore]` set and not a second handwritten list. A guard fed from the config it is guarding proves nothing.
+2. **Subtract an explicit exclusions list**, one entry per deliberately unclassified binary, each carrying a reviewed reason on the line above it. The worked gate has **five reviewed exclusions**; the reasons are the artifact, not the count.
+3. **Require exact equality with the union of the two configured `binary(...)` filters.** The derived set minus the exclusions must equal that union in both directions.
+4. **Require the two groups to be disjoint.** Their intersection must be empty, so no binary can be silently claimed by whichever override nextest evaluates first.
+5. **Pin the shared-target test-predicate classes** -- the `test(...)` predicates that select across binaries -- so a new predicate cannot rehome a binary out of its group without failing this check.
+
+Steps 3 and 4 are the load-bearing pair. A one-sided assertion -- "every configured `binary(...)` name resolves to a real binary" -- passes forever while unclassified sources pile up on the other side of the equality. This is the same bidirectional-inventory shape as [Ignored-Test-Manifest Parity](../ci-operations/scheduled-re-exam.mdx#ignored-test-manifest-parity-a-sibling-inventory-contract), where a stale manifest row and a newly homeless test have to fail identically, and as [Counterweight 3: Manifest Parity](../decision-guide/aggregate-suite-budget.mdx#registry-driven-consolidation-three-counterweights-counterweight-3-manifest-parity-—-a-per-chunk-assertion-proves-only-chunks-that-still-run), where a per-chunk assertion cannot notice a chunk that stopped running at all.
+
+### Stash Every JUnit Report Before the Next Same-Profile Run
+
+`[profile.<name>.junit] path` resolves under `target/nextest/<profile>/`, so **every** run of a given profile writes the same file. Two sequential `cargo nextest run --profile ci ...` commands in one job therefore leave exactly one report: the last producer's. The worked gate runs five same-profile commands -- three `--run-ignored ignored-only` env-gate lanes, the `--workspace` run, and the required-features run -- so four of its five reports would vanish without a move between each pair:
+
+```yaml
+# .github/workflows/health.yml (excerpt) -- five same-profile nextest runs in one
+# job. Each report is moved out of target/nextest/ci/ BEFORE the next run
+# overwrites it, because the profile writes the same path every time.
+- run: cargo nextest run --profile ci --run-ignored ignored-only -E 'test(/^env_gate_/)'
+  env:
+    ENV_GATE: docker
+- if: always() # keep the report from a FAILED run too -- that is the one worth reading
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/env-gate-docker.xml
+
+- run: cargo nextest run --profile ci --run-ignored ignored-only -E 'test(/^env_gate_/)'
+  env:
+    ENV_GATE: network
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/env-gate-network.xml
+
+- run: cargo nextest run --profile ci --run-ignored ignored-only -E 'test(/^env_gate_/)'
+  env:
+    ENV_GATE: credentials
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/env-gate-credentials.xml
+
+- run: cargo nextest run --workspace --profile ci
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/workspace.xml
+
+- run: cargo nextest run --workspace --profile ci --all-features # builds the targets gated behind [[test]] required-features
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/required-features.xml
+
+- if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: junit-reports
+    path: reports/
+    if-no-files-found: error # an empty upload is the silent failure this block exists to prevent
+```
+
+`if: always()` on each stash step is the point of the pattern, not a decoration: the lane that *fails* is the lane whose report you most want, and without it the move is skipped and the evidence dies with the step. Pair each stash with its own producer rather than collecting all five at the end -- after a failure the later lanes never run, and a single trailing collector would only ever see whichever report happened to be last on disk.
+
+The upload is unconditional here, which is worth stating because the nearest rule on this site points the other way. Playwright traces are [gated on `failure() || cancelled()`](./playwright-patterns.mdx#recording-a-trace-is-not-keeping-it-gate-the-upload-on-failure-cancelled) because a full trace directory from every green run burns the storage cap for no diagnostic gain. JUnit reports are kilobytes, and they are the retry evidence for green runs too -- the formulas in the next section have nothing to read otherwise -- so they upload every time. The shared rule is that the upload condition is a decision made per artifact class, never a default inherited from another page. And `if-no-files-found: error` is what turns "every move silently no-op'd" into a red job instead of an empty artifact.
+
+The overwrite itself is the same trap in a different tool: a [second Playwright run empties `outputDir` before the upload](./playwright-patterns.mdx#recording-a-trace-is-not-keeping-it-a-second-playwright-run-empties-outputdir-before-the-upload). Same shape, same fix -- move the artifact out of the tool's own output directory before the tool runs again.
+
+### Price Retries From the Real nextest JUnit Shape
+
+A `<testcase>` that reads as a pass can still have cost three attempts, and `<flakyFailure>` is only one of the four elements that carry that cost. A parser that looks for `<flakyFailure>` alone prices a plain retried failure at zero.
+
+```xml
+<!-- Elided for shape: the <testsuites>/<testsuite> wrappers, the timestamp
+     attributes, the <system-out>/<system-err> children, and the full captured
+     panic text that each element body actually carries. -->
+
+<!-- flaky PASS. The testcase is a success and its time is the PASSING attempt.
+     Every earlier attempt nests as flakyFailure -- flakyError for an execution
+     failure or a leak -- each with its own time. -->
+<testcase name="test_flaky_mod_4" classname="fixture-project::basic" time="0.004">
+  <flakyFailure time="0.004" type="test failure">attempt 1 panicked</flakyFailure>
+  <flakyFailure time="0.005" type="test failure">attempt 2 panicked</flakyFailure>
+</testcase>
+
+<!-- flaky FAIL under the default flaky-fail-status = "failure": a failure element
+     whose type is the literal "flaky failure", PLUS the same nested
+     flakyFailure/flakyError set. testcase@time is the PASSING attempt here too.
+     Under flaky-fail-status = "success" this testcase is indistinguishable from
+     the flaky PASS above while the run itself still fails -- pin the knob or the
+     report cannot be read at all. -->
+<testcase name="test_known_flaky" classname="fixture-project::basic" time="0.006">
+  <failure type="flaky failure">flaky: passed only on a retry</failure>
+  <flakyFailure time="0.004" type="test failure">attempt 1 panicked</flakyFailure>
+  <flakyFailure time="0.005" type="test failure">attempt 2 panicked</flakyFailure>
+</testcase>
+
+<!-- plain FAILURE with retries: failure/error plus one rerunFailure or rerunError
+     per retry. Here testcase@time is the FIRST attempt, not the last -- the
+     opposite end of the sequence from the two flaky cases above. -->
+<testcase name="test_failure_assert" classname="fixture-project::basic" time="0.004">
+  <failure type="test failure">assertion failed: left == right</failure>
+  <rerunFailure time="0.004" type="test failure">assertion failed: left == right</rerunFailure>
+  <rerunFailure time="0.004" type="test failure">assertion failed: left == right</rerunFailure>
+</testcase>
+```
+
+Two formulas, one input. For any `<testcase>`:
+
+- **Retry-inclusive time** = `testcase@time` plus the sum of `@time` over its nested `flakyFailure`, `flakyError`, `rerunFailure`, and `rerunError` children.
+- **Retry tax** = that nested sum on its own.
+
+`testcase@time` is always exactly one attempt and never a sum, in all three shapes above. A dashboard that reads it as the test's total execution time under-reports every retried test by the whole retry tax.
+
+**Captured from cargo-nextest 0.9.138 -- re-check the element set against whatever version you pin; `flaky-fail-status` (0.9.131+) and `report-skipped` (0.9.143+) change the shape.**
+
+A parser for any of this needs [a real captured report as its fixture](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report), and here that rule has a sharp edge. The 25 audited reports from the worked gate hold 50,301 `<testcase>` records with **zero** flaky, failure, and error records among them -- a healthy suite emits no nested retry elements at all, so nothing in a normal artifact haul exercises either formula. Capture the fixture deliberately: force a test to fail on attempt 1 under `retries >= 1` and keep that run's `junit.xml`. Failing that, label the sample as reproduced from nexte.st's documentation rather than captured from your own suite -- a synthetic shape you assumed is exactly what the fixture rule exists to keep out of the test.
+
 ## Where to Go Next
 
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx#same-rules-rust-syntax) — the full `#[ignore]` reason-string taxonomy (`env-gate:`, `heavy:`, `flaky:`, `verification:`, `pending-feature:`) this nextest config executes, and how a Rust flake is quarantined

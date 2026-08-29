@@ -167,6 +167,157 @@ jobs:
 
 `file-exam-issue.sh` は、定期再試験にある[1ワークフロー1トラッキングissue](../ci-operations/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく)パターンと同じものです — ラベルとタイトルによる重複排除、コメントか新規作成かの判定、グリーン時のクローズというロジックはそのまま移植できます。異なるのは失敗抽出のステップだけです：Playwrightの JSON レポーターの代わりに、上の `[profile.exam.junit]` が生成する `junit.xml` をパースします。
 
+## 移行後：証拠を失わずに最適化する
+
+ここまでの内容は、スイートを移行して*正しく*するところまでです。ここから先は、そのスイートがゲートのクリティカルパスでもあるときに必要になることです。グリーンな実行が決して報告しない2つのことが、ここで壊れます：単一の `max-threads = 1` グループが、実際には競合していなかったクラスまで静かに直列化しすぎること。そして、その実行にどれだけコストがかかったかを証明するはずのJUnitレポートが、同じジョブ内の次のコマンドに上書きされてしまうことです。
+
+このセクションの実測値は、あるRustゲートから取ったもので、レーンと時計の両方でラベルを付けてあります：3レーンにまたがる **63** 件の `#[ignore]` 付きenv-gateテスト、**5,807** 件のワークスペーステスト、**457** 件のrequired-featuresテスト。監査した **25** 個のJUnitファイルには **50,301** 件の `<testcase>` レコードが含まれ、そのうちflaky・failure・errorのレコードはゼロ。必須（required）の `health` ジョブが **18m30s**、ゲート全体のウォールクロックが **19m42s** です。
+
+### 実証済みの競合クラスに沿って直列化を分割する
+
+Config Sketchの `heavy-serial` が1つのグループなのは、移行時に答えるべき問いが1つだったからです：どのバイナリがこれまで1つずつ実行されていたのか？ スイートがグリーンになった後、そのグループはたいてい2つ以上の*異なる*競合クラスを一緒に抱え込んでおり、グループ全体がその和集合の速度で走ることになります。
+
+実例のゲートでは、V8／esbuildを積んだ41個の統合テストバイナリが1つの `max-threads = 1` グループを共有していました。そのうち24個は、上の移行チェックリストのステップ2にあるプロセスレベルのアドバイザリ `flock` をすでに採用しており、残りの17個はflockを一切取らないビルド専用のバイナリでした。この2つのクラスは互いには競合せず、それぞれのクラス内でしか競合しません。つまり、独立した2つの `max-threads = 1` グループなら、flock採用バイナリとビルド専用バイナリを*同時に*走らせながら、各クラス内の直列化は保てるのです：
+
+```toml
+# .config/nextest.toml -- REPLACES the Config Sketch's `heavy-serial` group and
+# its single override. Paste this fragment in their place rather than beside
+# them: a second [test-groups] header in the same file is invalid TOML, and a
+# binary claimed by two overrides is a configuration error, not a wider group.
+[test-groups]
+heavy-serial-flock = { max-threads = 1 }
+heavy-serial-build = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# Class A: binaries that take the process-level advisory flock (checklist step 2).
+filter = 'binary(dev_serve_e2e) | binary(dev_serve_injected_routes_e2e)'
+test-group = 'heavy-serial-flock'
+
+[[profile.default.overrides]]
+# Class B: build-only binaries that never take the flock. Disjoint from Class A
+# by construction -- no binary() name appears in both filters.
+filter = 'binary(dev_build_static_parity) | binary(dev_build_asset_graph)'
+test-group = 'heavy-serial-build'
+```
+
+同一SHAでの3回のホステッド実行により、この分割は **必須（required）の `health` ジョブ** 時間の中央値を22m22sから18m54sへ短縮しました — ここでの時計は、ゲート全体のウォールクロックではなく、その1つのジョブ自身の所要時間です — 5,807件中5,807件のテストを実行し、リトライもゼロ、失敗もゼロでした。
+
+判断ルールは意図的に狭くしてあります：**2つのクラスが互いに競合しないことを独立に実証できたときだけ分割する。** 実証とは、各クラスの隔離メカニズムを特定し、それが実在することを確認済み（移行チェックリストのステップ3）だという意味であって、2つのグループがたまたま一度グリーンになった事実からの推測ではありません。当てずっぽうの分割は、`max-threads = 1` グループが抑え込むために作られたポートレースや共有状態のレースを、そのまま呼び戻します。しかも設定エラーとしてではなく、断続的な失敗として呼び戻すのです。
+
+分割は証拠に基づいて受け入れ、その証拠を明記します：**同一SHAでのホステッド実行を3回以上取った中央値**、**テストアイデンティティが変わっていないこと**（比較のキーは[テストタイトルではなくテストアイデンティティ](../test-integrity/deflaking-recipe.mdx#part-1-—-根本原因カタログ-クロスラン・トリアージのキーはテストタイトルではなくテストアイデンティティにする)にします）、**新規のリトライがゼロであること**、そしてすべてのアーティファクトが保持されていることです。中央値は、ジョブの典型的な所要時間についての主張には正しい統計量です。*テール*についての主張は別の主張であり、別の統計量を必要とします — [`fullyParallel` のフリップ](./playwright-patterns.mdx#fullyparallel-の既定は-false-—-メガファイルが作るテール-推奨ではなく、実験としてフリップする)がまさにその理由で **5回以上の試行の最大値** を比較しており、このセクションはそれを置き換えるものではありません。所要時間は[ジョブレベルのタイムスタンプ](../ci-operations/ci-runner-sizing.mdx#タイミングの振り返りはジョブレベルのタイムスタンプを読む)から読み、[リトライ予算](../decision-guide/execution-tiers.mdx#リトライ予算)はすべてのサンプルで固定します — リトライ予算を使ってウォールクロックを買った分割は、何も買っていません。
+
+### 重量級グループのメンバーシップを機械的に強制する
+
+上の2つの `binary(...)` フィルタはどちらも手書きのリストであり、手書きのリストはドリフトします。しかもその失敗は非対称です：削除済みのバイナリを指す古いエントリは声高ですが、*新しく追加された*、誰も分類していない統合テストは静かです — それはデフォルトグループに落ち、グループが直列化するために存在するまさにそのバイナリたちに対して完全並列で走り、実際に壊れるまでスイートはグリーンのままです。
+
+ガードは、同じゲートの中で走るチェックで、5つのステップからなります：
+
+1. **候補集合をすべての統合テストのソースファイルから導出する** — ワークスペース全体の `tests/*.rs` ターゲットからであって、`#[ignore]` の集合からでも、2つ目の手書きリストからでもありません。守るべき設定そのものを入力にしたガードは、何も証明しません。
+2. **明示的な除外リストを差し引く。** 意図的に未分類にしたバイナリごとに1エントリ、それぞれ直前の行にレビュー済みの理由を書きます。実例のゲートには **レビュー済みの除外が5件** あります。成果物は理由のほうであって、件数ではありません。
+3. **設定された2つの `binary(...)` フィルタの和集合と完全一致することを要求する。** 導出した集合から除外を引いたものが、その和集合と双方向に等しくなければなりません。
+4. **2つのグループが互いに素であることを要求する。** 積集合は空でなければなりません。そうでなければ、nextestが先に評価したほうのoverrideが、どのバイナリを黙って取り込んでもおかしくありません。
+5. **共有ターゲットのテスト述語クラスを固定する** — バイナリをまたいで選択する `test(...)` 述語のことです — 新しい述語が、このチェックを落とさずにバイナリをグループの外へ移してしまえないようにします。
+
+要となるのはステップ3と4の組み合わせです。「設定されたすべての `binary(...)` 名が実在のバイナリに解決される」という片側だけのアサーションは、等式の反対側に未分類のソースが積み上がっていく間、永遠にパスし続けます。これは[無視テストマニフェストのパリティ](../ci-operations/scheduled-re-exam.mdx#兄弟インベントリ契約としての無視テストマニフェストのパリティ)（古いマニフェスト行と、行き場を失ったテストが同じように落ちなければならない）と同じ双方向インベントリの形であり、[カウンターウェイト3：マニフェストパリティ](../decision-guide/aggregate-suite-budget.mdx#レジストリ駆動の統合：3つのカウンターウェイト-カウンターウェイト3：マニフェストパリティ-—-チャンク単位のアサーションは、まだ実行されるチャンクしか証明しない)（チャンク単位のアサーションは、そのチャンクごと実行されなくなったことに気づけない）とも同じ形です。
+
+### 次の同一プロファイル実行の前に、すべてのJUnitレポートを退避する
+
+`[profile.<name>.junit] path` は `target/nextest/<profile>/` の下に解決されるため、あるプロファイルの **すべての** 実行が同じファイルに書き込みます。したがって、1つのジョブ内で `cargo nextest run --profile ci ...` を2回続けて実行すると、残るレポートはちょうど1つ、最後の生成者のものだけです。実例のゲートは同一プロファイルのコマンドを5本走らせます — 3本の `--run-ignored ignored-only` env-gateレーン、`--workspace` の実行、そしてrequired-featuresの実行です — つまり、各実行の間に退避を挟まなければ、5つのうち4つのレポートが消えることになります：
+
+```yaml
+# .github/workflows/health.yml (excerpt) -- five same-profile nextest runs in one
+# job. Each report is moved out of target/nextest/ci/ BEFORE the next run
+# overwrites it, because the profile writes the same path every time.
+- run: cargo nextest run --profile ci --run-ignored ignored-only -E 'test(/^env_gate_/)'
+  env:
+    ENV_GATE: docker
+- if: always() # keep the report from a FAILED run too -- that is the one worth reading
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/env-gate-docker.xml
+
+- run: cargo nextest run --profile ci --run-ignored ignored-only -E 'test(/^env_gate_/)'
+  env:
+    ENV_GATE: network
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/env-gate-network.xml
+
+- run: cargo nextest run --profile ci --run-ignored ignored-only -E 'test(/^env_gate_/)'
+  env:
+    ENV_GATE: credentials
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/env-gate-credentials.xml
+
+- run: cargo nextest run --workspace --profile ci
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/workspace.xml
+
+- run: cargo nextest run --workspace --profile ci --all-features # builds the targets gated behind [[test]] required-features
+- if: always()
+  run: mkdir -p reports && mv target/nextest/ci/junit.xml reports/required-features.xml
+
+- if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: junit-reports
+    path: reports/
+    if-no-files-found: error # an empty upload is the silent failure this block exists to prevent
+```
+
+各退避ステップの `if: always()` は飾りではなく、このパターンの要点そのものです：*失敗した*レーンこそ、そのレポートを最も読みたいレーンだからです。`if: always()` がなければmoveはスキップされ、証拠はステップと一緒に死にます。退避は必ずその生成者とペアにし、最後にまとめて5つ集めようとしないでください — 失敗のあとは後続のレーンが走らないため、末尾に置いた1つの集約ステップは、たまたまディスク上に最後に残ったレポートしか見られません。
+
+ここでアップロードを無条件にしていることは、明記しておく価値があります。このサイトで最も近いルールは逆を指しているからです。Playwrightのトレースは[`failure() || cancelled()` でゲートする](./playwright-patterns.mdx#トレースを記録しても残したことにはならない-アップロードを-failure-cancelled-でゲートする)ことになっています。グリーンな実行すべてからトレースディレクトリ一式を上げると、診断上の利得なしにストレージ上限を食い潰すからです。一方JUnitレポートはキロバイト単位で、しかもグリーンな実行にとってもリトライの証拠です — そうでなければ次のセクションの計算式には読むものがありません — なので毎回アップロードします。共通するルールは、アップロードの条件はアーティファクトのクラスごとに下す判断であって、他のページから受け継ぐデフォルトではない、ということです。そして `if-no-files-found: error` は、「moveが全部静かに空振りした」状態を、空のアーティファクトではなく赤いジョブに変えてくれます。
+
+上書きそのものは、道具を替えただけの同じ罠です：[2回目のPlaywright実行が、アップロードの前に `outputDir` を空にする](./playwright-patterns.mdx#トレースを記録しても残したことにはならない-2回目のplaywright実行が、アップロードの前に-outputdir-を空にする)。形も同じ、対処も同じです — ツールが再び走る前に、アーティファクトをそのツール自身の出力ディレクトリの外へ移すこと。
+
+### 実際のnextest JUnitの形からリトライに値札を付ける
+
+パスに見える `<testcase>` でも、3回の試行を費やしている可能性があります。そしてそのコストを運ぶ要素は `<flakyFailure>` だけではなく、全部で4種類あります。`<flakyFailure>` だけを探すパーサーは、リトライ付きの素の失敗をゼロ円で見積もってしまいます。
+
+```xml
+<!-- Elided for shape: the <testsuites>/<testsuite> wrappers, the timestamp
+     attributes, the <system-out>/<system-err> children, and the full captured
+     panic text that each element body actually carries. -->
+
+<!-- flaky PASS. The testcase is a success and its time is the PASSING attempt.
+     Every earlier attempt nests as flakyFailure -- flakyError for an execution
+     failure or a leak -- each with its own time. -->
+<testcase name="test_flaky_mod_4" classname="fixture-project::basic" time="0.004">
+  <flakyFailure time="0.004" type="test failure">attempt 1 panicked</flakyFailure>
+  <flakyFailure time="0.005" type="test failure">attempt 2 panicked</flakyFailure>
+</testcase>
+
+<!-- flaky FAIL under the default flaky-fail-status = "failure": a failure element
+     whose type is the literal "flaky failure", PLUS the same nested
+     flakyFailure/flakyError set. testcase@time is the PASSING attempt here too.
+     Under flaky-fail-status = "success" this testcase is indistinguishable from
+     the flaky PASS above while the run itself still fails -- pin the knob or the
+     report cannot be read at all. -->
+<testcase name="test_known_flaky" classname="fixture-project::basic" time="0.006">
+  <failure type="flaky failure">flaky: passed only on a retry</failure>
+  <flakyFailure time="0.004" type="test failure">attempt 1 panicked</flakyFailure>
+  <flakyFailure time="0.005" type="test failure">attempt 2 panicked</flakyFailure>
+</testcase>
+
+<!-- plain FAILURE with retries: failure/error plus one rerunFailure or rerunError
+     per retry. Here testcase@time is the FIRST attempt, not the last -- the
+     opposite end of the sequence from the two flaky cases above. -->
+<testcase name="test_failure_assert" classname="fixture-project::basic" time="0.004">
+  <failure type="test failure">assertion failed: left == right</failure>
+  <rerunFailure time="0.004" type="test failure">assertion failed: left == right</rerunFailure>
+  <rerunFailure time="0.004" type="test failure">assertion failed: left == right</rerunFailure>
+</testcase>
+```
+
+計算式は2つ、入力は1つです。任意の `<testcase>` について：
+
+- **リトライ込みの時間** = `testcase@time` に、その配下にネストした `flakyFailure`・`flakyError`・`rerunFailure`・`rerunError` の `@time` の総和を足したもの。
+- **リトライ税** = そのネスト分の総和そのもの。
+
+`testcase@time` は上の3つの形すべてにおいて、常にちょうど1回の試行であり、決して合計ではありません。これをテストの総実行時間として読むダッシュボードは、リトライされたすべてのテストを、リトライ税まるごとの分だけ過小評価します。
+
+**cargo-nextest 0.9.138 から取得 — ピン留めしているバージョンに対して要素の集合を再確認してください。`flaky-fail-status`（0.9.131以降）と `report-skipped`（0.9.143以降）は形を変えます。**
+
+これらをパースするものには[実際にキャプチャしたレポートをフィクスチャにする](../ci-operations/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく-レポーターのパースフィクスチャを実際にキャプチャしたレポートに固定する)ルールが効きますが、ここではそのルールに鋭い角があります。実例のゲートで監査した25個のレポートは50,301件の `<testcase>` レコードを持ちながら、flaky・failure・errorのレコードは **ゼロ** でした — 健全なスイートはネストしたリトライ要素をまったく生まないため、通常のアーティファクト回収では、どちらの計算式も一度も動かされません。フィクスチャは意図的にキャプチャしてください：`retries >= 1` の下で1回目の試行が必ず失敗するテストを仕込み、その実行の `junit.xml` を残します。それができない場合は、そのサンプルを自分のスイートからキャプチャしたものではなく、nexte.stのドキュメントから再現したものだと明記してください — 思い込みで組み立てた合成的な形こそ、フィクスチャのルールがテストから締め出そうとしているものなのです。
+
 ## 次に読むページ
 
 - [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx#同じルール、rust構文) — このnextest設定が実行する `#[ignore]` 理由文字列タグ分類の全体（`env-gate:`、`heavy:`、`flaky:`、`verification:`、`pending-feature:`）と、Rustのflakeがどう隔離されるか
