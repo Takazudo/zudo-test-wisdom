@@ -160,7 +160,7 @@ Measured: a PR gate ran `trace: 'retain-on-failure'` and `screenshot: 'only-on-f
 Retention therefore belongs in the tier's definition, not in an operations checklist somewhere else. T1 is not complete until all three hold:
 
 1. **Failure evidence is uploaded, gated on `if: failure() || cancelled()`.** A run killed at its timeout cap or cancelled by a `concurrency` group is exactly the case whose trace you want, and plain `failure()` skips it.
-2. **The uploaded path is one a reporter actually writes.** Playwright's default reporter under CI is `dot`, which produces no `playwright-report/` directory at all; uploading that path uploads nothing and the step still succeeds.
+2. **The uploaded path is one a reporter actually writes.** Playwright's default reporter under CI is `dot`, which produces no `playwright-report/` directory at all; uploading that path uploads nothing and the step still succeeds. Guard against it with `if-no-files-found: error` on the upload step -- see [Gate the upload on `failure() || cancelled()`](../tool-patterns/playwright-patterns.mdx#recording-a-trace-is-not-keeping-it-gate-the-upload-on-failure-cancelled).
 3. **If the job invokes Playwright more than once, give each invocation its own `--output`.** Playwright empties `outputDir` at the start of every run, so a second lane deletes the first lane's traces before the upload step runs.
 
 The mechanics, the measured storage numbers behind uploading a report rather than the raw directory, and the workflow guard for point 3 are in [Recording a Trace Is Not Keeping It](../tool-patterns/playwright-patterns.mdx#recording-a-trace-is-not-keeping-it).
