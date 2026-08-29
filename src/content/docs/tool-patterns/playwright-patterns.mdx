@@ -1256,10 +1256,11 @@ So pick one deliberately: configure `reporter: [['html', { open: 'never' }]]` an
   with:
     name: playwright-report-${{ strategy.job-index }}-${{ github.run_attempt }}
     path: playwright-report/
+    if-no-files-found: error   # default is warn: an upload that finds nothing must go red, not green
     retention-days: 2
 ```
 
-An upload step with no `if:` is skipped the moment an earlier step exits non-zero — which is every run the artifact exists for. `if: failure()` fixes that and still misses the other half: a job killed at its `timeout-minutes` cap, or cancelled by a `concurrency` group when a new push lands, is *cancelled* rather than failed, and cancellation is exactly the evidence-loss case. The run you most want a trace from is the run that quietly produces no artifact. `if: always()` covers both as well, at the cost of uploading a report on every green run.
+An upload step with no `if:` is skipped the moment an earlier step exits non-zero — which is every run the artifact exists for. `if: failure()` fixes that and still misses the other half: a job killed at its `timeout-minutes` cap, or cancelled by a `concurrency` group when a new push lands, is *cancelled* rather than failed, and cancellation is exactly the evidence-loss case. The run you most want a trace from is the run that quietly produces no artifact. `if: always()` covers both as well, at the cost of uploading a report on every green run. `actions/upload-artifact@v4` defaults to `warn`, so the missing-`playwright-report/` case from the previous section logs "No files were found" and exits 0 — `if-no-files-found: error` is what makes that step red instead.
 
 ### A second Playwright run empties `outputDir` before the upload
 

@@ -1256,10 +1256,11 @@ Playwrightのデフォルトレポーターは、ローカルでは `list`、**C
   with:
     name: playwright-report-${{ strategy.job-index }}-${{ github.run_attempt }}
     path: playwright-report/
+    if-no-files-found: error   # default is warn: an upload that finds nothing must go red, not green
     retention-days: 2
 ```
 
-`if:` を持たないアップロードステップは、先行するステップが非ゼロで終了した瞬間にスキップされます——それは、アーティファクトが存在する理由であるすべてのランです。`if: failure()` はそこを直しますが、もう半分を取りこぼします：`timeout-minutes` の上限で殺されたジョブや、新しいプッシュが来たときに `concurrency` グループでキャンセルされたジョブは、失敗ではなく*キャンセル*であり、そのキャンセルこそが証拠消失そのもののケースです。最もトレースが欲しいランが、静かにアーティファクトを1つも残さないランになります。`if: always()` も両方をカバーしますが、グリーンのランごとにレポートをアップロードするコストを払うことになります。
+`if:` を持たないアップロードステップは、先行するステップが非ゼロで終了した瞬間にスキップされます——それは、アーティファクトが存在する理由であるすべてのランです。`if: failure()` はそこを直しますが、もう半分を取りこぼします：`timeout-minutes` の上限で殺されたジョブや、新しいプッシュが来たときに `concurrency` グループでキャンセルされたジョブは、失敗ではなく*キャンセル*であり、そのキャンセルこそが証拠消失そのもののケースです。最もトレースが欲しいランが、静かにアーティファクトを1つも残さないランになります。`if: always()` も両方をカバーしますが、グリーンのランごとにレポートをアップロードするコストを払うことになります。`actions/upload-artifact@v4` の既定は `warn` なので、前節の「`playwright-report/` が存在しない」ケースは「No files were found」とログを出して終了コード0になります——それを赤にするのが `if-no-files-found: error` です。
 
 ### 2回目のPlaywright実行が、アップロードの前に `outputDir` を空にする
 
