@@ -658,6 +658,218 @@ The why-comment on each entry is the load-bearing part, not bureaucratic ceremon
 
 </Warning>
 
+## Cross-Context Terminal Evidence: Race the Browser Event, Keep Page Diagnostics in Node
+
+The monitor above buffers `page.on` events in **Node**, and that is the part worth generalising. When the outcome under test is a browser-level terminal event — a download, a popup, a file chooser — Playwright observes it in Node, while the diagnostics that explain it live in the page, and the page's execution context is allowed to disappear at exactly that boundary. The durable shape is a page-side bridge whose records are copied into Node the moment they arrive, plus the browser's own terminal event registered before the trigger and raced against everything that means red.
+
+Worked case: the export flow in `zudo-pattern-gen` — a dialog that generates a file and hands it to the browser — produced two false negatives in a row out of that one seam.
+
+### Two false negatives from the same seam
+
+The first installed the listener before the trigger, correctly, and lost the download anyway:
+
+```typescript
+// Listener exists, but page-resident polling can still defeat it.
+const download = page.waitForEvent("download");
+await start.click();
+await expect.poll(() => readDialogStatus(page)).toBe("done");
+await download;
+```
+
+The `download` promise is registered before the click, exactly as [Step 1 of the deflaking recipe](../test-integrity/deflaking-recipe.mdx#part-2-—-the-deflaking-recipe-step-1-—-replace-timing-waits-with-event-keyed-waits-listener-installed-before-trigger) requires. The bug is the line between the trigger and the consumption: `readDialogStatus` reads the page, and at the terminal boundary the dialog's execution context went away. The poll threw `Execution context was destroyed`, and the test went red while holding an already-observed download. The product worked; the instrument's own DOM read discarded the proof.
+
+The correction kept the outcome in Node and moved the status onto a page-side `done` binding delivered through `page.exposeFunction` — then required that binding to arrive within one scheduler turn after the real download. Binding delivery crosses the same boundary that is being torn down, so it can lag by exactly enough to lose the run. The verdict now belonged to redundant observer telemetry rather than to the product: a different arrangement of the same mistake, a diagnostic outranking the outcome it exists to describe.
+
+One seam, both times — an outcome observed in Node, evidence resident in a page that is permitted to die.
+
+### Install the bridge before the first navigation
+
+Three calls, in this order, before the first navigation and before any trigger:
+
+1. `page.exposeFunction("recordDiagnostic", ...)` — the Node-side sink, reachable from the page as `window.recordDiagnostic`. Functions installed this way survive navigations.
+2. `page.addInitScript(installDiagnosticListener)` — the page-side listener that calls the binding. Init scripts are evaluated after the document is created but before any of the page's own scripts run, and they re-run on every navigation and on every child frame that attaches or navigates.
+3. Only then `page.goto(...)` and the trigger.
+
+`exposeFunction` comes first because the init script calls the binding at document start; installing the binding afterwards leaves the first document's records with nowhere to go. The re-run property cuts both ways: the bridge repairs itself after a navigation that would have wiped a listener installed through `page.evaluate`, and the page side must therefore be idempotent, with every record carrying the run id it belongs to. The one existing `addInitScript` use on this site — the [A/B flag seeded before `page.goto()`](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-6-in-app-background-work-starving-unrelated-waits-connection-starvation) in the connection-starvation entry — leans on the same before-the-document-runs guarantee.
+
+The Node side is a **bounded buffer keyed by run id**:
+
+- **Bounded** — a cap on records per run and a cap on retained runs, oldest dropped. A chatty page must not be able to grow the test process.
+- **Keyed** — records from an abandoned earlier run can never satisfy a later run's contract.
+- **Copied on arrival** — the callback validates and stores a plain snapshot at delivery time, never a page handle. What has already arrived cannot be erased by context loss.
+
+```typescript
+// e2e/cross-context-evidence.ts -- observer-only; nothing here is on the product path.
+import type { Page } from "@playwright/test";
+
+const MAX_RECORDS_PER_RUN = 64;
+const MAX_RUNS = 4;
+
+export type Diagnostic = {
+  v: 1;
+  runId: string;
+  seq: number;
+  stage: "start" | "progress" | "done" | "error" | "cancel";
+  reason?: "quota" | "network" | "aborted";
+};
+
+export async function installEvidenceBridge(page: Page, runId: string) {
+  const runs = new Map<string, Diagnostic[]>();
+  const stats = { malformed: 0 };
+  let signalTerminal!: (record: Diagnostic) => void;
+  const terminal = new Promise<Diagnostic>((resolve) => {
+    signalTerminal = resolve;
+  });
+
+  // exposeFunction BEFORE addInitScript: the init script calls this binding at
+  // document start. It must never throw -- a throw rejects the page-side call and
+  // resurfaces as a page error. Malformed input is counted, and counted is red.
+  await page.exposeFunction("recordDiagnostic", (raw: unknown) => {
+    const record = parseDiagnostic(raw); // version + closed enums, per record
+    if (!record) {
+      stats.malformed += 1;
+      return;
+    }
+    // Copy on arrival: a snapshot held in Node cannot be erased by context loss.
+    const list = runs.get(record.runId) ?? [];
+    list.push(record);
+    runs.set(record.runId, list.slice(-MAX_RECORDS_PER_RUN)); // bounded per run
+    for (const stale of [...runs.keys()].slice(0, -MAX_RUNS)) runs.delete(stale);
+    if (record.runId === runId && (record.stage === "error" || record.stage === "cancel")) {
+      signalTerminal(record); // resolves the race's active-run error/cancel branch
+    }
+  });
+
+  // Re-runs on every navigation and every attached frame, so it must be idempotent.
+  await page.addInitScript(() => {
+    if ((window as any).__evidenceBridgeInstalled) return;
+    (window as any).__evidenceBridgeInstalled = true;
+    addEventListener("app:export-diagnostic", (event) => {
+      // Fire-and-forget: the product path never awaits the bridge.
+      void (window as any).recordDiagnostic((event as CustomEvent).detail);
+    });
+  });
+
+  return { runs, stats, terminal, attached: false };
+}
+
+export type Evidence = Awaited<ReturnType<typeof installEvidenceBridge>>;
+```
+
+<Note>
+
+The bridge is **observer-only**. The page dispatches its diagnostic and moves on; nothing on the product path awaits `recordDiagnostic`, and no assertion waits for a record that the browser's own event has already made redundant. Instrumentation that the product must wait for is no longer instrumentation — it is a second product path, with its own failure modes, running only under test.
+
+</Note>
+
+### Register the terminal event before the trigger, then race
+
+`page.waitForEvent("download")` goes before the click — Playwright's own downloads guide starts the wait before clicking, and [Step 1](../test-integrity/deflaking-recipe.mdx#part-2-—-the-deflaking-recipe-step-1-—-replace-timing-waits-with-event-keyed-waits-listener-installed-before-trigger) already derives why. What this pattern adds is what happens next: not a page read, a **race** of four branches.
+
+1. The terminal event itself — the `download` Playwright delivers to Node.
+2. Active-run error or cancel evidence — the promise the buffer resolves when a record for **this** run id reports a failing stage.
+3. Page crash or close.
+4. One absolute deadline.
+
+Branch 3 is not there to rescue branch 1: `page.waitForEvent` already rejects when the page crashes or closes. It is there to **name** the outcome, because a page that died is a different verdict from a product that failed, and the evidence has to say which.
+
+Cleanup is deterministic and runs whichever branch wins — `clearTimeout` for the deadline, `page.off` for the crash and close handlers. A timer that outlives the race keeps the worker's event loop alive and fires into a torn-down fixture; handlers that outlive it accumulate across a page reused for several steps. And no branch of the race is ever wrapped in `.catch(() => null)`: that is [Step 3](../test-integrity/deflaking-recipe.mdx#part-2-—-the-deflaking-recipe-step-3-—-never-swallow-a-fallible-wait) turning a real timeout into a silent green. The absolute deadline is the test's own budget minus margin, not a fresh one — every step inside a `test()` draws down [the same single timeout](#test-step-shares-one-test-timeout), so a deadline at or above it can never fire.
+
+```typescript
+// e2e/export.spec.ts
+import { test, expect } from "@playwright/test";
+import { attachEvidenceOnce, installEvidenceBridge, validateRun } from "./cross-context-evidence";
+
+const EXPORT_DEADLINE_MS = 20_000; // sits under this test's own timeout, with margin
+
+test("export delivers a file", async ({ page }, testInfo) => {
+  const runId = crypto.randomUUID();
+  const evidence = await installEvidenceBridge(page, runId); // before the first navigation
+  await page.goto("/export");
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onDead!: () => void;
+  const dead = new Promise<never>((_resolve, reject) => {
+    onDead = () => reject(new Error("page crashed or closed during export"));
+  });
+  page.on("crash", onDead);
+  page.on("close", onDead);
+
+  try {
+    const download = page.waitForEvent("download"); // registered BEFORE the trigger
+    await page.getByRole("button", { name: "Export" }).click();
+
+    // Nothing reads the page between the trigger and the race: the execution
+    // context is allowed to disappear right here. No branch is ever swallowed.
+    const outcome = await Promise.race([
+      download.then((value) => ({ kind: "download" as const, value })),
+      evidence.terminal.then((record): never => {
+        throw new Error(`export reported ${record.stage}: ${record.reason ?? "unspecified"}`);
+      }),
+      dead,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("export deadline exceeded")), EXPORT_DEADLINE_MS);
+      }),
+    ]);
+
+    validateRun(evidence, runId); // required minimum evidence; malformed is red
+    expect(outcome.value.suggestedFilename()).toMatch(/\.zip$/);
+    // The page-side "done" record is redundant here: the browser already delivered.
+  } finally {
+    clearTimeout(timer); // deterministic on every branch, winner or not
+    page.off("crash", onDead);
+    page.off("close", onDead);
+    await attachEvidenceOnce(testInfo, evidence, runId);
+  }
+});
+```
+
+### Validate, then apply the evidence-source hierarchy
+
+Validation is two halves of one contract, and both are named in the example above. `parseDiagnostic` checks a single record as it arrives: the version field, and stage and reason drawn from closed sets. `validateRun` checks the run as a whole before the verdict: a `start` record exists for the active run id, `seq` is strictly increasing with nothing recorded after a terminal stage, and `stats.malformed` is zero. Neither re-specifies the discipline — [evidence is a versioned contract](../test-integrity/live-proof-evidence-contracts.mdx#evidence-is-a-versioned-contract-validated-after-scrubbing) and [reason codes are a closed, non-leaking set](../test-integrity/live-proof-evidence-contracts.mdx#evidence-is-a-versioned-contract-validated-after-scrubbing-closed-non-leaking-reason-codes) already do. Malformed active-run evidence is red: an unrecognised stage string is exactly what a closed enum exists to catch, and reading it as "probably fine" restores the ambiguity the contract removed. Those two functions are the only bodies the example above elides, and the rules just listed are their entire content.
+
+That leaves the question the two false negatives got wrong — which source decides:
+
+| Evidence source | In this pattern | Weight in the verdict |
+| --- | --- | --- |
+| Authoritative product/browser outcome | the real `download` event Playwright delivers to Node | Decides the pass; no redundant source may overrule it |
+| Required minimum diagnostic evidence | a valid active-run `start` record for this run id | Must be present and valid, or the run is red |
+| Optional redundant observer telemetry | the page-side `done` callback after the download | Never required to arrive; its contents still bind — an `error` or `cancel` record is red |
+
+<Warning>
+
+**Both halves, or the section reads as "ignore diagnostics".** Once a valid active run exists and the browser has delivered the real terminal event, the run passes, and the redundant page-side `done` is not required to arrive in the same scheduler turn — or at all. *And* any observed error or cancel record, any malformed evidence, any crash or close, and any expiry of the absolute deadline is still red. Relaxing the arrival requirement on redundant telemetry does not relax what that telemetry says when it does arrive.
+
+</Warning>
+
+### Freeze and attach once, in finally
+
+The evidence is frozen before it is attached. An init script that re-runs after a late navigation can still push records into the buffer while the attachment is being written, and an attachment that does not match the run it claims to describe is worse than none. Snapshot the active run's records, count the malformed ones, serialize, then attach — exactly once, guarded by a flag on the evidence object so that two exit paths cannot write two attachments under the same name.
+
+```typescript
+// e2e/cross-context-evidence.ts (continued)
+import type { TestInfo } from "@playwright/test";
+
+export async function attachEvidenceOnce(testInfo: TestInfo, evidence: Evidence, runId: string) {
+  if (evidence.attached) return; // two exit paths must not write two attachments
+  evidence.attached = true;
+  // Freeze first: a late init-script re-run must not mutate what this describes.
+  const frozen = JSON.stringify({
+    runId,
+    malformed: evidence.stats.malformed,
+    records: [...(evidence.runs.get(runId) ?? [])],
+  });
+  try {
+    await testInfo.attach("export-evidence.json", { body: frozen, contentType: "application/json" });
+  } catch (attachError) {
+    // Never rethrow from finally: that would replace the failure under investigation.
+    testInfo.annotations.push({ type: "evidence-attach-failed", description: String(attachError) });
+  }
+}
+```
+
+The `try`/`catch` inside the helper is the load-bearing part. A `finally` block that throws replaces the error the test was about to report with a storage complaint, and the original failure is gone. Attachment is its own concern with its own verdict, recorded as an annotation and never allowed to mask the run's — the same separation as the [three layers of teardown](../test-integrity/live-proof-evidence-contracts.mdx#cleanup-is-its-own-gate-three-layers-of-teardown), where cleanup reports a verdict of its own instead of being folded into the product's. And an attachment is still only written to the runner's disk: it needs the upload gate in [Recording a Trace Is Not Keeping It](#recording-a-trace-is-not-keeping-it) to become evidence anyone can read after the job ends.
+
 ## CI Image Interception for Speed
 
 In CI, network requests for large images slow down tests. Intercept and replace them with tiny placeholders:
