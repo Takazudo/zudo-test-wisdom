@@ -32,7 +32,7 @@ Top-level directories under `src/content/docs/`. Directories with header nav ent
 - `testing-levels/` - The 6 testing levels from unit to AI-based verification
 - `decision-guide/` - Which level to use, common failure patterns, required behaviors
 - `tool-patterns/` - Patterns organized around a specific tool, not a project shape (Vitest, Playwright, visual regression, browser-in-container verification, cargo-nextest)
-- `project-recipes/` - Patterns organized around a repo/project shape, not a single tool (backend, Tauri, remark/rehype plugins, built-site integrity)
+- `project-recipes/` - Patterns organized around a repo/project shape, not a single tool (backend, Tauri, remark/rehype plugins, built-site integrity, dependency replacement)
 - `ci-operations/` - Running suites across CI, deploys, and releases (environment-tiered testing, smoke tests, scheduled re-exam, branch strategy, publishing, runner sizing, CI-skip markers and merge hygiene, gate optimization)
 - `test-integrity/` - Ways tests deceive (flakes, false greens, self-agreement, fixture traps) and the discipline preventing them
 - `tools-reference/` - Quick reference of tools per testing level

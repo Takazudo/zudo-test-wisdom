@@ -230,6 +230,8 @@ The fixtures do double duty: a regression guard for the JS pipeline today, and t
 
 </Info>
 
+The byte-for-byte bar is specific to a **faithful port** -- the same pipeline reimplemented in another language, where the reference defines truth by construction and any difference is therefore a porting defect. It does not carry over to swapping one dependency for another. A replacement library ships its own data snapshot and its own deliberately fixed bugs, so a small *classified* delta is frequently the correct outcome there, and insisting on byte identity would mean rejecting the candidate for being more correct. [Dependency Replacement Testing](./dependency-replacement-testing.mdx) keeps this pattern's discipline -- a pinned reference and a mechanical diff -- with the acceptance criterion that case needs: zero *unclassified* differences rather than zero differences.
+
 ### Document every divergence from prod
 
 A golden corpus is only trustworthy if it actually mirrors production. In practice the test harness usually cannot boot the entire production stack, so it stands up a *near*-copy of the pipeline. The discipline that keeps the fixtures honest is to **document every deliberate divergence in a comment**, so a future reader knows exactly where the corpus stops matching prod:

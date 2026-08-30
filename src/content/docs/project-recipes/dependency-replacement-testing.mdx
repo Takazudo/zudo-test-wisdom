@@ -1,0 +1,282 @@
+---
+title: Dependency Replacement Testing
+description: Old-vs-candidate differential testing as a migration proof -- confine both libraries to a throwaway harness, enumerate the whole input domain, diff normalized output into a machine-readable inventory, fail on unclassified drift, then promote the accepted cases to permanent regression tests.
+sidebar_position: 5
+---
+
+Swapping one library for another is the change most likely to be waved through on the strength of a green suite. The replacement installs, every existing test passes, and the diff reads as one line in `package.json`. But those tests were written against the old library's behavior only where somebody happened to care -- a few dozen sampled points from a contract with millions of them. Passing proves the candidate agrees with the old library on the samples. It says nothing about the rest of the domain, which is exactly where a replacement differs.
+
+The technique that closes the gap is **differential testing**: run the old implementation and the candidate over the same inputs, compare their outputs, and treat the resulting set of differences -- not the suite's color -- as the artifact you review and sign off on.
+
+## Unit Tests Authorize a Refactor, Not a Swap
+
+A refactor and a dependency replacement look identical in a diff and are completely different risks.
+
+When you refactor your own code, the old and the new implementation share an author, an intent, and a test suite written by someone who knew which behaviors mattered. The suite is a reasonable oracle because it was built to pin exactly those behaviors.
+
+When you replace a dependency, the candidate is a different implementation of a contract **nobody wrote down**. Different people built it, against their own reading of the same spec, with their own data snapshot and their own set of bugs -- some of which they deliberately fixed. Your suite covers the behaviors your product happened to exercise. The replacement's differences live in the complement of that set, and that complement is not merely untested: it is unenumerated. You cannot list the behaviors nobody thought to test.
+
+<Warning>
+
+"All tests pass with the new library" is a statement about your suite's coverage, not about the two libraries' agreement. Presented as migration evidence it is a [false green](../test-integrity/index.mdx) in its purest form -- the suite is green precisely because it never asks the question the migration turns on.
+
+</Warning>
+
+## Exact Parity Is a Hypothesis, Not an Assumption
+
+The instinct on a dependency swap is to aim for zero differences and to read any difference as a defect in the candidate. That instinct is wrong often enough to be dangerous, because two correct implementations of the same contract can legitimately disagree:
+
+- **Versioned data.** Anything backed by a published dataset -- Unicode tables, timezone rules, public-suffix lists, currency codes, emoji sequences -- ships a snapshot of that data. Two libraries released a year apart carry different snapshots, and on the scalars that moved, the newer one is *more* correct, not less.
+- **Intentionally fixed upstream bugs.** A candidate that reimplements a widely used library often fixes its known defects on purpose. Matching the old output there means reproducing a bug you were trying to leave behind.
+- **Tightened spec conformance.** A newer implementation may reject input the old one accepted by accident, or handle an edge case a later revision of the spec clarified.
+
+So the goal of the migration is not "no differences." It is **no differences you cannot name**. Exact parity is a hypothesis the harness puts to the test; when the hypothesis fails, the correct outcome is a small, fully classified delta in which every class carries a written reason.
+
+<Note>
+
+This reframing is what makes the review tractable. "Are these two libraries the same?" is unanswerable in any finite amount of time. "Here are 1,855 differences in two named classes, each with a reason -- do you accept them?" is a question a reviewer can actually answer, and a decision that survives in the repo's history.
+
+</Note>
+
+## The Five-Step Protocol
+
+### 1. Confine both libraries to a migration-only harness
+
+Install the candidate alongside the old library, and import both from **exactly one place**: the migration harness. Production code keeps importing the old library until the swap lands, and never imports the candidate at all.
+
+```json
+// package.json -- both present, but only for the duration of the migration
+{
+  "dependencies": {
+    "unicode-categories-old": "^3.4.0"
+  },
+  "devDependencies": {
+    "unicode-categories-candidate": "^1.2.0"
+  }
+}
+```
+
+Two properties follow from that confinement. Production depends on exactly one of the two at all times, so the swap stays a single atomic change instead of a long period of dual-path behavior nobody can reason about. And the harness's lifetime is bounded by construction: it imports something already scheduled for deletion, so it cannot quietly graduate into permanent infrastructure.
+
+<Tip>
+
+Put the harness somewhere its temporary status is visible -- `tools/migration/`, not `src/`. A differential harness parked in the normal test directory reads like a regression suite to the next maintainer, who will then keep both libraries installed forever to avoid breaking it.
+
+</Tip>
+
+### 2. Generate every valid input when the domain is tractable
+
+Sampling is what made the existing suite a bad oracle, so do not build the harness on sampling if the domain lets you avoid it. A surprising number of these swaps have a **finite, enumerable** input domain: every Unicode scalar value, every byte pair, every value of a bounded enum, every combination of a handful of flags. When the full domain fits in a run you are willing to wait for, enumerate all of it and the coverage question disappears entirely.
+
+```typescript
+// tools/migration/unicode-category-diff.ts
+// Migration-only: the ONLY module that imports both libraries. It is deleted
+// together with the old dependency once the swap lands.
+import { writeFileSync } from "node:fs";
+import * as current from "unicode-categories-old";
+import * as candidate from "unicode-categories-candidate";
+
+/** Every Unicode code point except the surrogate range: 0x110000 - 0x800. */
+const SCALAR_VALUE_COUNT = 1_112_064;
+
+function* scalarValues(): Generator<number> {
+  for (let cp = 0x0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue; // surrogates are not scalar values
+    yield cp;
+  }
+}
+```
+
+When the domain genuinely cannot be enumerated -- arbitrary strings, real-world documents, anything unbounded -- the substitute is three layers rather than one: a **reviewed corpus** of real production inputs, an explicit list of **boundary cases** (empty, maximum length, every documented edge in the spec), and **generated cases** from a property-based generator seeded to run reproducibly. That combination is weaker than exhaustion and should be described as weaker in the migration write-up, but it still beats the handful of inputs the existing unit tests happened to name.
+
+<Warning>
+
+An exhaustive harness that silently enumerated a subset produces the most reassuring possible result: a very small divergence count. Assert the size of the domain you actually walked -- the comparison loop in the next step ends with exactly that check -- or a typo in a loop bound becomes a clean bill of health.
+
+</Warning>
+
+### 3. Compare normalized semantic outputs into a machine-readable inventory
+
+Two libraries answering the same question rarely answer it in the same vocabulary. Normalize both sides to one semantic representation before diffing -- otherwise every input reads as a difference and the inventory is noise. Then write the result to a **file**, not to the console: the inventory is the artifact a reviewer reads and a gate asserts against, so it has to be structured, complete, and diffable.
+
+```typescript
+// tools/migration/unicode-category-diff.ts (continued)
+// Both libraries classify a code point, but one returns a long name
+// ("Punctuation, other") and the other the general-category abbreviation
+// ("Po"). Fold them into one vocabulary, or all 1,112,064 scalars diverge.
+const LONG_NAME_TO_ABBREVIATION: Record<string, string> = {
+  "Punctuation, other": "Po",
+  "Mark, non-spacing": "Mn",
+  "Symbol, other": "So",
+  "Other, not assigned": "Cn",
+  // ...one entry per Unicode general category
+};
+
+function normalize(raw: string): string {
+  const abbreviation = raw.length <= 2 ? raw : LONG_NAME_TO_ABBREVIATION[raw];
+  // An unmapped value must throw, never fall through to a shared default --
+  // a default would fold two genuinely different answers into agreement.
+  if (!abbreviation) throw new Error(`unmapped category: ${raw}`);
+  return abbreviation;
+}
+
+const format = (cp: number) =>
+  `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
+
+export type Divergence = {
+  codePoint: string;
+  current: string;
+  candidate: string;
+};
+
+const divergences: Divergence[] = [];
+let compared = 0;
+
+for (const cp of scalarValues()) {
+  compared += 1;
+  const a = normalize(current.categoryOf(cp));
+  const b = normalize(candidate.categoryOf(cp));
+  if (a !== b) {
+    divergences.push({ codePoint: format(cp), current: a, candidate: b });
+  }
+}
+
+if (compared !== SCALAR_VALUE_COUNT) {
+  throw new Error(`compared ${compared} scalars, expected ${SCALAR_VALUE_COUNT}`);
+}
+
+writeFileSync(
+  "tools/migration/divergences.json",
+  JSON.stringify({ compared, divergences }, null, 2),
+);
+```
+
+<Danger>
+
+Normalization is where a differential harness is most easily neutered. Every fold you add -- lowercasing, trimming, collapsing a category, coercing a numeric type -- is a class of difference you have decided in advance not to see, and an over-eager normalizer can drive the divergence count to zero while the two libraries disagree on things that matter. Write down what each fold erases, and justify it as a vocabulary difference rather than a behavioral one.
+
+</Danger>
+
+### 4. Fail on unclassified differences
+
+The gate is not "the inventory is empty." It is "every entry in the inventory belongs to a class somebody named and explained." Each accepted class gets a machine-checkable predicate and a written reason, in a file that goes through code review like any other change.
+
+```typescript
+// tools/migration/classified-divergences.ts
+// Every accepted class needs a name AND a reason. An entry with a predicate but
+// no reason is not a classification -- it is a silenced failure with extra steps.
+import type { Divergence } from "./unicode-category-diff";
+
+export const ACCEPTED_CLASSES = [
+  {
+    name: "newly-assigned-punctuation-and-symbols",
+    reason:
+      "The candidate ships a newer Unicode data version than the old library pinned. These scalars are unassigned in the old snapshot and carry a real category in the new one.",
+    matches: (d: Divergence) => d.current === "Cn" && d.candidate !== "Cn",
+  },
+  {
+    name: "U+111C9-reclassified-punctuation-to-mark",
+    reason:
+      "This scalar's general category changed between the two data versions. The candidate reflects the current standard and the old library is stale; pinned below by a permanent regression test.",
+    matches: (d: Divergence) => d.codePoint === "U+111C9",
+  },
+];
+```
+
+The gate then makes two assertions, and the second one matters as much as the first:
+
+```typescript
+// tools/migration/divergences.test.ts
+import { describe, it, expect } from "vitest";
+import report from "./divergences.json";
+import { ACCEPTED_CLASSES } from "./classified-divergences";
+
+describe("old vs candidate divergence inventory", () => {
+  it("classifies every difference", () => {
+    const unclassified = report.divergences.filter(
+      (d) => !ACCEPTED_CLASSES.some((c) => c.matches(d)),
+    );
+    expect(unclassified).toEqual([]);
+  });
+
+  it("holds each class to the count that was reviewed", () => {
+    const counts = Object.fromEntries(
+      ACCEPTED_CLASSES.map((c) => [
+        c.name,
+        report.divergences.filter(c.matches).length,
+      ]),
+    );
+    expect(counts).toEqual({
+      "newly-assigned-punctuation-and-symbols": 1854,
+      "U+111C9-reclassified-punctuation-to-mark": 1,
+    });
+  });
+});
+```
+
+Classifying by predicate alone lets a class absorb differences nobody reviewed: bump the candidate one patch release, and a hundred new scalars quietly match an existing predicate and pass. Pinning the count per class turns that into a red test that says which class grew and by how much.
+
+<Note>
+
+A class whose reason reads "not sure, seems fine" is an unclassified difference wearing a label. If the delta cannot be explained, the honest states are "block the migration" or "accept it explicitly, in writing, with the risk named" -- not a predicate that makes the gate green.
+
+</Note>
+
+### 5. Promote the accepted cases, then delete the old implementation and the harness
+
+The inventory proves the swap is safe *today*. It proves nothing about the next dependency bump, and it disappears with the harness. So before deleting anything, convert every accepted boundary case into a **permanent regression test** that runs against the shipping code and knows nothing about the migration:
+
+```typescript
+// src/unicode/category.test.ts
+// Permanent. Outlives the harness, the old library, and this migration.
+// Pins the one intentional behavior change so a future dependency bump cannot
+// silently revert it to the old library's answer.
+it("classifies U+111C9 as a non-spacing mark, not punctuation", () => {
+  expect(categoryOf(0x111c9)).toBe("Mn");
+});
+```
+
+Only then remove the old dependency, the harness, the inventory, and the classification file, in the same commit or the one right after. A differential harness left behind after the swap is the same decay mode the golden-corpus recipe describes: it keeps passing because nothing has touched it, holds a second library in the lockfile forever, and asserts a comparison nobody is making any more.
+
+<Info>
+
+The permanent regression tests are the migration's only durable output. Everything else -- harness, inventory, classification predicates, both copies of the library -- is scaffolding, and scaffolding that outlives its build becomes something the next maintainer is afraid to remove.
+
+</Info>
+
+## Worked Case: Replacing a Unicode Category Library
+
+The protocol above came out of a swap that ordinary unit tests could not have authorized. The task was to replace one Unicode general-category library with another. The existing suite exercised a few dozen characters -- ASCII punctuation, a couple of CJK samples, an emoji -- and it stayed green against the candidate. That green said nothing: the interesting behavior of a category library lives in the hundreds of thousands of code points nobody writes a test for.
+
+The domain, however, is finite. An exhaustive comparison ran the old and the candidate library over all **1,112,064** Unicode scalar values, and the resulting inventory held exactly two classes of difference:
+
+- **1,854 newly recognized punctuation and symbol scalars.** Unassigned in the old library's data snapshot, assigned in the candidate's. Pure data-version drift, and drift in the correct direction.
+- **One reclassification: `U+111C9`**, whose category changed from punctuation to mark. Not new data -- a scalar the two libraries actively disagree about, because the Unicode Consortium changed its general category between the two data versions they ship.
+
+That inventory is what made the migration reviewable. Without it the choice was between "trust the green suite" and "read two libraries' source"; with it, the implementer could separate expected data-version drift from a possible parser regression, look hard at the single reclassification because it was the only entry that was not drift, add a boundary test pinning that intentional difference, and only then delete the old library.
+
+<Note>
+
+Note the shape of the result: 1,855 differences out of 1,112,064 inputs, and **not one of them** appeared in the existing test suite. The suite was not merely insufficient evidence for the swap -- it was structurally incapable of producing any, because its inputs and the differences occupied disjoint parts of the domain.
+
+</Note>
+
+## Byte-for-Byte Parity Belongs to Ports, Not Swaps
+
+The [parity-oracle pattern](./remark-rehype-plugin-testing.mdx#half-2-golden-fixture-corpus-integration-the-corpus-as-a-parity-oracle) in the remark/rehype recipe sets the acceptance bar at **byte-for-byte** identity against a checked-in reference output, and that bar is exactly right in its setting. It describes a **faithful port**: the same pipeline reimplemented in another language, where the reference implementation defines truth by construction, both sides carry the same data and even the same bugs, every difference is therefore a porting defect, and zero differences is genuinely achievable.
+
+A dependency replacement inverts every one of those premises. The candidate is not a reimplementation of your pipeline; it is somebody else's implementation of a contract you both read separately, with its own data snapshot and its own deliberately fixed bugs. Nothing defines truth by construction, so byte identity is not the target -- demanding it would mean rejecting the candidate for being *more* correct, or worse, patching it to reproduce known-wrong behavior. Carry over the discipline from that pattern -- a pinned reference, a mechanical comparison, a diff you review instead of a judgment you make -- and swap the acceptance criterion: **zero unclassified differences**, not zero differences.
+
+## Where Each Stage Runs
+
+The three stages have very different costs and lifetimes, so they map to different [execution tiers](../decision-guide/execution-tiers.mdx):
+
+| Stage | Tier | When |
+| ---- | ---- | ---- |
+| Exhaustive old-vs-candidate diff | T4 (local heavy lane) | Once per migration, run by hand. It takes minutes and needs both libraries installed, which is true only during the swap |
+| Divergence-inventory gate (classification + per-class counts) | T1 (PR gate) | On the migration PR, for as long as the harness exists -- it is what makes a candidate version bump mid-review visible |
+| Promoted boundary regression tests | T1 (PR gate) | Forever. Once the harness is gone they are ordinary unit tests with no migration machinery behind them |
+
+The exhaustive run is deliberately *not* a CI gate. It exists to produce one inventory that one reviewer reads once; wiring it into CI would mean keeping both libraries installed indefinitely, which is precisely the outcome step 5 is written to prevent.
+
+Reach for this protocol whenever the thing being replaced has a large or unbounded input domain and a contract nobody owns -- a parser, a formatter, a data-backed lookup table, a hashing or normalization routine, a date library. For a small dependency with a handful of entry points, ordinary unit tests really are enough. The dividing line is not the size of the library but the size of the domain: if you cannot list the behaviors that might have changed, do not let a green suite tell you none did.

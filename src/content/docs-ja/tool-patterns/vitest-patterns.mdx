@@ -155,6 +155,156 @@ pnpm test:unit --maxWorkers=4
 
 </Note>
 
+## `pool` と `isolate` の選択は計測の結果であって、デフォルトではない
+
+`pool`（`forks` か `threads` か）と `isolate`（テストファイルごとにモジュールグラフを作り直すか、共有するか）は、Vitest の**実行モデル**そのものを変える2つの設定です。この2つは「スイートを速くする」1つのコミットの中でまとめて切り替えられがちですが、まさにそれが結果を読めなくします。壊れ方が違い、安全だと言い切るために必要な証拠も違うので、まとめて変更したものが red になったとき、どちらが原因なのか分かりません。
+
+- **`pool: "threads"`** は、テストファイルを別々のフォークプロセスではなく、共有プロセス内のワーカースレッドで実行します。これは*ネイティブコードとランタイムの互換性*の問題です: 1プロセスに1インスタンスを前提とするアドオンや、スレッドセーフでないアドオンが、新たにリスクにさらされます。
+- **`isolate: false`** は、テストファイルごとのモジュールグラフの再構築をやめます。これは*正しさ*の問題です: モジュールスコープのレジストリ、キャッシュ、シングルトン、パッチを当てたグローバルがファイルをまたいで生き残るため、スイートが実行順序に依存するようになります。
+
+この2つは別々の実験として扱い、それぞれに独自の計測と独自のロールバック条件を用意してください。スイートが最終的に「`threads` かつアイソレーションは有効のまま」に落ち着くことも、「`forks` かつアイソレーション無効」に落ち着くこともあり得ます -- セットで変えたからといって割引はありません。
+
+### 条件を揃えた実行（マッチドラン）のプロトコル
+
+`pool` や `isolate` の比較は、2つの実行が「ちょうど1つのことだけ」で違っている場合にのみ証拠になります。それ以外はすべて固定し、両側で同じメトリクスの組を記録してください：
+
+- **同じ SHA、同じ選択**。実行の間に rebase を挟まず、`--project`、シャード、フィルタの引数もバイト単位で同一にします。
+- **両側でワーカー数を固定する**。ホストのコア数任せにすると、設定ではなくそのときのマシンの機嫌を測ることになります。
+- **収集ファイル数とテスト件数の完全一致**。40ファイル少なく収集したから速かった実行は、速い実行ではなく壊れた選択です。所要時間を見る前に、まずこれを確認します。
+- **ウォールクロックではなく、フェーズ別の内訳**。transform / collect / setup / tests / environment / prepare -- Vitest はすでにこれらを出力しており、その変更が実際にどのフェーズを動かしたのかは内訳だけが教えてくれます。
+- **プロセスごとのヒープのピーク*と*マシン全体の RSS**。スレッドは1つのヒープを共有するので、ホストがスワップし始めていてもプロセス単位の数値は平坦に見えることがあります。両方を測ってください。
+- **リトライとワーカーのクラッシュ**。リトライして通った実行や、ワーカーを失って再起動した実行は、サマリーが green でもクリーンな実行ではありません。
+- **状態リークと順序の証拠**。特に `isolate: false` では、自然なファイル順での green は何も証明しません。ファイル順をシャッフルして再実行し、結果が変わるなら、取り除いたアイソレーションは効いていたということです。
+
+```bash
+# Matched runs: same SHA, same selection, same fixed worker count.
+# Keep the default reporter alongside json: the json file carries the
+# per-file counts parity is diffed from, but the duration breakdown
+# (transform / collect / setup / tests / environment / prepare) is printed
+# only by the default reporter, so --reporter=json alone loses it.
+COMMON="run --project unit --maxWorkers=4 --reporter=default --reporter=json"
+
+/usr/bin/time -l pnpm vitest $COMMON --outputFile.json=baseline.json
+/usr/bin/time -l pnpm vitest $COMMON --outputFile.json=candidate.json --pool=threads
+
+# /usr/bin/time -l (macOS) or -v (GNU) reports the peak RSS of the LARGEST
+# SINGLE process in the tree, never the sum -- four forks at 1 GB each read
+# as 1 GB. Machine-wide pressure has to be sampled alongside the run
+# (`vm_stat 5` on macOS, `vmstat 5` on Linux), watching for swap activity.
+
+# Parity gate FIRST. A faster run that collected fewer files is not faster.
+jq '.testResults | length' baseline.json candidate.json
+jq '.numTotalTests' baseline.json candidate.json
+
+# Ordering evidence -- for the isolate experiment only.
+pnpm vitest $COMMON --outputFile.json=shuffled.json --no-isolate --sequence.shuffle.files
+```
+
+<Warning>
+
+所要時間より先に、毎回パリティを確認してください。選択のドリフトは、`pool` や `isolate` の実験が「勝ったように見えて」しまう最も安直な経路です: 候補設定が黙ってより小さな集合を収集し、ウォールクロックが下がり、その数字が高速化として報告されます。ファイル数とテスト件数がゲートであり、タイミングはそのゲートの向こう側でしか意味を持ちません。
+
+</Warning>
+
+### `threads` を選ぶ前に、ネイティブアドオンと環境の重なりを棚卸しする
+
+`threads` の実験を始める前に、スイートが実際に何をロードしているかを列挙してください。**パッケージが存在することだけから、非互換も -- そして安全性も -- 推論してはいけません。** `package.json` に載っているネイティブアドオンが、いまの選択範囲のどのテストからもロードされていないこともありますし、載っていないアドオンが依存関係を経由して間接的に入ってくることもあります。本当に問うべきは、*テスト対象のどのファイル*がそれを import しているか、そしてそのファイル自身が DOM 環境も伴っているか、です。
+
+1,062ファイルのスイートから採った実測の棚卸しがこの点をよく示します。76個のテストファイルがネイティブの `canvas` を直接 import し、101個が `createCanvas` に触れ、さらに8個が `sharp` をロードしていました -- しかし、`canvas` を直接使うファイルにも `createCanvas` を使うファイルにも、jsdom の environment プラグマを持つ集合と重なるものは**1つもありません**でした。よく想定される「jsdom と canvas の組み合わせ」は、そこで働いているメカニズムではまったくなく、リスクは通説が予測したのとは別の、より大きなファイル集合の側にありました。当て推量で進めていたら、間違った実験をしていたことになります。
+
+```bash
+# Which files actually load a native addon, and whether those same files
+# carry a DOM environment. package.json presence proves neither risk nor safety.
+rg -l "from ['\"]canvas['\"]" src tests | sort > canvas-direct.txt
+rg -l "createCanvas" src tests | sort > canvas-any.txt
+rg -l "from ['\"]sharp['\"]" src tests | sort > sharp.txt
+rg -l "@vitest-environment jsdom" src tests | sort > jsdom.txt
+
+# The overlap is the actual question -- neither list answers it alone.
+comm -12 canvas-any.txt jsdom.txt
+```
+
+<Note>
+
+重なりがゼロだったことは1つの発見であって、ゴーサインではありません。それが教えてくれるのは「身構えていた失敗は、いま抱えている失敗ではない」ということだけです。アドオンを使うファイルはどこかで動き続けますし、`threads` の実験は依然として、それらが共有プロセスで生き延びることを証明しなければなりません。
+
+</Note>
+
+### ロールバック条件は実行前に決めておく
+
+実験を始める前に、何をもって打ち切るかを決めておきます。そうしないと、設定が中途半端に移行された状態の午前2時に、サンクコストの圧力の下で判断することになります：
+
+- **ワーカーのクラッシュやセグメンテーション違反** -- 1回でも十分であり、リトライで通ったとしても同じです。
+- **ホストのスワップや無応答** -- プロセス単位のヒープではなく、マシン全体の RSS から読み取ります。
+- **収集のドリフト**: 候補が収集するテストファイルの集合が違う。
+- **テスト件数のドリフト**: 同じファイル群から得られるテスト件数が違う。
+- **順序依存の失敗**: シャッフルした実行が、自然順の実行と食い違う。
+
+どれか1つでも当てはまれば設定を戻します。どれも「その場でデバッグする」場面ではありません -- まず戻してから、ブランチを切って調査してください。すでに1つの理由で間違っていると分かっている実行モデルの変更は、2つ目の原因を探すための安定した土台にはならないからです。
+
+### 設定がどこに効くのか -- そして、ほかに何がそれを読んでいるのか
+
+`pool` と `isolate` はルートにもプロジェクトごとにも設定でき、そしてプロジェクトは `extends: true` なしにはそのどちらも継承しません -- [`extends: true` の指定は必須](#プロジェクトレベルのvitest設定-extends-true-の指定は必須)で扱った、あの静かな継承ルールと同じものです。ここではそれが他の場所より深く刺さります: `projects` ベースの設定に `extends: true` なしでルートレベルの `pool: "threads"` を足しても何も変わらず、実験は一度も走っていないのに「リグレッションなし」と報告されます。実験を1つのプロジェクトにスコープするのは、それを走らせる最も安全な方法でもあります -- 1つのプロジェクトが `threads` を試している間、ネイティブアドオンを使うファイルは `forks` に留めておけます。
+
+```typescript
+// vitest.config.ts -- pool/isolate are per-project levers, and a project
+// inherits nothing from the root without `extends: true`.
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    pool: "forks",
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          include: ["src/**/__tests__/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "native",
+          include: ["src/**/__tests__/**/*.native.test.ts"],
+          // Native-addon files stay on forks with isolation on, even while
+          // `unit` is the threads experiment. One lever, one project.
+          pool: "forks",
+          isolate: true,
+        },
+      },
+    ],
+  },
+});
+```
+
+`include` や `environment` を `projects` の下へ移すことには、見落としやすいもう1つのコストもあります: **設定を静的にパースするツールがすべて盲目になります。** トップレベルの `test.include` がすべてのテストディレクトリをカバーしていることを検証する CI ガード、何をインストールするか決めるために `test.environment` を読むスクリプト、同じ glob を列挙するカバレッジ設定 -- そのいずれもが、もはや実際の値を持たないトップレベルのキーを読み続け、しかも読み続けたまま pass し続けます。これらの読み手を更新することは、設定変更の一部であって、後追いの作業ではありません。
+
+<Danger>
+
+移動したキーを読むガードは失敗しません -- 陳腐化した値や空の値に対して、静かに成功します。ダッシュボードが green のままである分、壊れたガードよりも質が悪いのです。`projects` への再構成をマージする前に、自分のスクリプトと CI ワークフローの中から `test.include` と `test.environment` の読み手をすべて grep してください。
+
+</Danger>
+
+### ランナーの形と実行モデルは別物
+
+「スイートが遅い」の修正すべてにこのプロトコルが要るわけではありません。重複した収集パスを取り除くことや、[上](#プロジェクトレベルのvitest設定-重いローカルゲートでのワーカー並列数の上限)で見たようにワーカー数に上限を設けることは、実行の*形* -- 同じ作業を何回するか、同時に何本走らせるか -- を変えるだけで、個々のテストファイルの実行のされ方はまったく以前のままです。こうした変更は理解も差し戻しも安上がりです。`pool` と `isolate` はコードの走り方そのものを変えるので、それぞれに計測された実験の代金がかかります。
+
+どちらが必要かは、数字が答えてくれる問いです。2 vCPU ランナー上の6シャード CI ベースライン（Vitest 3.2.4、1,062個のテストファイルにわたる30,228件の選択済みテスト）の、シャードごとの内訳はこうでした：
+
+- `collect`: 57.2 秒から 78.9 秒
+- `environment`: 18.6 秒から 22.1 秒
+- `setup`: すべてのシャードで 0 ms
+
+**支配的な固定コストは environment のセットアップではなく collect でした** -- そして `pool` も `isolate` も collect には効きません。人気のある候補はどちらも間違った数字を狙っていたのです: DOM 環境の差し替えはおよそ3分の1の大きさのコストを狙うものですし、`isolate: false` は、モジュールスコープのレジストリとキャッシュだらけの1,062ファイルからファイル単位のアイソレーションを剥ぎ取り、プロファイルが求めてすらいない順序と状態の正しさのリスクを買うことになります。プロファイルが実際に正当化したのは、シャードごとに収集コスト全体を払い直していたローカルのシャードループを削除すること -- ランナーの形の変更であり、`pool`、`isolate`、CI のマトリクスはすべてそのまま据え置きでした。
+
+<Tip>
+
+実行モデルのレバーは一度に1つだけ動かし、そして両方を見送る覚悟を持ってください。「計測した結果、証拠は collect を指していたので、pool の選択もアイソレーションの無効化も見送った」は、やり残した最適化ではなく、完結した成功の形です。
+
+</Tip>
+
 ## jsdomとhappy-dom環境
 
 コンポーネントテストに適切なDOM環境を選択します：
