@@ -178,20 +178,26 @@ pnpm test:unit --maxWorkers=4
 
 ```bash
 # Matched runs: same SHA, same selection, same fixed worker count.
-# --reporter=json keeps per-file durations and counts so parity can be
-# diffed; /usr/bin/time -l (macOS) or -v (GNU) reports the machine-wide
-# peak RSS that a per-process heap number cannot see.
-COMMON="run --project unit --maxWorkers=4 --reporter=json"
+# Keep the default reporter alongside json: the json file carries the
+# per-file counts parity is diffed from, but the duration breakdown
+# (transform / collect / setup / tests / environment / prepare) is printed
+# only by the default reporter, so --reporter=json alone loses it.
+COMMON="run --project unit --maxWorkers=4 --reporter=default --reporter=json"
 
-/usr/bin/time -l pnpm vitest $COMMON --outputFile=baseline.json
-/usr/bin/time -l pnpm vitest $COMMON --outputFile=candidate.json --pool=threads
+/usr/bin/time -l pnpm vitest $COMMON --outputFile.json=baseline.json
+/usr/bin/time -l pnpm vitest $COMMON --outputFile.json=candidate.json --pool=threads
+
+# /usr/bin/time -l (macOS) or -v (GNU) reports the peak RSS of the LARGEST
+# SINGLE process in the tree, never the sum -- four forks at 1 GB each read
+# as 1 GB. Machine-wide pressure has to be sampled alongside the run
+# (`vm_stat 5` on macOS, `vmstat 5` on Linux), watching for swap activity.
 
 # Parity gate FIRST. A faster run that collected fewer files is not faster.
 jq '.testResults | length' baseline.json candidate.json
 jq '.numTotalTests' baseline.json candidate.json
 
 # Ordering evidence -- for the isolate experiment only.
-pnpm vitest $COMMON --outputFile=shuffled.json --no-isolate --sequence.shuffle.files
+pnpm vitest $COMMON --outputFile.json=shuffled.json --no-isolate --sequence.shuffle.files
 ```
 
 <Warning>
