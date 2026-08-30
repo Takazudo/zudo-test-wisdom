@@ -269,6 +269,8 @@ The upload is unconditional here, which is worth stating because the nearest rul
 
 The overwrite itself is the same trap in a different tool: a [second Playwright run empties `outputDir` before the upload](./playwright-patterns.mdx#recording-a-trace-is-not-keeping-it-a-second-playwright-run-empties-outputdir-before-the-upload). Same shape, same fix -- move the artifact out of the tool's own output directory before the tool runs again.
 
+One caveat belongs with the block above rather than with its reports: the `--all-features` run in it builds the maximal feature *union* of the workspace, which is a narrower claim than it looks -- see [Crate Isolation and Feature Ownership](#crate-isolation-and-feature-ownership) for what a union build cannot say about any individual crate's manifest.
+
 ### Price Retries From the Real nextest JUnit Shape
 
 A `<testcase>` that reads as a pass can still have cost three attempts, and `<flakyFailure>` is only one of the four elements that carry that cost. A parser that looks for `<flakyFailure>` alone prices a plain retried failure at zero.
@@ -318,6 +320,82 @@ Two formulas, one input. For any `<testcase>`:
 **Captured from cargo-nextest 0.9.138 -- re-check the element set against whatever version you pin; `flaky-fail-status` (0.9.131+) and `report-skipped` (0.9.143+) change the shape.**
 
 A parser for any of this needs [a real captured report as its fixture](../ci-operations/scheduled-re-exam.mdx#one-tracking-issue-never-one-per-run-pin-reporter-parsing-fixtures-to-a-real-captured-report), and here that rule has a sharp edge. The 25 audited reports from the worked gate hold 50,301 `<testcase>` records with **zero** flaky, failure, and error records among them -- a healthy suite emits no nested retry elements at all, so nothing in a normal artifact haul exercises either formula. Capture the fixture deliberately: force a test to fail on attempt 1 under `retries >= 1` and keep that run's `junit.xml`. Failing that, label the sample as reproduced from nexte.st's documentation rather than captured from your own suite -- a synthetic shape you assumed is exactly what the fixture rule exists to keep out of the test.
+
+## Crate Isolation and Feature Ownership
+
+`cargo nextest run --workspace --profile ci --all-features` is the widest build the gate runs, and its width is what makes it easy to over-read. Cargo resolves a dependency's feature set once, unified across every workspace member **selected for that build**; `--all-features` then switches on every feature every selected member declares. What the run proves is that the resulting *union* compiles and passes. It does not prove that any individual crate's `Cargo.toml` declares the features that crate's own code needs. A crate can use a feature it never asked for and stay green for years, because a sibling asked for it.
+
+Setting `resolver = "2"` does not close this. The v2 resolver stops unifying features across dependency *kinds* -- normal versus build versus dev -- and across target-specific edges. It still unifies across every selected workspace member, and that is the unification this failure rides on.
+
+### The Sibling That Owns Your Feature
+
+One crate called `reqwest::blocking::Response::json()` while its own manifest declared only `blocking` and `rustls-tls`. A sibling crate -- one that does not depend on it, is not depended on by it, and shares nothing with it but the workspace -- declared `reqwest/json`. Every `--workspace` build and every `--all-features` run was green, for as long as the sibling kept that feature. The break arrived as an unrelated cleanup: the sibling stopped needing JSON, `json` left *its* feature list, and the crate that actually called `json()` stopped compiling. That crate had not changed in months.
+
+Two manifests reproduce it:
+
+```toml
+# consumer/Cargo.toml -- calls Response::json(), and never declares `json`
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+```
+
+```toml
+# sibling/Cargo.toml -- unrelated to consumer, and the only crate that owns `json`
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+```
+
+```sh
+cargo check --workspace   # green: one reqwest, resolved with blocking + rustls-tls + json
+cargo check -p consumer   # RED: `Response::json` is behind a feature consumer never declared
+```
+
+The second line is the whole finding. Nothing about `consumer` differs between the two commands -- only which packages were selected, and therefore whose feature declarations got folded together.
+
+### Isolated `cargo check -p` Lanes Are the Detection
+
+Narrowing the package selection is what turns the latent defect into a compile error, so the gate needs lanes that compile the relevant crates as *selected packages* rather than only as members of the workspace union:
+
+```yaml
+# .github/workflows/health.yml (excerpt) -- isolated manifest lanes. They run IN
+# ADDITION to the --workspace run above, never instead of it: that run proves the
+# union builds, these prove each manifest stands up on its own.
+- run: cargo check -p consumer --all-targets
+- run: cargo check -p sibling --all-targets
+```
+
+`--all-targets` is load-bearing. A bare `cargo check -p` compiles the lib and the bins; a feature used only from `tests/` or `benches/` is exactly as unowned as one used from `src/`, and without the flag those targets are never compiled to find out.
+
+Pick the crates by contract, not by count. A manifest is worth an isolated lane when something outside your workspace will believe it: anything you `cargo publish`, anything a downstream consumer builds without your `Cargo.lock`, and anything that ships inside a runtime artifact. An isolated lane for every internal helper crate in a forty-crate workspace buys a much smaller guarantee for a much larger share of the gate's clock, which is the [aggregate suite budget](../decision-guide/aggregate-suite-budget.mdx) argument applied to check lanes rather than test lanes.
+
+Where the isolated selection resolves a different feature set -- which is exactly the case the lane exists to catch -- it cannot reuse the workspace build's artifacts, and that is not a caching bug to fix: a different feature set is a different fingerprint, so `reqwest` compiles again for that selection. That recompile is the price of the check, and it is the reason the lane list is a short reviewed set rather than every member of the workspace.
+
+None of this replaces the `--workspace --all-features` run. That run is still the only lane that builds the targets gated behind `[[test]] required-features`, and still the only one that catches code which compiles only when everything is on. The two claims are complementary and neither implies the other -- the union lane proves the maximum works, the isolated lanes prove each part works alone.
+
+### `--no-default-features` and Matrices Only Where the Contract Is Real
+
+`cargo check -p <crate> --no-default-features` is a second lane, not a better one. It answers a different question: does the crate still build when a consumer turns the defaults off? That question is only worth gating when defaults-off is a combination you actually support -- a `no_std` build, a crate documented as `default-features = false`-friendly, a backend a consumer is expected to choose between. Add the lane where the README makes the promise. Do not add it because it is cheap to type.
+
+The same rule governs feature matrices. `cargo hack --each-feature` and `--feature-powerset` will enumerate combinations for you, and on a crate with eight optional features the powerset is 256 compiles of configurations nobody supports and nobody will fix. Enumerate the documented contracts explicitly instead, so the list stays reviewable and every entry has an owner:
+
+```sh
+cargo check -p consumer --no-default-features                        # documented: builds with defaults off
+cargo check -p consumer --no-default-features --features rustls-tls  # documented: consumer's own rustls backend flag
+cargo check -p consumer --no-default-features --features native-tls  # documented: consumer's own native-tls flag
+```
+
+A speculative combination that goes red is not a bug report. It is a failure nobody agreed to support, and the gate that raises it teaches the team to read red as noise -- the same false-signal cost any unactionable assertion carries.
+
+### `cargo tree -e features` Explains, It Does Not Gate
+
+Once a lane is red, the question is which package turned the feature on. `cargo tree` with feature edges answers it, and the answer changes with the package selection -- which is precisely why it diagnoses rather than gates:
+
+```sh
+cargo tree -p consumer -e features             # the feature edges consumer resolves on its own
+cargo tree --workspace -e features -i reqwest  # inverted: who in the workspace enables each reqwest feature
+```
+
+The first invocation shows the graph the isolated lane compiles; the second shows the union the workspace build compiles, with the enabling package named on the inverted edge. Reading the two side by side is the explanation of the failure. Neither is the detection: a tree is output to be interpreted by a person, and a gate has to be a command whose exit code is the verdict. Keep `cargo tree` in the triage notes and the isolated `cargo check -p` lane in the workflow.
 
 ## Where to Go Next
 
