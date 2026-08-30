@@ -155,6 +155,150 @@ Cap this only in the heavy local gate, not everywhere. Keep interactive `pnpm te
 
 </Note>
 
+## Choosing `pool` and `isolate` Is a Measurement, Not a Default
+
+`pool` (`forks` versus `threads`) and `isolate` (a fresh module graph per test file, or a shared one) are the two settings that change Vitest's **execution model**. They are routinely flipped together in a single "make the suite faster" commit -- which is exactly what makes the result unreadable. They fail in different ways, they are cleared by different evidence, and when a bundled change goes red you cannot tell which half broke it.
+
+- **`pool: "threads"`** runs test files in worker threads inside a shared process instead of separate forked processes. It is a *native-code and runtime-compatibility* question: any addon assuming one instance per process, or that is not thread-safe, is newly at risk.
+- **`isolate: false`** stops rebuilding the module graph for each test file. It is a *correctness* question: module-scope registries, caches, singletons, and patched globals now survive across files, so the suite becomes order-dependent.
+
+Treat them as two experiments, run separately, each with its own measurement and its own rollback trigger. A suite can legitimately land on `threads` with isolation fully on, or on `forks` with isolation off -- pairing them carries no discount.
+
+### The Matched-Run Protocol
+
+A `pool` or `isolate` comparison is evidence only if the two runs differ in exactly one thing. Pin everything else, and record the same metric set on both sides:
+
+- **Same SHA, same selection.** No rebase between runs, and byte-identical `--project`, shard, and filter arguments.
+- **Fixed worker count on both sides.** Left to the host's core count, you are measuring the machine's mood rather than the setting.
+- **Exact collected-file and test-count parity.** A candidate that is faster because it collected 40 fewer files is not a faster run, it is a broken selection. Check this before looking at any duration.
+- **A duration breakdown, not a wall clock.** transform / collect / setup / tests / environment / prepare -- Vitest already prints these, and only the breakdown says which phase the change actually moved.
+- **Peak per-process heap *and* machine-wide RSS.** Threads share one heap, so a per-process number can look flat while the host starts swapping. Measure both.
+- **Retries and worker crashes.** A run that passed on a retry, or that lost and restarted a worker, is not a clean run even when the summary is green.
+- **State-leak and ordering evidence.** For `isolate: false` specifically, a green run in the natural file order proves nothing. Re-run with the file order shuffled; if the result changes, the isolation you removed was load-bearing.
+
+```bash
+# Matched runs: same SHA, same selection, same fixed worker count.
+# --reporter=json keeps per-file durations and counts so parity can be
+# diffed; /usr/bin/time -l (macOS) or -v (GNU) reports the machine-wide
+# peak RSS that a per-process heap number cannot see.
+COMMON="run --project unit --maxWorkers=4 --reporter=json"
+
+/usr/bin/time -l pnpm vitest $COMMON --outputFile=baseline.json
+/usr/bin/time -l pnpm vitest $COMMON --outputFile=candidate.json --pool=threads
+
+# Parity gate FIRST. A faster run that collected fewer files is not faster.
+jq '.testResults | length' baseline.json candidate.json
+jq '.numTotalTests' baseline.json candidate.json
+
+# Ordering evidence -- for the isolate experiment only.
+pnpm vitest $COMMON --outputFile=shuffled.json --no-isolate --sequence.shuffle.files
+```
+
+<Warning>
+
+Check parity before duration, every time. Selection drift is the easiest way for a `pool` or `isolate` experiment to look like a win: the candidate config silently collects a smaller set, the wall clock drops, and the number gets reported as a speedup. The file count and the test count are the gate; the timings mean something only behind it.
+
+</Warning>
+
+### Inventory Native Addons and Environment Overlap Before Choosing `threads`
+
+Before running the `threads` experiment at all, enumerate what the suite actually loads. **Never infer incompatibility -- or safety -- from package presence alone.** A native addon listed in `package.json` may be loaded by no test in the current selection, and one that is absent from it can still arrive transitively through a dependency. The real question is which *files under test* import it, and whether those same files also carry a DOM environment.
+
+A measured inventory from a 1,062-file suite makes the point. 76 test files imported native `canvas` directly, 101 touched `createCanvas`, and 8 more loaded `sharp` -- yet **none** of the direct-`canvas` or `createCanvas` files overlapped the set carrying a jsdom environment pragma. The commonly assumed jsdom-plus-canvas interaction was not the mechanism at all; the risk lived in a different, larger set of files than the folklore predicted. Guessing would have produced the wrong experiment.
+
+```bash
+# Which files actually load a native addon, and whether those same files
+# carry a DOM environment. package.json presence proves neither risk nor safety.
+rg -l "from ['\"]canvas['\"]" src tests | sort > canvas-direct.txt
+rg -l "createCanvas" src tests | sort > canvas-any.txt
+rg -l "from ['\"]sharp['\"]" src tests | sort > sharp.txt
+rg -l "@vitest-environment jsdom" src tests | sort > jsdom.txt
+
+# The overlap is the actual question -- neither list answers it alone.
+comm -12 canvas-any.txt jsdom.txt
+```
+
+<Note>
+
+An empty overlap is a finding, not a green light. It tells you the failure you were bracing for is not the one you have; the addon files still run somewhere, and the `threads` experiment still has to prove they survive a shared process.
+
+</Note>
+
+### Rollback Triggers, Fixed Before the Run
+
+Decide what ends the experiment before starting it, so the call is not made under sunk-cost pressure at 2am with a half-migrated config:
+
+- **A worker crash or segfault** -- once is enough, even if the retry passed.
+- **The host swapping or going unresponsive** -- read this off the machine-wide RSS, not the per-process heap.
+- **Collection drift**: the candidate collects a different set of test files.
+- **Test-count drift**: the same files yield a different number of tests.
+- **An order-dependent failure**: the shuffled run disagrees with the natural-order run.
+
+Any one of them reverts the setting. None of them is a debug-it-in-place situation -- revert first, then investigate on a branch, because an execution-model change already known to be wrong for one reason is not a stable base for finding the second.
+
+### Where the Setting Applies -- and What Else Reads It
+
+`pool` and `isolate` can be set at the root or per project, and a project inherits neither without `extends: true` -- the same silent-inheritance rule covered in [`extends: true` Is Required](#project-level-vitest-configs-extends-true-is-required). It bites harder here than elsewhere: a root-level `pool: "threads"` added to a `projects`-based config without `extends: true` changes nothing, and the experiment reports "no regression" because it never ran. Scoping the experiment to one project is also the safest way to run it -- keep the native-addon files on `forks` while a single project tries `threads`.
+
+```typescript
+// vitest.config.ts -- pool/isolate are per-project levers, and a project
+// inherits nothing from the root without `extends: true`.
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    pool: "forks",
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          include: ["src/**/__tests__/**/*.test.ts"],
+          environment: "jsdom",
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "native",
+          include: ["src/**/__tests__/**/*.native.test.ts"],
+          // Native-addon files stay on forks with isolation on, even while
+          // `unit` is the threads experiment. One lever, one project.
+          pool: "forks",
+          isolate: true,
+        },
+      },
+    ],
+  },
+});
+```
+
+Moving `include` or `environment` under `projects` carries a second cost that is easy to miss: **any tooling that parses the config statically goes blind.** A CI guard asserting that a top-level `test.include` covers every test directory, a script reading `test.environment` to decide what to install, a coverage config enumerating the same globs -- each keeps reading a top-level key that no longer holds the real value, and each keeps passing while doing so. Updating those readers is part of the config change, not follow-up work.
+
+<Danger>
+
+A guard reading a key that has moved does not fail -- it silently succeeds against a stale or empty value. That is worse than a broken guard, because the dashboard stays green. Grep for every reader of `test.include` and `test.environment` in your own scripts and CI workflows before landing a `projects` restructure.
+
+</Danger>
+
+### Runner Shape Is Not Execution Model
+
+Not every "the suite is slow" fix needs this protocol. Removing a repeated collection pass, or capping workers as [above](#project-level-vitest-configs-cap-worker-parallelism-in-the-heavy-local-gate), changes the *shape* of the run -- how many times the work is done, and how much of it runs at once -- while every individual test file executes exactly as before. Those are cheap to reason about and cheap to revert. `pool` and `isolate` change how your code runs, and each costs a measured experiment.
+
+Which kind you need is a question the numbers answer. A six-shard CI baseline on 2-vCPU runners (Vitest 3.2.4, 30,228 selected tests across 1,062 test files) broke down like this per shard:
+
+- `collect`: 57.2 s to 78.9 s
+- `environment`: 18.6 s to 22.1 s
+- `setup`: 0 ms on every shard
+
+**Collection, not environment setup, was the dominant fixed cost** -- and neither `pool` nor `isolate` addresses collection. The popular candidates were aimed at the wrong number: swapping the DOM environment targets a cost roughly a third the size, and `isolate: false` would have stripped file isolation from 1,062 files full of module-scope registries and caches, buying an order-and-state correctness risk the profile never asked for. What the profile did justify was deleting a repeated local shard loop that re-paid the whole collection cost for every shard -- a runner-shape change, with `pool`, `isolate`, and the CI matrix all left exactly as they were.
+
+<Tip>
+
+Change one execution-model lever at a time, and be willing to defer both. "We measured, the evidence pointed at collection, so we deferred pool selection and disabled isolation" is a complete and successful outcome -- not an unfinished optimization.
+
+</Tip>
+
 ## jsdom and happy-dom Environments
 
 Choose the right DOM environment for component tests:
