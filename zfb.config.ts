@@ -15,6 +15,10 @@ export default defineConfig(
       "Takazudo's frontend testing strategy guide for AI agents and developers",
     githubUrl: "https://github.com/Takazudo/zudo-test-wisdom",
     siteUrl: "https://zudo-test-wisdom.takazudomodular.com",
+    // The `/sitemap.xml` route is registered unconditionally by the package;
+    // this flag is what populates it with real <url> entries (instead of an
+    // empty <urlset>) and adds the `Sitemap:` line to robots.txt.
+    sitemap: true,
     // This site's own home-hero brand mark, rendered as a theme-adaptive CSS
     // mask. REQUIRED — zudo-doc's `logo` default is "auto", which generates a
     // deterministic SVG seeded by `siteName` and silently displaces the host's
