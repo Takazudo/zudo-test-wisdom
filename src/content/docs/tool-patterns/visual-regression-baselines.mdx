@@ -117,6 +117,71 @@ Loosening `maxDiffPixels` / `maxDiffPixelRatio` / `threshold` to turn a red run 
 
 The healthy direction of travel is _tightening_: as you engineer more determinism (fonts, animation, hardware pinning), the noise floor drops and the threshold should drop with it. A threshold that only ever grows is a suite slowly going blind.
 
+## Admitting a Baseline as an Oracle
+
+Capturing a baseline and _admitting_ it as an oracle are two different acts. The capture is a file some command produced; the oracle is the claim that this file is what a correct build looks like. Everything above earns the determinism that makes such a claim possible -- none of it verifies that the claim actually holds for the specific bytes you are about to commit. A capture taken from a dirty tree, a half-finished build, or a stale artifact directory looks exactly like a good one in the PR diff, and it holds that false position for as long as nobody replays it.
+
+Five rules close the gap between capture and oracle:
+
+1. **Capture on a clean, pinned parent.** The baseline describes the _parent_ commit's output, so capture it from a clean checkout of the parent, with the environment pinned exactly as the gate will pin it. A capture taken on top of the topic's own changes cannot detect those changes.
+2. **Independently replay the unchanged parent before accepting the baseline.** Build the parent a second time from a clean state and compare that output against the stored capture. A capture that cannot reproduce at the very commit it claims to describe is not an oracle -- it is a record of whatever happened to be in the working tree that day.
+3. **Fail baseline admission on unexplained mismatch -- do not defer discovery to final validation.** The replay is a gate of its own, run at admission time. Deferring it means the entire topic branch gets built and reviewed against a reference nobody verified, and the mismatch finally surfaces at the worst possible moment: attached to the change, where it reads as a regression.
+4. **When a bad capture is discovered late, triangulate before repairing.** Do not repair the contract from the failing diff alone -- run the three-way comparison below, and **retain the mismatch evidence**. Those diffs are the record that justifies whatever you then change about the oracle, in the same spirit as a [versioned evidence contract](../test-integrity/live-proof-evidence-contracts.mdx).
+5. **Never rewrite or loosen the oracle until a fresh-context review has classified the discrepancy.** Regenerating a capture or widening what it accepts is the same class of act as [raising a pixel threshold](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate), and carries the same requirement: someone who did not author the change classifies the discrepancy first -- stale capture, wrong contract, or real regression.
+
+<Note>
+
+This protocol is not specific to screenshots. Any **captured build-output oracle** is admitted the same way: asset manifests, generated-code hashes, [built-site integrity snapshots](../project-recipes/site-integrity-checks.mdx), bundle-size records. In every case the capture is a file produced by a command, the oracle is the claim that the file describes a correct build, and only a replay closes the distance between the two. The file's existence proves nothing.
+
+</Note>
+
+### C/P/T Triangulation
+
+When a captured oracle disagrees with a topic branch, the failing diff alone cannot say _which side_ is wrong. Triangulation answers that with three artifacts, all produced by **the same command under the same pinned environment**:
+
+| Artifact | What it is |
+|---|---|
+| **C** | the stored capture -- the oracle under suspicion |
+| **P** | a fresh clean replay of the _unchanged parent_ |
+| **T** | a fresh clean build of the _topic_ |
+
+The attribution rule falls straight out of the three:
+
+```text
+C != P                           -> the capture does not reproduce; C is stale
+C -> T shows that same mismatch  -> C is not admissible evidence against the topic
+P -> T                           -> the only comparison attributable to the change
+```
+
+If `C != P` **and** the `C -> T` comparison shows that same mismatch, the mismatch predates the topic entirely. **Only `P -> T` is attributable to the code change.** Preserve all three diffs before touching the contract: they are what separates "the oracle was wrong" from "the change was wrong," and a repaired contract with no retained evidence is indistinguishable from a quietly regenerated one.
+
+**A worked case.** A temporary emitted-asset hash oracle, captured at the parent SHA, could not reproduce at that same SHA -- captured versus clean parent showed **14 removed and 14 added asset names**. The topic then showed the identical mismatch against the capture, which is the signature of a stale `C`, not of a broken topic. The direct clean-parent versus clean-topic comparison (`P -> T`) differed in exactly one intentional island hash, caused by five new changelog pages; CSS and every theme hash were unchanged.
+
+Without the parent replay, that stale capture would have falsely blamed the implementation -- or, worse, invited a blind regeneration that laundered the unexplained 14/14 delta into the new reference. The three-way evidence located the fault in the **oracle contract** rather than the topic, and supported narrowing that contract to a no-new-failures check instead of an exact-name match it could not honestly hold.
+
+## Toolchain Identity Is Part of the Baseline
+
+For a baseline that records **exact compiled bytes** -- a wasm payload size, a gzipped bundle byte count, a hash of generated output -- the producing compiler and optimizer version belongs to the baseline's identity as surely as the OS belongs to a screenshot's. Playwright makes that explicit by keying snapshots with `{platform}`. A byte-exact size manifest usually has no such key, so the toolchain version drops silently out of the record and the number looks portable when it is not.
+
+**A worked case.** A local audit ran on a floating `stable` Rust channel that resolved to **1.96**, and recorded gzip-9 outputs of **1,451,831 B** for the root bundle and **259,809 B** for the parser. The PR gate later resolved _the same floating channel_ to **Rust 1.98** and deterministically produced **1,442,270 B** and **260,760 B** (from final wasm of **3,293,554 B** and **645,272 B** respectively) -- one number down, one number up, no source change between them. The committed exact manifest still described the pre-migration artifacts, so CI **correctly failed**, even though every gzip payload stayed comfortably below its independent ceiling.
+
+Nothing was wrong with the code, and nothing was wrong with the gate. What was wrong was a baseline whose identity omitted its producer. The rule:
+
+> Either pin the toolchain identity, or accept that a floating channel makes remeasurement a reviewed, versioned event.
+
+A floating channel is a legitimate choice; it only moves the cost. Pinned, the manifest stays valid until you deliberately bump the pin. Floating, every toolchain movement becomes a baseline-refresh event with a reviewer looking at the new numbers -- exactly the review loop a screenshot regeneration goes through.
+
+### A Ceiling and an Exact-Byte Record Are Different Contracts
+
+That case turns on a distinction worth stating on its own: the two assertion kinds have different admission rules, and collapsing them produces either a brittle gate or a blind one.
+
+| Contract | Asserts | Under toolchain movement | On mismatch |
+|---|---|---|---|
+| **Size ceiling** | output stays under a budget you chose | stays valid -- a few kilobytes either way does not invalidate the budget | a real signal: something got materially bigger |
+| **Exact-byte record** | output _is_ these bytes, as of this measurement | is invalidated -- a new compiler legitimately emits different bytes | check provenance first, then refresh as a reviewed event |
+
+Keep both, and keep them separate. The ceiling is the **stable safety assertion** -- it is what actually protects users from a bundle-size regression, and it should not move because a compiler bump shifted a number by 0.7%. The exact-byte record is **informational and documentary** -- it makes drift visible and dates the measurement, and it is _expected_ to be refreshed under review whenever its producer changes. Refreshing the record is routine bookkeeping; raising the ceiling to turn a red run green is [gaming the gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate).
+
 ## Where This Layer Sits
 
 This is a **deterministic Level 5-family gate** -- the same reproducible, no-LLM pass/fail character as computed-style assertions, aimed at the visual output instead of specific property values. It does not replace computed-style checks; the two cover different failure shapes.
@@ -146,5 +211,6 @@ The boundary with [Level 6](../testing-levels/level-6-ai-based-verification.mdx)
 - [Level 6: AI-Based Visual Verification](../testing-levels/level-6-ai-based-verification.mdx) -- the non-deterministic final resort for surfaces even a pixel diff cannot judge
 - [Required Behavior — Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate) -- why loosening a screenshot tolerance to pass is treated as gaming the gate
 - [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) -- the animation and hydration determinism fixes a pixel gate depends on
+- [Built-Site Integrity Gates](../project-recipes/site-integrity-checks.mdx) -- other captured build-output oracles that admit under the same replay protocol
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) -- when a GPU-bound pixel gate moves to the scheduled tier
 - [Scheduled Re-exam & Night Exam](../ci-operations/scheduled-re-exam.mdx) -- how a GPU visual-regression lane runs on real hardware off the PR path
