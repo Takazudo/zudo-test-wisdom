@@ -269,6 +269,8 @@ test-group = 'heavy-serial-build'
 
 上書きそのものは、道具を替えただけの同じ罠です：[2回目のPlaywright実行が、アップロードの前に `outputDir` を空にする](./playwright-patterns.mdx#トレースを記録しても残したことにはならない-2回目のplaywright実行が、アップロードの前に-outputdir-を空にする)。形も同じ、対処も同じです — ツールが再び走る前に、アーティファクトをそのツール自身の出力ディレクトリの外へ移すこと。
 
+1つだけ、レポートの話ではなく上のブロック自体に付けておくべき但し書きがあります：あの中の `--all-features` の実行が組み立てるのは、ワークスペースのフィーチャの最大の*和集合*であり、これは見た目より狭い主張です — 和集合のビルドが個々のクレートのマニフェストについて何を語れないのかは、[クレートの分離とフィーチャの所有権](#クレートの分離とフィーチャの所有権)を参照してください。
+
 ### 実際のnextest JUnitの形からリトライに値札を付ける
 
 パスに見える `<testcase>` でも、3回の試行を費やしている可能性があります。そしてそのコストを運ぶ要素は `<flakyFailure>` だけではなく、全部で4種類あります。`<flakyFailure>` だけを探すパーサーは、リトライ付きの素の失敗をゼロ円で見積もってしまいます。
@@ -318,6 +320,82 @@ test-group = 'heavy-serial-build'
 **cargo-nextest 0.9.138 から取得 — ピン留めしているバージョンに対して要素の集合を再確認してください。`flaky-fail-status`（0.9.131以降）と `report-skipped`（0.9.143以降）は形を変えます。**
 
 これらをパースするものには[実際にキャプチャしたレポートをフィクスチャにする](../ci-operations/scheduled-re-exam.mdx#1つのトラッキングissue、実行ごとに1つではなく-レポーターのパースフィクスチャを実際にキャプチャしたレポートに固定する)ルールが効きますが、ここではそのルールに鋭い角があります。実例のゲートで監査した25個のレポートは50,301件の `<testcase>` レコードを持ちながら、flaky・failure・errorのレコードは **ゼロ** でした — 健全なスイートはネストしたリトライ要素をまったく生まないため、通常のアーティファクト回収では、どちらの計算式も一度も動かされません。フィクスチャは意図的にキャプチャしてください：`retries >= 1` の下で1回目の試行が必ず失敗するテストを仕込み、その実行の `junit.xml` を残します。それができない場合は、そのサンプルを自分のスイートからキャプチャしたものではなく、nexte.stのドキュメントから再現したものだと明記してください — 思い込みで組み立てた合成的な形こそ、フィクスチャのルールがテストから締め出そうとしているものなのです。
+
+## クレートの分離とフィーチャの所有権
+
+`cargo nextest run --workspace --profile ci --all-features` は、ゲートが走らせる中で最も幅の広いビルドです。そしてその幅こそが、この実行を過大に読み取らせる原因です。Cargoは依存クレートのフィーチャ集合を一度だけ解決し、**そのビルドのために選択された**すべてのワークスペースメンバーにわたって統合します。`--all-features` は、選択された各メンバーが宣言しているフィーチャをすべて有効にします。つまりこの実行が証明するのは、その結果できあがった*和集合*がコンパイルでき、テストに通るということです。個々のクレートの `Cargo.toml` が、そのクレート自身のコードに必要なフィーチャを宣言できているかどうかは、まったく証明していません。あるクレートは、自分では一度も要求していないフィーチャを使いながら、何年もグリーンであり続けられます。兄弟クレートが要求してくれているからです。
+
+`resolver = "2"` を指定してもこの穴は塞がりません。v2リゾルバがやめるのは、依存の*種類*（通常・build・dev）をまたぐ統合と、ターゲット固有のエッジをまたぐ統合です。選択されたワークスペースメンバー同士の統合は依然として行われ、この失敗が乗っているのはまさにその統合です。
+
+### あなたのフィーチャを所有している兄弟クレート
+
+あるクレートが `reqwest::blocking::Response::json()` を呼び出しているのに、自身のマニフェストでは `blocking` と `rustls-tls` しか宣言していませんでした。そして兄弟クレート — そのクレートに依存しておらず、そのクレートから依存もされておらず、共有しているのはワークスペースだけ — が `reqwest/json` を宣言していました。兄弟がそのフィーチャを持ち続けている限り、`--workspace` のビルドも `--all-features` の実行もすべてグリーンでした。破綻は無関係なクリーンアップとしてやってきます：兄弟がJSONを必要としなくなり、`json` が*兄弟の*フィーチャ一覧から消え、実際に `json()` を呼んでいたクレートがコンパイルできなくなったのです。そのクレートは何ヶ月も変更されていませんでした。
+
+2つのマニフェストで再現できます：
+
+```toml
+# consumer/Cargo.toml -- calls Response::json(), and never declares `json`
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+```
+
+```toml
+# sibling/Cargo.toml -- unrelated to consumer, and the only crate that owns `json`
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+```
+
+```sh
+cargo check --workspace   # green: one reqwest, resolved with blocking + rustls-tls + json
+cargo check -p consumer   # RED: `Response::json` is behind a feature consumer never declared
+```
+
+2行目がこの話のすべてです。2つのコマンドの間で `consumer` については何一つ違いません — 違うのはどのパッケージが選択されたか、したがって誰のフィーチャ宣言がまとめ上げられたか、それだけです。
+
+### 検知するのは、隔離された `cargo check -p` レーン
+
+潜在的な欠陥をコンパイルエラーに変えるのはパッケージ選択の絞り込みです。したがってゲートには、対象のクレートをワークスペースの和集合の一員としてではなく、*選択されたパッケージ*としてコンパイルするレーンが必要です：
+
+```yaml
+# .github/workflows/health.yml (excerpt) -- isolated manifest lanes. They run IN
+# ADDITION to the --workspace run above, never instead of it: that run proves the
+# union builds, these prove each manifest stands up on its own.
+- run: cargo check -p consumer --all-targets
+- run: cargo check -p sibling --all-targets
+```
+
+`--all-targets` は要となるフラグです。素の `cargo check -p` がコンパイルするのはlibとbinだけです。`tests/` や `benches/` からしか使われていないフィーチャも、`src/` から使われているフィーチャとまったく同じように所有されていない可能性があり、このフラグがなければそれらのターゲットはそもそもコンパイルされません。
+
+対象のクレートは、件数ではなく契約で選びます。マニフェストが隔離レーンに値するのは、ワークスペースの外にいる誰かがそれを信じるときです：`cargo publish` するもの、あなたの `Cargo.lock` なしに下流の利用者がビルドするもの、そしてランタイムのアーティファクトに同梱されるもの。40クレートのワークスペースで内部ヘルパークレート1つ1つに隔離レーンを置けば、ずっと小さな保証のために、ゲートの時計のずっと大きな割合を買うことになります — これは[スイート全体の予算](../decision-guide/aggregate-suite-budget.mdx)の議論を、テストレーンではなくcheckレーンに当てはめたものです。
+
+隔離した選択が別のフィーチャ集合に解決される場合 — まさにこのレーンが捕まえようとしているのがその場合です — ワークスペースビルドの成果物は再利用できませんが、それは直すべきキャッシュの不具合ではありません：フィーチャ集合が違えばフィンガープリントも違うので、その選択のために `reqwest` はコンパイルし直されます。その再コンパイルこそがこのチェックの代金であり、レーンの一覧がワークスペースの全メンバーではなく、レビュー済みの短い集合であるべき理由です。
+
+これらは `--workspace --all-features` の実行を置き換えるものではありません。`[[test]] required-features` の背後にあるターゲットをビルドする唯一のレーンは依然としてあちらですし、すべてが有効なときにだけコンパイルが通るコードを捕まえられるのもあちらだけです。2つの主張は補完的であり、どちらももう一方を含意しません — 和集合のレーンは最大構成が動くことを証明し、隔離レーンは各部品が単独で動くことを証明します。
+
+### `--no-default-features` とマトリクスは、契約が実在するところにだけ
+
+`cargo check -p <crate> --no-default-features` は2本目のレーンであって、より良いレーンではありません。これが答えるのは別の問いです：利用者がデフォルトを切ったとき、そのクレートはまだビルドできるか？ この問いをゲートにする価値があるのは、デフォルトなしが実際にサポートしている構成であるときだけです — `no_std` ビルド、`default-features = false` で使えるとドキュメントされているクレート、利用者が選ぶことを想定しているバックエンドなど。READMEがその約束をしているところにレーンを足してください。打つのが簡単だからという理由で足してはいけません。
+
+同じルールがフィーチャマトリクスにも効きます。`cargo hack --each-feature` や `--feature-powerset` は組み合わせを列挙してくれますが、オプショナルなフィーチャが8個あるクレートでは、そのべき集合は誰もサポートしておらず誰も直さない構成を256回コンパイルすることになります。そうではなく、ドキュメント化された契約だけを明示的に列挙してください。一覧はレビュー可能なままになり、各エントリに所有者がいる状態を保てます：
+
+```sh
+cargo check -p consumer --no-default-features                        # documented: builds with defaults off
+cargo check -p consumer --no-default-features --features rustls-tls  # documented: consumer's own rustls backend flag
+cargo check -p consumer --no-default-features --features native-tls  # documented: consumer's own native-tls flag
+```
+
+思いつきで加えた組み合わせが赤くなっても、それはバグ報告ではありません。誰もサポートすると合意していない失敗であり、それを上げるゲートは、赤をノイズとして読むようチームを訓練してしまいます — 行動につながらないアサーションが等しく背負う、偽シグナルのコストです。
+
+### `cargo tree -e features` は説明であって、ゲートではない
+
+レーンが赤くなったら、次の問いはどのパッケージがそのフィーチャを有効にしたのか、です。フィーチャのエッジ付きの `cargo tree` がそれに答えます。しかもその答えはパッケージ選択によって変わります — だからこそ、これはゲートではなく診断なのです：
+
+```sh
+cargo tree -p consumer -e features             # the feature edges consumer resolves on its own
+cargo tree --workspace -e features -i reqwest  # inverted: who in the workspace enables each reqwest feature
+```
+
+1つ目の呼び出しは隔離レーンがコンパイルするグラフを示し、2つ目はワークスペースビルドがコンパイルする和集合を、反転したエッジ上に有効化しているパッケージの名前とともに示します。この2つを並べて読むことが、失敗の説明になります。どちらも検知ではありません：ツリーは人間が解釈するための出力であり、ゲートは終了コードそのものが判定であるようなコマンドでなければならないからです。`cargo tree` はトリアージのメモに、隔離された `cargo check -p` レーンはワークフローに置いてください。
 
 ## 次に読むページ
 
