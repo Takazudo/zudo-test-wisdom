@@ -185,7 +185,32 @@ Treat "5–10 min" as a soft design target for the lane's **structure** (what is
 
 **Agent anti-pattern:** measure a local lane once on a contended machine, see it exceed the target, declare the acceptance criterion "buggy", and trigger a redesign. That spends real effort chasing load noise. This is the local-timing cousin of the deflaking rule -- wait on the real completion signal, not a fixed deadline; see [the deflaking recipe](../test-integrity/deflaking-recipe.mdx).
 
+**The stronger form of this warning: do not spend hours *producing* a local number either.** The rule above says a local wall-clock figure is not trustworthy enough to gate on. The corollary, learned the expensive way, is that it is not worth the machine time to obtain. An agent anchored a plan's acceptance criteria to a local full-suite baseline and spent ~3 hours across 4 of 6 shards without producing a usable number -- while the CI instrumentation that answers the same question had been merged, by the same agent, an hour earlier.
+
 </Warning>
+
+### If a wall-clock number is genuinely needed
+
+Split the measurement by what it actually requires:
+
+| Measurement | Where | Why |
+|---|---|---|
+| Full-suite / per-shard wall clock, peak heap | **CI** | Uniform container, same envelope every run. Publish to `GITHUB_STEP_SUMMARY` and compare against the budget there. |
+| Per-file durations | **either** | Each file's slice is short and read comparatively, so contention distorts it far less than a full-suite total -- and a JSON reporter's per-suite timing is unaffected by a sibling file's failure. |
+| Cheap A/B comparisons (bundled vs source-serving dep lane; per-pass fixed cost) | **local** | Minutes, and the comparison stays internally consistent under mild contention. |
+
+<Warning>
+
+**Ask before monopolizing a shared machine.** A suite run that saturates a developer's box for hours is a resource decision belonging to its owner, not an implementation detail -- especially where other repos and other agent sessions share it. Confirm before the first command, not after the third hour.
+
+</Warning>
+
+Four practices that make the remaining local measurement survivable:
+
+- **Read the log before believing an elapsed time.** A sandboxed environment can deny reads of ordinary files (`EPERM: operation not permitted` on `node_modules/...`, on OS temp paths). The runner reports these as unhandled errors, the shard exits non-zero, a wrapper retries, and the retry's time is silently added to elapsed. One observed run logged **101 EPERM occurrences across 71 distinct paths in a single shard**. It always resolves on a bare retry, so it is invisible unless the log is grepped. Note the direction of the bias: environmental retries inflate the *current* configuration's time, flattering whatever change is being proposed. A measurement error that agrees with the hypothesis is worse than no measurement.
+- **Salvage beats restart.** A killed run's `--reporter=json --outputFile=` reports survive and carry trustworthy per-file durations even when wall-clock totals are contaminated. In the case above, salvaging the completed shards produced the session's most valuable findings and refuted two planning claims.
+- **Measure a constant directly rather than differencing two full runs.** A plan wanted to attribute cost between per-pass startup overhead and worker count, and proposed three full-suite runs to do it. The startup constant takes ~2 minutes: time one trivial test file once, then six times sequentially -- the difference is 5x the per-pass cost, which is startup plus a negligible test body. It isolates the variable *better* than differencing two full runs, because no suite-execution time is mixed in.
+- **Kill the driver before the workers, and path-scope every kill.** Killing workers alone leaves a backgrounded retry loop reparented to PID 1, which simply re-runs the shard; the symptom is a shard logging `exit=143` (your own SIGTERM) with an incremented attempt count while the run continues after you believe it dead. And never `pkill` by a generic tool name -- `pkill -9 -f "vitest"` matches other repositories' runs on the same machine. Scope by path.
 
 ## Execution Surfaces
 
