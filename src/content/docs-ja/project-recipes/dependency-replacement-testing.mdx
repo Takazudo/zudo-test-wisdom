@@ -1,0 +1,282 @@
+---
+title: 依存ライブラリ差し替えのテスト
+description: 移行の証明としての「旧実装 vs 候補実装」差分テスト -- 両ライブラリを使い捨てのハーネスに閉じ込め、入力ドメイン全体を列挙し、正規化した出力の差分を機械可読なインベントリに落とし、未分類の差異で落とし、受け入れたケースを恒久的なリグレッションテストに昇格させる。
+sidebar_position: 5
+---
+
+あるライブラリを別のライブラリに差し替える変更は、スイートが緑であることを根拠にそのまま通されてしまう可能性が最も高い変更です。差し替え先はインストールでき、既存のテストはすべてパスし、差分は`package.json`の1行にしか見えません。しかしそれらのテストは、旧ライブラリの振る舞いのうち、たまたま誰かが気にした箇所についてだけ書かれたものです -- 数百万の点を持つ契約から、数十点をサンプリングしただけのものにすぎません。パスすることが証明するのは、そのサンプル上で候補が旧ライブラリと一致するという事実だけです。ドメインの残りについては何も語らず、差し替えで違いが出るのはまさにその残りの部分です。
+
+このギャップを埋める手法が**差分テスト（differential testing）**です。旧実装と候補実装を同じ入力に対して走らせ、出力を比較し、その結果として得られる差異の集合を -- スイートの色ではなく -- レビューして承認する成果物として扱います。
+
+## ユニットテストが承認できるのはリファクタリングであって差し替えではない
+
+リファクタリングと依存ライブラリの差し替えは、差分の見た目こそ同じですが、リスクの質はまったく異なります。
+
+自分のコードをリファクタリングするとき、旧実装と新実装は同じ作者、同じ意図、そしてどの振る舞いが重要かを分かっている人が書いたテストスイートを共有しています。スイートはまさにその振る舞いを固定するために作られたものなので、オラクルとして妥当です。
+
+依存ライブラリを差し替えるとき、候補は**誰も書き下していない**契約の別実装です。別の人たちが、同じ仕様に対する自分たちの読み方に基づき、自分たちのデータスナップショットと自分たちのバグ -- 中には意図的に修正したものもあります -- を抱えて作ったものです。あなたのスイートがカバーしているのは、あなたのプロダクトがたまたま踏んだ振る舞いだけです。差し替えによる差異はその補集合に存在し、しかもその補集合は単に未テストなのではありません。列挙すらされていません。誰もテストしようと思いつかなかった振る舞いを、リストアップすることはできないのです。
+
+<Warning>
+
+「新しいライブラリでも全テストがパスした」は、あなたのスイートのカバレッジについての言明であって、2つのライブラリが一致していることの言明ではありません。それを移行の根拠として提示するのは、最も純粋な形の[偽グリーン](../test-integrity/index.mdx)です -- スイートが緑なのは、移行の成否を分ける問いをそもそも一度も問うていないからです。
+
+</Warning>
+
+## 完全一致は前提ではなく仮説である
+
+依存ライブラリを差し替えるとき、人は差異ゼロを目指し、どんな差異も候補側の欠陥だと読みたくなります。その直感は、危険と言えるほどの頻度で間違っています。同じ契約の2つの正しい実装は、正当に食い違いうるからです。
+
+- **バージョン付きデータ。** 公開データセットに裏打ちされたもの -- Unicodeテーブル、タイムゾーンルール、public suffix リスト、通貨コード、絵文字シーケンス -- はすべて、そのデータのスナップショットを同梱しています。1年違いでリリースされた2つのライブラリは異なるスナップショットを抱えており、変化のあった箇所については新しい方が*より*正しいのであって、より誤っているのではありません。
+- **意図的に修正された上流のバグ。** 広く使われているライブラリを再実装した候補は、その既知の欠陥を意図的に修正していることが少なくありません。そこで旧実装の出力に一致させるということは、置き去りにしようとしていたバグを再現するということです。
+- **仕様適合の厳格化。** 新しい実装は、旧実装がたまたま受理していた入力を拒否したり、後の仕様改訂で明確化されたエッジケースを別扱いにしたりします。
+
+したがって移行のゴールは「差異ゼロ」ではありません。**名前を付けられない差異がゼロ**であることです。完全一致はハーネスが検証にかける仮説であり、その仮説が棄却されたときに目指すべき結末は、すべてのクラスに文章化された理由が付いた、小さく完全に分類された差分です。
+
+<Note>
+
+この捉え直しこそがレビューを可能にします。「この2つのライブラリは同じか？」は、有限の時間では答えようのない問いです。「2つの名前付きクラスに属する1,855件の差異があり、それぞれに理由があります。受け入れますか？」は、レビュアーが実際に答えられる問いであり、その判断はリポジトリの履歴に残ります。
+
+</Note>
+
+## 5ステップのプロトコル
+
+### 1. 両ライブラリを移行専用ハーネスに閉じ込める
+
+候補を旧ライブラリと並べてインストールしますが、両方をimportするのは**ただ1か所**、移行ハーネスだけにします。プロダクションコードは差し替えが着地するまで旧ライブラリをimportし続け、候補をimportすることは一度もありません。
+
+```json
+// package.json -- both present, but only for the duration of the migration
+{
+  "dependencies": {
+    "unicode-categories-old": "^3.4.0"
+  },
+  "devDependencies": {
+    "unicode-categories-candidate": "^1.2.0"
+  }
+}
+```
+
+この閉じ込めから2つの性質が導かれます。プロダクションは常に2つのうち正確に1つだけに依存するため、差し替えは「誰にも筋道を追えない二重経路の期間」ではなく単一のアトミックな変更のままです。そしてハーネスの寿命は構造的に有限になります。すでに削除が予定されているものをimportしているので、いつのまにか恒久的なインフラに昇格することができないのです。
+
+<Tip>
+
+ハーネスは、その一時的な立場が目に見える場所に置いてください -- `src/`ではなく`tools/migration/`です。通常のテストディレクトリに置かれた差分ハーネスは、次の保守者にはリグレッションスイートに見えます。そしてその人は、それを壊さないために両方のライブラリを永久にインストールし続けることになります。
+
+</Tip>
+
+### 2. ドメインが扱える規模なら、有効な入力をすべて生成する
+
+既存スイートを悪いオラクルにしていた原因はサンプリングでした。ですからドメインが許すのであれば、ハーネスをサンプリングの上に建ててはいけません。この種の差し替えは、驚くほど多くの場合に**有限で列挙可能な**入力ドメインを持っています。全Unicodeスカラー値、全バイトペア、有界なenumの全値、少数のフラグの全組み合わせ、といった具合です。ドメイン全体が「待ってもいい」と思える実行時間に収まるなら、そのすべてを列挙すればカバレッジの問題は完全に消滅します。
+
+```typescript
+// tools/migration/unicode-category-diff.ts
+// Migration-only: the ONLY module that imports both libraries. It is deleted
+// together with the old dependency once the swap lands.
+import { writeFileSync } from "node:fs";
+import * as current from "unicode-categories-old";
+import * as candidate from "unicode-categories-candidate";
+
+/** Every Unicode code point except the surrogate range: 0x110000 - 0x800. */
+const SCALAR_VALUE_COUNT = 1_112_064;
+
+function* scalarValues(): Generator<number> {
+  for (let cp = 0x0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue; // surrogates are not scalar values
+    yield cp;
+  }
+}
+```
+
+ドメインが本当に列挙不能な場合 -- 任意の文字列、実世界のドキュメント、その他あらゆる非有界なもの -- は、1層ではなく3層で代替します。実際の本番入力からなる**レビュー済みコーパス**、仕様上の**境界ケース**の明示的なリスト（空、最大長、仕様に記載されたすべてのエッジ）、そして再現可能に実行できるようシードを固定したプロパティベースの生成器による**生成ケース**です。この組み合わせは全列挙より弱く、移行の記録にも弱いものとして書くべきですが、それでも既存のユニットテストがたまたま名指ししていた一握りの入力よりはるかに優れています。
+
+<Warning>
+
+全列挙のつもりのハーネスが黙って部分集合しか回っていなかった場合、出てくるのは考えうる限り最も安心できる結果 -- ごく小さな差異件数です。実際に歩いたドメインのサイズをアサートしてください -- 次のステップの比較ループは、まさにそのチェックで終わっています。さもないとループ境界のタイプミスが「健康診断で異常なし」に化けます。
+
+</Warning>
+
+### 3. 正規化した意味的出力を比較し、機械可読なインベントリにする
+
+同じ問いに答える2つのライブラリが、同じ語彙で答えてくれることはまずありません。差分を取る前に、両者を1つの意味表現へ正規化してください -- そうしないとすべての入力が差異として並び、インベントリはただのノイズになります。そのうえで結果はコンソールではなく**ファイル**へ書き出します。インベントリはレビュアーが読み、ゲートがアサートする対象の成果物なので、構造化されていて、完全で、差分が取れる必要があります。
+
+```typescript
+// tools/migration/unicode-category-diff.ts (continued)
+// Both libraries classify a code point, but one returns a long name
+// ("Punctuation, other") and the other the general-category abbreviation
+// ("Po"). Fold them into one vocabulary, or all 1,112,064 scalars diverge.
+const LONG_NAME_TO_ABBREVIATION: Record<string, string> = {
+  "Punctuation, other": "Po",
+  "Mark, non-spacing": "Mn",
+  "Symbol, other": "So",
+  "Other, not assigned": "Cn",
+  // ...one entry per Unicode general category
+};
+
+function normalize(raw: string): string {
+  const abbreviation = raw.length <= 2 ? raw : LONG_NAME_TO_ABBREVIATION[raw];
+  // An unmapped value must throw, never fall through to a shared default --
+  // a default would fold two genuinely different answers into agreement.
+  if (!abbreviation) throw new Error(`unmapped category: ${raw}`);
+  return abbreviation;
+}
+
+const format = (cp: number) =>
+  `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`;
+
+export type Divergence = {
+  codePoint: string;
+  current: string;
+  candidate: string;
+};
+
+const divergences: Divergence[] = [];
+let compared = 0;
+
+for (const cp of scalarValues()) {
+  compared += 1;
+  const a = normalize(current.categoryOf(cp));
+  const b = normalize(candidate.categoryOf(cp));
+  if (a !== b) {
+    divergences.push({ codePoint: format(cp), current: a, candidate: b });
+  }
+}
+
+if (compared !== SCALAR_VALUE_COUNT) {
+  throw new Error(`compared ${compared} scalars, expected ${SCALAR_VALUE_COUNT}`);
+}
+
+writeFileSync(
+  "tools/migration/divergences.json",
+  JSON.stringify({ compared, divergences }, null, 2),
+);
+```
+
+<Danger>
+
+差分ハーネスが最も簡単に骨抜きになるのが正規化です。追加する畳み込みの一つひとつ -- 小文字化、トリム、カテゴリの統合、数値型への強制変換 -- は、「見ないと事前に決めた差異のクラス」です。行きすぎた正規化器は、2つのライブラリが重要な点で食い違っているにもかかわらず差異件数をゼロまで押し下げられます。各畳み込みが何を消しているのかを書き残し、それが振る舞いの違いではなく語彙の違いであることを根拠づけてください。
+
+</Danger>
+
+### 4. 未分類の差異で落とす
+
+ゲートの条件は「インベントリが空であること」ではありません。「インベントリのすべてのエントリが、誰かが名前を付けて説明したクラスに属すること」です。受け入れる各クラスには、機械的に検査できる述語と、文章化された理由を与えます。そしてそのファイルは、他のあらゆる変更と同じようにコードレビューを通ります。
+
+```typescript
+// tools/migration/classified-divergences.ts
+// Every accepted class needs a name AND a reason. An entry with a predicate but
+// no reason is not a classification -- it is a silenced failure with extra steps.
+import type { Divergence } from "./unicode-category-diff";
+
+export const ACCEPTED_CLASSES = [
+  {
+    name: "newly-assigned-punctuation-and-symbols",
+    reason:
+      "The candidate ships a newer Unicode data version than the old library pinned. These scalars are unassigned in the old snapshot and carry a real category in the new one.",
+    matches: (d: Divergence) => d.current === "Cn" && d.candidate !== "Cn",
+  },
+  {
+    name: "U+111C9-reclassified-punctuation-to-mark",
+    reason:
+      "This scalar's general category changed between the two data versions. The candidate reflects the current standard and the old library is stale; pinned below by a permanent regression test.",
+    matches: (d: Divergence) => d.codePoint === "U+111C9",
+  },
+];
+```
+
+そのうえでゲートは2つのアサーションを行います。そして2つめは1つめと同じくらい重要です。
+
+```typescript
+// tools/migration/divergences.test.ts
+import { describe, it, expect } from "vitest";
+import report from "./divergences.json";
+import { ACCEPTED_CLASSES } from "./classified-divergences";
+
+describe("old vs candidate divergence inventory", () => {
+  it("classifies every difference", () => {
+    const unclassified = report.divergences.filter(
+      (d) => !ACCEPTED_CLASSES.some((c) => c.matches(d)),
+    );
+    expect(unclassified).toEqual([]);
+  });
+
+  it("holds each class to the count that was reviewed", () => {
+    const counts = Object.fromEntries(
+      ACCEPTED_CLASSES.map((c) => [
+        c.name,
+        report.divergences.filter(c.matches).length,
+      ]),
+    );
+    expect(counts).toEqual({
+      "newly-assigned-punctuation-and-symbols": 1854,
+      "U+111C9-reclassified-punctuation-to-mark": 1,
+    });
+  });
+});
+```
+
+述語だけで分類していると、そのクラスは誰もレビューしていない差異まで吸収してしまいます。候補をパッチバージョン1つ上げるだけで、新たな100個のスカラーが既存の述語に静かにマッチしてパスする、ということが起こります。クラスごとに件数を固定しておけば、それは「どのクラスがどれだけ増えたか」を告げる赤いテストになります。
+
+<Note>
+
+理由が「よく分からないが問題なさそう」と読めるクラスは、ラベルを貼っただけの未分類の差異です。差分を説明できないのであれば、誠実な選択肢は「移行をブロックする」か「リスクを明記したうえで、文章として明示的に受け入れる」のどちらかであって、ゲートを緑にするための述語ではありません。
+
+</Note>
+
+### 5. 受け入れたケースを昇格させ、旧実装とハーネスを削除する
+
+インベントリが証明するのは、差し替えが*今日*安全だということです。次の依存バージョンアップについては何も証明しませんし、ハーネスとともに消えてなくなります。ですから何かを削除する前に、受け入れた境界ケースを一つひとつ、出荷コードに対して走り移行のことを何も知らない**恒久的なリグレッションテスト**に変換します。
+
+```typescript
+// src/unicode/category.test.ts
+// Permanent. Outlives the harness, the old library, and this migration.
+// Pins the one intentional behavior change so a future dependency bump cannot
+// silently revert it to the old library's answer.
+it("classifies U+111C9 as a non-spacing mark, not punctuation", () => {
+  expect(categoryOf(0x111c9)).toBe("Mn");
+});
+```
+
+そのうえではじめて、旧依存、ハーネス、インベントリ、分類ファイルを、同じコミットか直後のコミットで削除します。差し替え後に残された差分ハーネスは、ゴールデンコーパスのレシピが描く劣化の形とまったく同じものです。誰も触っていないからパスし続け、2つめのライブラリをロックファイルに永久に留め、もはや誰も行っていない比較をアサートし続けます。
+
+<Info>
+
+恒久的なリグレッションテストこそが、この移行の唯一の永続的な成果物です。それ以外 -- ハーネス、インベントリ、分類の述語、ライブラリの2つのコピー -- はすべて足場であり、建物より長生きした足場は、次の保守者が怖くて外せないものになります。
+
+</Info>
+
+## 実例：Unicodeカテゴリライブラリの差し替え
+
+上記のプロトコルは、通常のユニットテストでは承認しようのなかったある差し替えから生まれました。あるUnicode一般カテゴリのライブラリを別のライブラリに置き換える、という作業です。既存スイートが踏んでいた文字は数十個 -- ASCIIの約物、CJKのサンプルがいくつか、絵文字が1つ -- で、候補に対してもそのまま緑のままでした。その緑には何の意味もありません。カテゴリライブラリの興味深い振る舞いは、誰もテストを書かない数十万個のコードポイントの側にあるからです。
+
+一方でドメインは有限です。全列挙による比較は、旧ライブラリと候補ライブラリを**1,112,064**個のUnicodeスカラー値すべてに対して走らせました。そうして得られたインベントリに含まれる差異のクラスは、ちょうど2つでした。
+
+- **新たに認識された約物・記号のスカラーが1,854個。** 旧ライブラリのデータスナップショットでは未割り当て、候補のスナップショットでは割り当て済み。純粋なデータバージョンのドリフトであり、しかも正しい方向へのドリフトです。
+- **再分類が1件：`U+111C9`**。カテゴリが約物からマークへ変わっていました。新規データではなく、2つのライブラリが積極的に食い違っているスカラーです。両者が同梱するデータバージョンの間で、Unicodeコンソーシアムがこのスカラーの一般カテゴリを変更したためです。
+
+このインベントリがあったからこそ、移行はレビュー可能になりました。これがなければ選択肢は「緑のスイートを信じる」か「2つのライブラリのソースを読む」かの二択でした。インベントリがあれば、実装者は想定内のデータバージョンのドリフトとパーサのリグレッションの可能性とを切り分け、ドリフトではない唯一のエントリである再分類1件だけをじっくり検討し、その意図的な差異を固定する境界テストを追加し、そのうえではじめて旧ライブラリを削除できました。
+
+<Note>
+
+結果の形に注目してください。1,112,064件の入力に対して差異は1,855件、そしてそのうち**1件たりとも**既存のテストスイートには現れていませんでした。スイートは差し替えの根拠として不十分だったのではありません。根拠を生み出すことが構造的に不可能だったのです。入力の集合と差異の集合が、ドメインの中で互いに素だったからです。
+
+</Note>
+
+## バイト単位の一致は移植のためのものであって、差し替えのためのものではない
+
+remark/rehypeレシピの[一致のオラクル](./remark-rehype-plugin-testing.mdx#後半：ゴールデンフィクスチャ群（インテグレーション）-一致のオラクルとしてのコーパス)のパターンは、受け入れ基準をリポジトリに入れた参照出力との**バイト単位**の同一性に置いています。そしてその基準は、あの文脈においてはまったく正しいものです。あそこで論じられているのは**忠実な移植**、すなわち同じパイプラインを別言語で再実装したものです。参照実装が構造的に真実を定義し、両者は同じデータどころか同じバグまで抱えており、したがってあらゆる差異は移植のバグであり、差異ゼロは実際に到達可能です。
+
+依存ライブラリの差し替えは、この前提のすべてを反転させます。候補はあなたのパイプラインの再実装ではありません。あなたとは別々に同じ契約を読んだ他人の実装であり、自分たちのデータスナップショットと、自分たちが意図的に修正したバグを抱えています。構造的に真実を定義するものが存在しない以上、バイト単位の同一性は目標になりません -- それを要求することは、候補を「*より*正しい」という理由で却下するか、もっと悪ければ既知の誤った振る舞いを再現するようパッチを当てることを意味します。あのパターンから引き継ぐべきは規律の方です -- 固定された参照、機械的な比較、判断ではなくレビュー対象としての差分。そのうえで受け入れ基準だけを差し替えます。**差異ゼロ**ではなく、**未分類の差異ゼロ**です。
+
+## 各ステージをどこで実行するか
+
+3つのステージはコストも寿命もまったく異なるため、対応する[実行ティア](../decision-guide/execution-tiers.mdx)も異なります。
+
+| ステージ | ティア | いつ |
+| ---- | ---- | ---- |
+| 旧実装 vs 候補の全列挙差分 | T4（ローカルヘビーレーン） | 移行につき1回、手動で実行。数分かかり、両ライブラリのインストールを必要とするが、それが成り立つのは差し替え期間中だけ |
+| 差分インベントリのゲート（分類＋クラスごとの件数） | T1（PRゲート） | 移行PR上で、ハーネスが存在する間だけ -- レビュー中に候補のバージョンが上がったことを可視化するのがこれ |
+| 昇格させた境界リグレッションテスト | T1（PRゲート） | 永続的に。ハーネスが消えたあとは、背後に移行の仕掛けを何も持たない普通のユニットテスト |
+
+全列挙の実行を意図的にCIゲートに*しない*点が重要です。これは1人のレビュアーが1度だけ読む1つのインベントリを生成するために存在します。CIに組み込むということは、両方のライブラリを無期限にインストールし続けるということであり、それこそステップ5が防ごうとしている結末そのものです。
+
+差し替える対象が大きい、あるいは非有界な入力ドメインを持ち、契約を誰も所有していない場合 -- パーサ、フォーマッタ、データ駆動のルックアップテーブル、ハッシュや正規化のルーチン、日付ライブラリ -- には、このプロトコルを使ってください。エントリポイントが数個しかない小さな依存であれば、通常のユニットテストで本当に十分です。分かれ目はライブラリの大きさではなくドメインの大きさです。変わったかもしれない振る舞いを列挙できないのなら、「何も変わっていない」と緑のスイートに言わせてはいけません。
