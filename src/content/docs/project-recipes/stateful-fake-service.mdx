@@ -1,0 +1,181 @@
+---
+title: Stateful Fake Service for Zero-Network E2E
+description: "A stateful in-memory HTTP fake that covers a cloud service's routes, streams, guards, failures, grants, and request evidence so a complete user journey can run deterministically without the network."
+sidebar_position: 6
+---
+
+## The Distance from a Stub to a Service
+
+The `createMockBackend()` pattern in [Tauri App Testing](./tauri-testing.mdx#backend-bridge-mock-adapter-pattern) is the minimal useful replacement for an external dependency. It supplies canned return values for a table of functions, making it a good fit for unit tests and component tests whose question is whether one caller handles one result correctly.
+
+A full e2e journey asks a different question. A cloud-backed feature opens and edits a document, while its wider behavior also includes event-stream reconnection, remote edits, history-head adoption, publish retries, and hosted-state transitions. Those actions are coupled through server state even when the single browser journey exercises only one representative path. A fake function table can return each expected value, but it cannot establish that a later response follows from an earlier request. For this scope the test needs a fake **service**, not a fake **function table**.
+
+The service remains in-process and uses no network. The application's external-service adapter sends requests to the fake transport, which routes on `(method, path)` and returns real HTTP-shaped responses: status, headers, body, and streaming bodies. This is the adapter seam described in [Choosing the External-Service Test Seam](../decision-guide/external-service-seam.mdx), applied at enough depth to exercise the client state machine rather than one adapter method.
+
+## Model the HTTP Surface and Its State
+
+Keep the fake's state explicit. Its route table should cover the product surface used by the walking-skeleton journey, including server-sent event (SSE) routes; an unimplemented route should fail loudly instead of returning a friendly default. The example below is abbreviated, but its shape is the important part:
+
+```typescript
+type FakeResponse = {
+  status: number;
+  headers?: Record<string, string>;
+  body?: string;
+  stream?: ReadableStream<Uint8Array>;
+};
+
+type FakeRequest = {
+  method: "GET" | "PUT" | "POST";
+  path: string;
+  headers: Record<string, string>;
+  body?: string;
+};
+
+type DocumentState = {
+  generation: number;
+  historyHead: string;
+  body: string;
+  hosted: boolean;
+};
+
+class FakeCloudService {
+  private document: DocumentState = {
+    generation: 7,
+    historyHead: "h-7",
+    body: "initial",
+    hosted: false,
+  };
+  private idempotentReplies = new Map<string, FakeResponse>();
+
+  async fetch(request: FakeRequest): Promise<FakeResponse> {
+    const route = `${request.method} ${request.path}`;
+
+    switch (route) {
+      case "GET /v1/documents/current":
+        return this.getDocument(request);
+      case "PUT /v1/documents/current":
+        return this.putDocument(request);
+      case "POST /v1/documents/current/publish":
+        return this.publishDocument(request);
+      case "GET /v1/events":
+        return this.openEventStream(request);
+      default:
+        throw new Error(`FakeCloudService has no route for ${route}`);
+    }
+  }
+}
+```
+
+The fake is deliberately HTTP-shaped even though it is in memory. The client still has to parse bodies, distinguish 401/403/409 responses, preserve idempotency headers, and consume an SSE stream. It cannot pass by calling a test-only method that is easier than the production protocol.
+
+## Preserve the Server's Guards
+
+State is useful only when it enforces the same invariants as the real server. The fake should reject stale writes when either the submitted generation or history head differs from its current state. The resulting `409` must include the current head in an adoptable form so the client can enter its real conflict flow, adopt the remote state, and retry. A generic `409` with a canned message tests an error banner, not conflict recovery.
+
+The same rule applies to the other guards:
+
+- Store the first response for each idempotency key and replay that response for later matching requests. A retry must not apply the mutation twice.
+- Authorize each guarded route from the token's grant profile. A valid token without `publish` permission receives `403`; it does not silently succeed because the test is on a happy path.
+- Treat an expired token as unauthenticated and return `401`, separately from the valid-but-underprivileged `403` case.
+
+These are not edge-case decorations. Generation conflicts, replay, and grants are transitions in the client state machine. If the fake omits them, focused client-state-machine suites cannot exercise the product's most failure-prone behavior realistically.
+
+## Make Failure Controls a First-Class API
+
+Do not create failure states by racing `page.route()`, killing a proxy, or toggling the machine's network at just the right millisecond. Expose named, deterministic controls on the fake itself:
+
+```typescript
+type Grant = "read" | "write" | "publish";
+
+export const fixtureTokens = {
+  fullAccess: { value: "fixture-full", grants: ["read", "write", "publish"] },
+  noPublish: { value: "fixture-no-publish", grants: ["read", "write"] },
+  expired: { value: "fixture-expired", grants: [], expired: true },
+} as const satisfies Record<
+  string,
+  { value: string; grants: readonly Grant[]; expired?: boolean }
+>;
+
+export type MockControls = {
+  dropEventStreams(): void;
+  refuseNextEventStream(): void;
+  triggerRemoteEdit(body: string): void;
+  triggerHostedTransition(): void;
+  requestTrace(): readonly RedactedRequest[];
+};
+
+export type RedactedRequest = {
+  method: string;
+  path: string;
+  headers: {
+    "content-type"?: string;
+    "idempotency-key"?: string;
+  };
+  bodySha256?: string;
+};
+
+declare global {
+  interface Window {
+    __mockControls: MockControls;
+  }
+}
+```
+
+`dropEventStreams()` closes every open SSE response and lets reconnect behavior run. `refuseNextEventStream()` makes exactly the next stream attempt fail, without depending on timing. `triggerRemoteEdit()` advances the generation and history head before emitting the corresponding event. `triggerHostedTransition()` changes the stored hosted state and emits the same event the cloud service would. Each control names a domain event, so a failed test says which condition was requested rather than which packet happened to disappear.
+
+The fixture tokens are equally intentional. Full access drives the complete happy journey; focused tests use no-publish to prove that guarded publish routes return `403` and expired to prove the distinct `401` path. The values belong only to the fake and must never resemble production credentials.
+
+## Assert the Request, Not Only the Screen
+
+The fake records a request trace after authentication but stores only a redacted projection. Make token freedom structural: `RedactedRequest.headers` has no `authorization`, `cookie`, or arbitrary string index, and the recorder constructs that type from an allowlist rather than copying headers and deleting a few known secrets. Store a digest or a deliberately redacted summary when bodies can contain credentials. Add a unit assertion that serializing the trace contains none of the fixture token values; that makes “token-free” a property the fake proves, not a comment beside a sanitizer.
+
+Expose the trace through the test bridge, such as `window.__mockControls`, and let Playwright assert the protocol evidence:
+
+```typescript
+await page.getByRole("button", { name: "Save" }).click();
+
+const guardedPut = await page.evaluate(() =>
+  window.__mockControls
+    .requestTrace()
+    .find(
+      (request) =>
+        request.method === "PUT" &&
+        request.path === "/v1/documents/current",
+    ),
+);
+
+expect(guardedPut).toMatchObject({
+  headers: { "content-type": "application/json" },
+});
+expect(JSON.stringify(guardedPut)).not.toContain("fixture-full");
+```
+
+The UI may look correct because local optimistic state changed even when the guarded `PUT` never happened. The trace closes that gap: it proves the user action crossed the adapter boundary with the expected method and path. This is also an evidence contract. As with [Live-Proof Evidence Contracts](../test-integrity/live-proof-evidence-contracts.mdx), the proof should fail closed when the expected observation is absent rather than treating a plausible screen as a substitute.
+
+## Run One Walking Skeleton Through the Fake
+
+A valuable zero-network e2e does not try to exhaust every route. It connects the important layers in one representative journey:
+
+1. Start with the full-access fixture and load the current document over `GET`.
+2. Edit through the normal UI and save through the guarded `PUT`, asserting that generation and history-head preconditions were sent.
+3. Read the redacted trace and assert that the guarded write was followed by the expected refetch.
+4. Publish once through the normal UI with an idempotency key, then trigger the hosted transition and observe the accepted state arrive through SSE.
+5. Finish on that stable accepted-state UI without adding another browser branch or token profile.
+
+The fake's remaining controls and fixture profiles still need coverage, but not as extra steps or variants in this journey. Focused unit, adapter, and component suites should drop or refuse streams, trigger a remote edit and adoptable `409`, replay an idempotency key, and pin the no-publish `403` and expired-token `401` paths.
+
+The walking skeleton's job is narrower: prove that one representative path keeps routing, state, transport shapes, client transitions, trace evidence, and rendered behavior connected without reaching a live cloud service. The cheaper suites grow around it while the browser journey stays singular.
+
+## Known Weakness: Client and Fake Can Drift Together
+
+<Warning>
+
+The fake is authored beside the client. If the vendored API contract drifts from upstream, the client and fake can adopt the same wrong interpretation and **drift together while every test stays green**. A richer fake increases journey confidence; it does not independently prove upstream compatibility.
+
+</Warning>
+
+Treat that weakness as part of the architecture, not a footnote. Every vendored contract needs a `VENDORED.md` that pins the exact upstream commit SHA. That pin may advance only after named parity suites and fixture suites pass against the proposed upstream revision. “The e2e suite is green” is not an acceptable condition, because that is the self-agreeing suite whose blind spot this control addresses.
+
+Maintain a tracked upstream-review loop separately from the vendored pin: periodically inspect upstream changes since the last review, record the last **reviewed SHA** in its own marker, and open explicit follow-up work for contract changes. The vendored SHA says what the client currently implements; the reviewed SHA says how far upstream somebody has actually examined. Keeping both markers prevents a pin from being mistaken for evidence of a recent review and makes review lag visible even when no vendored files change.
+
+Use live or upstream-owned contract tests where the risk justifies them, but keep them out of the deterministic walking skeleton. The zero-network fake supplies fast, reproducible product-journey coverage. Pinned parity, fixture suites, and the reviewed-SHA loop supply the independent evidence that keeps client and fake anchored to reality.

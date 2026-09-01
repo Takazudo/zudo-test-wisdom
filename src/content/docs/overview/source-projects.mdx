@@ -14,7 +14,7 @@ They are organized into four categories: [Tool Patterns](../tool-patterns/index.
 
 | Project | Type | Key Testing Patterns |
 |---------|------|---------------------|
-| **zudo-text** | Tauri text editor (monorepo) | Vitest unit across workspace packages, Rust `cargo test` core crate, dual-browser Playwright (Chromium CI / WebKit local), mock backend adapter + console-error monitoring, tiered e2e tags |
+| **zudo-text** | Tauri text editor (monorepo) | Vitest unit across workspace packages, Rust `cargo test` core crate, dual-browser Playwright (Chromium CI / WebKit local), mock backend adapter + console-error monitoring, stateful in-memory fake service, walking-skeleton e2e, tiered e2e tags |
 | **zzmod** | Content website (zfb + Preact islands) | Vitest unit (jsdom, Testing Library/Preact, MSW), production-build Playwright, tag-based @smoke/@heavy lanes, CI image interception, heavy E2E off-CI via local b4push |
 | **pgen** | Pattern generator (monorepo + GPU runtime) | Deterministic PNG rendering, Miniflare + D1/R2 worker integration, tag-tiered Playwright e2e, GPU visual-regression (SSIM drift, GLSL parity) |
 | **mdx-formatter** | CLI + npm library (Rust napi) | Contract-testing the Rust engine via Vitest, idempotency invariant, snapshot regression vs committed baselines, CLI integration via execFile |

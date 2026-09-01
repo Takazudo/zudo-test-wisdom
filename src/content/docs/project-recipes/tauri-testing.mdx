@@ -111,9 +111,17 @@ The core crate pattern lets you run `cargo test` in CI without building the full
 
 </Tip>
 
+<Warning>
+
+Once `cd core && cargo test` becomes the project's only Rust gate, a `#[cfg(test)]` module added to the app crate because it touches Tauri dependencies silently never runs — not in CI, not in the pre-push gate, and not in any scheduled re-exam. This happened in practice: seven security-relevant transport tests covering redirect fail-closed behavior, SSE boundary parsing, and token redaction sat in an app crate outside every automated tier (zudolab/zudo-text#5855).
+
+Close both sides of the gap: either **extract the pure logic into the core crate**, or **wire an explicit app-crate test run on a runner that can build the Tauri crate**. When adopting the core crate pattern, also audit the app crate for stray `#[cfg(test)]` modules so existing tests do not disappear from the gate unnoticed.
+
+</Warning>
+
 ## Backend Bridge Mock Adapter Pattern
 
-In a Tauri app, the frontend communicates with the Rust backend through IPC commands. For frontend testing, mock this bridge:
+In a Tauri app, the frontend communicates with the Rust backend through IPC commands. For frontend testing, mock this bridge at the adapter seam. The `createMockBackend()` example below is the minimal form: a table of functions with canned defaults and targeted overrides, which is the right fit for unit and component tests.
 
 ```typescript
 // src/adapters/backend.ts -- the real adapter
@@ -170,6 +178,10 @@ import { createMockBackend } from "./adapters/mock-backend";
 const backend =
   "__TAURI_INTERNALS__" in window ? tauriBackend : createMockBackend();
 ```
+
+In a packaged Tauri app, the transport is Rust-native HTTP and SSE behind Tauri IPC channels. Browser-level network mocking such as MSW cannot see that traffic, so the adapter seam is a choice forced by the architecture, not merely a testing preference. See [Choosing the External-Service Test Seam](../decision-guide/external-service-seam.mdx) for the full seam decision.
+
+A full-journey e2e test needs the [stateful fake service](./stateful-fake-service.mdx) form instead of this minimal stub: an in-memory service that preserves the real server's guards, exposes deterministic failure controls, and records a redacted request trace. Keep the small adapter for focused unit and component cases; use the stateful form when the journey must prove that earlier requests drive later responses across the client state machine.
 
 ## The 8-Step Escalation Ladder
 

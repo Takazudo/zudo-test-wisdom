@@ -14,7 +14,7 @@ sidebar_position: 2
 
 | プロジェクト | タイプ | 主要なテストパターン |
 |------------|-------|-------------------|
-| **zudo-text** | Tauriテキストエディタ（モノレポ） | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、階層化e2eタグ |
+| **zudo-text** | Tauriテキストエディタ（モノレポ） | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、ステートフルなインメモリフェイクサービス、ウォーキングスケルトンe2e、階層化e2eタグ |
 | **zzmod** | コンテンツWebサイト（zfb + Preactアイランド） | Vitestユニット（jsdom、Testing Library/Preact、MSW）、本番ビルドPlaywright、タグベースの@smoke/@heavyレーン、CI画像インターセプト、ローカルb4push経由のCIオフ重量E2E |
 | **pgen** | パターンジェネレーター（モノレポ + GPUランタイム） | 決定論的PNGレンダリング、Miniflare + D1/R2ワーカーインテグレーション、タグ階層化Playwright e2e、GPUビジュアルリグレッション（SSIMドリフト、GLSLパリティ） |
 | **mdx-formatter** | CLI + npmライブラリ（Rust napi） | VitestによるRustエンジンのコントラクトテスト、冪等性不変条件、コミット済みベースラインに対するスナップショットリグレッション、execFileによるCLIインテグレーション |
