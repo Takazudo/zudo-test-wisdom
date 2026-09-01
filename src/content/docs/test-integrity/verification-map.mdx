@@ -1,0 +1,71 @@
+---
+title: The Per-Feature Verification Map
+description: A feature-level ledger that maps every contract to deterministic evidence, records what each proof cannot establish, and keeps environment-bound outstanding work visible.
+sidebar_position: 5
+---
+
+## End the Architecture Document With the Proof Inventory
+
+A feature architecture document should not end when it has named the components and arrows. It should end with a **verification map**: one row per contract, the deterministic suite or gate that proves it, the limits of that evidence, and the environment in which the evidence is valid. The map is the feature's proof inventory. It lets a reviewer move from “the adapter has a transport seam” to “this exact gate exercises that seam and would go red if its response mapping drifted.”
+
+The unit is the contract, not the test file. One contract may need evidence from several layers, while one suite may prove several contracts. Writing a row for the contract prevents a directory full of green specs from standing in for an argument about coverage. The row must name a reproducible command or gate, not “tested manually” or “covered by E2E.” A reader should be able to find the evidence, run it in the declared tier, and know which claim a green result permits.
+
+That last clause matters. A proof has a boundary as well as a positive claim. Transport tests can prove request serialization, response decoding, and error mapping against a controlled service. They do not prove that a real account can authenticate or that the provider currently accepts the request. A WebKit workflow can prove the browser-rendered frontend path. It does not prove that the same path works inside a signed, packaged macOS application. Put that negative statement in the row beside the green evidence; do not leave it to tribal knowledge.
+
+## A Worked Verification Map
+
+Suppose a desktop client imports remote documents through an external-service adapter. Its architecture document ends with this table:
+
+| Contract | Status | Deterministic evidence | What this evidence proves | What this evidence does not prove | Environment validity |
+| --- | --- | --- | --- | --- | --- |
+| Domain import preserves document order, titles, and stable IDs | **Proven** | `test:import-domain` in the required PR gate | Pure normalization and merge rules over checked-in fixtures, including malformed and duplicate records | The fixtures match the provider's current wire response | Any supported Node runner using the pinned fixture corpus |
+| The adapter emits the required HTTP request and maps success, auth, quota, and malformed-response outcomes | **Proven** | `test:external-service-transport` against the stateful fake service in the required PR gate | The transport contract and every named outcome through the real adapter boundary | A real account session exists, provider auth is accepted, or the live service is reachable | Hermetic Linux CI or local execution with network access disabled; a live-service run is not required for this row |
+| The user can start an import and see success and mapped failures in the frontend | **Proven** | `e2e:import-webkit` in the required PR gate | The walking skeleton through the frontend, command boundary, real adapter, and stateful fake service | Native packaging, a real account session, or real-service traffic | The declared WebKit/dev-server workflow only; it may not be reported as packaged-app evidence |
+| Signed packaged macOS app imports through a real account and the real service | **Outstanding** | No qualifying run recorded; follow `native-verification/real-service-import.md` | Nothing yet; this row remains unproven until the required report is attached | Transport suites prove the contract, not a real account session; WebKit and dev-serve runs do not prove the packaged native path | **Only packaged macOS + real-service traffic qualifies.** Neither Linux/WSL nor the WebKit workflow may be reported for this row; a dev-serve report is invalid evidence |
+
+The fourth row is not an apology underneath the table. It is part of the map. Its status is **Outstanding**, its current evidence says there is no qualifying run, and its environment-validity cell rejects the tempting substitutes by name. If a Linux run shows perfect real-service traffic, it may be useful diagnostic evidence, but it does not close the packaged-macOS row. If WebKit passes against a real account, that still does not exercise the native shell. The ledger fails closed: evidence from the wrong environment cannot be relabeled as the outstanding proof.
+
+<Warning>
+
+A map containing only proven rows is not a verification map. It is a list of successes with the gaps edited out. During design, add the contract before its proof exists and mark it **Outstanding**. During review, deleting an outstanding row requires either qualifying evidence or an explicit product decision that the contract no longer exists -- never merely a nearby green suite.
+
+</Warning>
+
+## Environment Is Part of the Evidence Type
+
+Evidence is not just an artifact; it is an artifact produced under conditions. The tier, operating system, packaging mode, service target, credential class, and mutation policy can all be part of the claim. The [environment-tiered testing framework](../ci-operations/environment-tiered-testing.mdx) explains why local, preview, and production runs have different permissions and failure meanings. The map applies that framework at contract granularity.
+
+Write the validity rule tightly enough that a reviewer can reject a misfiled report without interpretation. “Run on macOS” is too weak when the contract is “the signed packaged app reaches the real service”: a browser opened on a Mac, an unsigned debug shell, and a packaged release are three different environments. “Checked manually” is too weak when the live account, service target, application build, and observed outcome are missing. When any required condition is absent or cannot be established from the retained report, the row remains Outstanding.
+
+This does not make evidence from other environments worthless. A Linux/WSL run may establish that the live API and credentials work. A WebKit run may establish that the frontend reaches the adapter correctly. Those claims deserve their own rows if the feature relies on them. What they may not do is inherit the label of a stronger environment-bound claim. Fail-closed validity preserves the distinction between “we learned something useful” and “we proved this contract.”
+
+## Pair Outstanding Rows With a Manual-Verification Procedure
+
+The map is the index, not the runbook. An environment-bound Outstanding row should point to a sibling manual-verification document, such as `native-verification/real-service-import.md`, that defines the procedure and the report contract. Keep the architectural table short enough to scan; put operational detail beside the feature where the person with the qualifying machine and credentials can follow it.
+
+That companion document should name:
+
+- the exact application artifact and environment that must be used, including packaging or signing requirements;
+- the account and service tier allowed for the run, with secrets referenced but never copied into the report;
+- setup, action, expected observation, cleanup, and any mutation fence;
+- the evidence to retain -- build identity, platform, timestamp, service target, outcome, and scrubbed screenshots or logs;
+- the invalid substitutes: for this case, **a report produced from dev serve is not valid evidence**, nor is Linux/WSL or the WebKit workflow.
+
+The procedure must also say what happens when the run cannot reach a verdict. Missing credentials, an unavailable machine, an unreadable report, or an interrupted cleanup does not become a pass. It leaves the map row Outstanding and records the reason separately. The procedure may make the eventual proof repeatable, but its mere existence proves nothing; only a conforming recorded run changes the row's status.
+
+## Two Fail-Closed Scales
+
+[Fail-Closed Live Proofs and Evidence Contracts](./live-proof-evidence-contracts.mdx) governs one live proof. It separates execution, evidence completeness, and recovery so that a missing artifact or ambiguous exit cannot be reported as a successful run. The verification map governs the larger question: **which proofs exist for the feature at all?**
+
+The two controls operate at different scales:
+
+- the live-proof contract prevents one run from claiming a verdict its evidence cannot support;
+- the verification map prevents a portfolio of green runs from claiming feature coverage it does not possess.
+
+Together they close a common reporting gap. A perfectly fail-closed transport suite can be green and still leave real-account native behavior unproven. Conversely, a correctly named Outstanding row can point to a live procedure whose individual executions retain incomplete evidence. The per-proof contract judges those executions; the feature ledger continues to expose the unproven set until one qualifies.
+
+## Keep the Map Alive
+
+Review the map whenever a contract, execution environment, or required gate changes. Adding a provider outcome means adding or widening a row before the implementation lands. Moving a test from packaged execution to a dev server changes the claim and may reopen a native row. Removing a CI gate turns every row that depended on it Outstanding until replacement evidence exists. A renamed command is documentation drift; a silently weakened environment is coverage drift.
+
+The useful review question is not “are the tests green?” It is “for every contract in this feature, what deterministic evidence earns the claim, what does that evidence not prove, and which rows are still Outstanding?” When the architecture document can answer that without inference, green means what the team says it means -- and no more.
