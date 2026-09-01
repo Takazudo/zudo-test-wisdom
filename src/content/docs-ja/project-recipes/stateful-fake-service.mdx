@@ -1,0 +1,182 @@
+---
+title: ゼロネットワークe2eのためのステートフルなフェイクサービス
+description: クラウドサービスのルート、ストリーム、ガード、障害、権限、リクエスト証跡を再現し、ネットワークなしで一連のユーザージャーニーを決定論的に実行するステートフルなインメモリHTTPフェイク。
+sidebar_position: 6
+---
+
+## スタブとサービスの間にある距離
+
+[Tauriアプリのテスト](./tauri-testing.mdx#backend-bridge-mock-adapter-pattern)で紹介した `createMockBackend()` パターンは、外部依存を差し替えるための最小限で有用な形です。関数テーブルに固定の戻り値を用意するため、ある呼び出し元がある結果を正しく扱えるかを問うユニットテストやコンポーネントテストに適しています。
+
+一連のe2eユーザージャーニーが問うのは別のことです。ユーザーはドキュメントを開いて編集し、イベントストリームの切断と再接続を経験し、リモート編集に遭遇し、新しい履歴ヘッドを採用し、公開処理を再試行し、ホスト済み状態への遷移を目にします。これらの操作はサーバー状態を介して結び付いています。フェイクの関数テーブルでも期待値を順番に返せますが、後のレスポンスが前のリクエストの結果であることは保証できません。この範囲のテストに必要なのは、フェイクの**関数テーブル**ではなくフェイクの**サービス**です。
+
+サービス自体はプロセス内にあり、ネットワークを使いません。アプリの外部サービスアダプターがフェイクトランスポートへリクエストを送り、フェイクは `(method, path)` でルーティングし、ステータス、ヘッダー、本文、ストリーミング本文を備えた本物のHTTPと同じ形のレスポンスを返します。[外部サービスのテスト境界を選ぶ](../decision-guide/external-service-seam.mdx)で説明するアダプター境界を、単一のアダプターメソッドではなくクライアントのステートマシンまで動かせる深さで適用した形です。
+
+## HTTPサーフェスと状態をモデル化する
+
+フェイクの状態は明示的に保ちます。ルートテーブルは、server-sent events（SSE）のルートも含め、ウォーキングスケルトンのユーザージャーニーが使うプロダクトサーフェスを網羅するべきです。未実装のルートは都合のよいデフォルト値を返さず、明確に失敗させます。次の例は省略版ですが、重要なのはこの構造です。
+
+```typescript
+type FakeResponse = {
+  status: number;
+  headers?: Record<string, string>;
+  body?: string;
+  stream?: ReadableStream<Uint8Array>;
+};
+
+type FakeRequest = {
+  method: "GET" | "PUT" | "POST";
+  path: string;
+  headers: Record<string, string>;
+  body?: string;
+};
+
+type DocumentState = {
+  generation: number;
+  historyHead: string;
+  body: string;
+  hosted: boolean;
+};
+
+class FakeCloudService {
+  private document: DocumentState = {
+    generation: 7,
+    historyHead: "h-7",
+    body: "initial",
+    hosted: false,
+  };
+  private idempotentReplies = new Map<string, FakeResponse>();
+
+  async fetch(request: FakeRequest): Promise<FakeResponse> {
+    const route = `${request.method} ${request.path}`;
+
+    switch (route) {
+      case "GET /v1/documents/current":
+        return this.getDocument(request);
+      case "PUT /v1/documents/current":
+        return this.putDocument(request);
+      case "POST /v1/documents/current/publish":
+        return this.publishDocument(request);
+      case "GET /v1/events":
+        return this.openEventStream(request);
+      default:
+        throw new Error(`FakeCloudService has no route for ${route}`);
+    }
+  }
+}
+```
+
+インメモリであっても、フェイクは意図的にHTTPと同じ形を保ちます。クライアントは本文をパースし、401・403・409のレスポンスを区別し、冪等性ヘッダーを維持し、SSEストリームを消費しなければなりません。本番プロトコルより簡単なテスト専用メソッドを呼ぶだけでは通過できません。
+
+## サーバーと同じガードを維持する
+
+状態に価値があるのは、本物のサーバーと同じ不変条件を強制するときだけです。送信されたgenerationまたは履歴ヘッドのどちらかが現在の状態と異なる場合、フェイクは古い書き込みを拒否するべきです。返す `409` には現在のヘッドを採用可能な形で含め、クライアントが本物の競合フローへ入り、リモート状態を採用して再試行できるようにします。固定メッセージだけを伴う汎用的な `409` がテストするのはエラーバナーであり、競合からの復旧ではありません。
+
+ほかのガードにも同じ原則を適用します。
+
+- 各冪等性キーに対する最初のレスポンスを保存し、後続の同一リクエストにはそのレスポンスを再生します。再試行でミューテーションを二重適用してはいけません。
+- トークンの権限プロファイルに基づいて各ガード付きルートを認可します。`publish` 権限のない有効なトークンには `403` を返し、テストが正常系だからという理由で暗黙に成功させません。
+- 期限切れトークンは未認証として扱い、権限不足の有効なトークンに対する `403` とは分けて `401` を返します。
+
+これらは付け足しのエッジケースではありません。generation競合、リプレイ、権限はクライアントのステートマシンにある遷移です。フェイクから省けば、ウォーキングスケルトンはプロダクトで最も障害の起きやすい挙動を避けて歩くことになります。
+
+## 障害制御をファーストクラスのAPIにする
+
+ちょうどよいミリ秒に `page.route()` を競合させたり、プロキシを停止したり、マシンのネットワークを切り替えたりして障害状態を作ってはいけません。フェイク自体に、名前を持つ決定論的な制御を公開します。
+
+```typescript
+type Grant = "read" | "write" | "publish";
+
+export const fixtureTokens = {
+  fullAccess: { value: "fixture-full", grants: ["read", "write", "publish"] },
+  noPublish: { value: "fixture-no-publish", grants: ["read", "write"] },
+  expired: { value: "fixture-expired", grants: [], expired: true },
+} as const satisfies Record<
+  string,
+  { value: string; grants: readonly Grant[]; expired?: boolean }
+>;
+
+export type MockControls = {
+  dropEventStreams(): void;
+  refuseNextEventStream(): void;
+  triggerRemoteEdit(body: string): void;
+  triggerHostedTransition(): void;
+  requestTrace(): readonly RedactedRequest[];
+};
+
+export type RedactedRequest = {
+  method: string;
+  path: string;
+  headers: {
+    "content-type"?: string;
+    "idempotency-key"?: string;
+  };
+  bodySha256?: string;
+};
+
+declare global {
+  interface Window {
+    __mockControls: MockControls;
+  }
+}
+```
+
+`dropEventStreams()` は開いているすべてのSSEレスポンスを閉じ、再接続の挙動を動かします。`refuseNextEventStream()` はタイミングに依存せず、次のストリーム接続だけを失敗させます。`triggerRemoteEdit()` は対応するイベントを送る前にgenerationと履歴ヘッドを進めます。`triggerHostedTransition()` は保存済みのホスト状態を変え、クラウドサービスと同じイベントを送ります。各制御にはドメインイベントの名前が付くため、テスト失敗時には、偶然どのパケットが消えたかではなく、どの条件を要求したかが分かります。
+
+フィクスチャトークンも同じように意図を持たせます。フルアクセスは一連の正常系を動かし、公開不可はガード付き公開ルートが `403` を返すことを証明し、期限切れは別の `401` 経路を証明します。これらの値はフェイクだけに属し、本番クレデンシャルに似せてはいけません。
+
+## 画面だけでなくリクエストをアサートする
+
+フェイクは認証後にリクエスト証跡を記録しますが、保存するのは秘匿情報を除いた射影だけです。トークンが入らないことを構造で保証します。`RedactedRequest.headers` には `authorization`、`cookie`、任意文字列のインデックスがなく、レコーダーは全ヘッダーをコピーして既知の秘密をいくつか削除するのではなく、許可リストからこの型を組み立てます。本文にクレデンシャルが入り得るなら、ダイジェストまたは意図的に秘匿化した要約を保存します。さらに、証跡をシリアライズしてもフィクスチャトークン値が一つも含まれないことをユニットテストで検証します。これにより「トークンフリー」はサニタイザー横のコメントではなく、フェイクが証明する性質になります。
+
+証跡は `window.__mockControls` のようなテストブリッジを通じて公開し、Playwrightからプロトコル上の証拠を検証します。
+
+```typescript
+await page.getByRole("button", { name: "Save" }).click();
+
+const guardedPut = await page.evaluate(() =>
+  window.__mockControls
+    .requestTrace()
+    .find(
+      (request) =>
+        request.method === "PUT" &&
+        request.path === "/v1/documents/current",
+    ),
+);
+
+expect(guardedPut).toMatchObject({
+  headers: { "content-type": "application/json" },
+});
+expect(JSON.stringify(guardedPut)).not.toContain("fixture-full");
+```
+
+ガード付き `PUT` が一度も発生していなくても、ローカルの楽観的状態が変わっただけでUIは正しく見えることがあります。証跡はこの穴を塞ぎます。ユーザー操作が期待するメソッドとパスでアダプター境界を越えたことを証明するからです。これは証拠のコントラクトでもあります。[ライブ証明のエビデンスコントラクト](../test-integrity/live-proof-evidence-contracts.mdx)と同様、期待する観測がなければフェイルクローズにし、それらしく見える画面を代わりの証拠として受け入れてはいけません。
+
+## フェイク上で一つのウォーキングスケルトンを通す
+
+価値のあるゼロネットワークe2eで、すべてのルートを網羅しようとする必要はありません。重要なレイヤーを、一つの一貫したジャーニーとして接続します。
+
+1. フルアクセスのフィクスチャで開始し、`GET` で現在のドキュメントを読み込みます。
+2. ガード付き `PUT` で保存し、generationと履歴ヘッドの事前条件が送られたことを検証します。
+3. SSE接続を切断して再接続を確認し、次のストリームを拒否して決定論的な復旧を確認します。
+4. リモート編集を発生させ、イベントを受け取り、採用可能な `409` に遭遇し、新しいヘッドを採用して再度保存します。
+5. 一つの冪等性キーで公開を2回行い、保存済みミューテーションが一度だけ実行され、レスポンスが再生されることを検証します。
+6. ホスト済み状態への遷移を発生させ、SSEイベントからUIが更新されることを確認します。
+7. 公開不可と期限切れのフィクスチャでガード付き操作を繰り返し、`403` と `401` の挙動を固定します。
+8. 秘匿化済み証跡を読み、ガード付きリクエストが実際に境界を越えたことを検証します。
+
+組み合わせの細部は、引き続き小さなユニットテストとコンポーネントテストで網羅します。ウォーキングスケルトンの役割は別です。ルーティング、状態、トランスポートの形、制御、クライアントの遷移、レンダリング結果が、ライブのクラウドサービスへ接続せずに一続きであることを証明します。
+
+## 既知の弱点：クライアントとフェイクは一緒にドリフトできる
+
+<Warning>
+
+フェイクはクライアントの隣で作られます。vendored APIコントラクトがアップストリームからずれたとき、クライアントとフェイクが同じ誤った解釈を採用し、**一緒にドリフトしても全テストがグリーンのまま**になり得ます。精緻なフェイクはジャーニーへの確信を高めますが、アップストリーム互換性を独立して証明するものではありません。
+
+</Warning>
+
+この弱点を脚注ではなく、アーキテクチャの一部として扱います。vendoredコントラクトごとに `VENDORED.md` を置き、アップストリームの正確なコミットSHAを固定します。そのピンを進められるのは、提案するアップストリームリビジョンに対して、名前の付いたパリティスイートとフィクスチャスイートが通った後だけです。「e2eスイートがグリーン」は条件として認められません。それこそが、この制御で死角を補うべき自己合意型のスイートだからです。
+
+vendoredピンとは別に、追跡可能なアップストリームレビューループを維持します。前回のレビュー以降に生じたアップストリームの変更を定期的に調べ、最後に**レビュー済みのSHA**を専用のマーカーへ記録し、コントラクト変更には明示的なフォローアップ作業を起票します。vendored SHAはクライアントが現在何を実装しているかを表し、レビュー済みSHAはアップストリームのどこまでを誰かが実際に確認したかを表します。両方のマーカーを分けることで、ピンを最近のレビューの証拠と取り違えずに済み、vendoredファイルが変わらなくてもレビューの遅れが見えるようになります。
+
+リスクに見合う場合はライブテストやアップストリーム所有のコントラクトテストを使いますが、決定論的なウォーキングスケルトンとは分離します。ゼロネットワークのフェイクは、高速で再現可能なプロダクトジャーニーのカバレッジを提供します。ピン留めされたパリティ、フィクスチャスイート、レビュー済みSHAのループは、クライアントとフェイクを現実につなぎ留める独立した証拠を提供します。
