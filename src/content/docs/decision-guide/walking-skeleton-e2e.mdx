@@ -1,0 +1,79 @@
+---
+title: The Walking-Skeleton E2E
+description: One external-service feature gets one untagged journey through the complete integration path; every variant stays in a cheaper suite so the T1 cost remains flat.
+sidebar_position: 9
+---
+
+## One Feature, One Spec, One Journey
+
+An external-service feature needs end-to-end proof that its parts are wired together. It does not need every service behavior replayed through a browser. The **walking-skeleton e2e pattern** gives the entire feature exactly one untagged, CI-safe spec — for example, `e2e/doc-cloud-walking-skeleton.spec.ts` — and makes that spec walk the complete integration path once.
+
+“Exactly one” is the design constraint, not a starting count. This is not one happy-path spec now, followed by one conflict spec, three streaming variants, and a credential-error journey as the feature grows. It is one spec file containing one journey. That journey proves that the browser UI, application state, service adapter, stateful fake, and write/read lifecycle connect. Every assertion that does not need all of those layers belongs somewhere cheaper.
+
+This is the narrow complement to the [aggregate suite budget](./aggregate-suite-budget.mdx). The budget page explains why a collection of individually cheap tests can still drown a gate; the walking skeleton prevents that collection from forming. The [heavy-test decision rule](./heavy-test-decision.mdx) still decides whether an individual heavy test deserves its tier, but the walking skeleton asks an earlier question: does this proposed e2e variant prove any new integration wiring? If it only adds another input or response condition, it does not.
+
+<Note>
+
+**Untagged is part of the contract.** The journey is ordinary T1 coverage, not a special `@heavy` or scheduled specimen. Keep the fake deterministic and the path short enough that the one proof runs on every PR.
+
+</Note>
+
+## The Worked Journey: Touch Every Joint Once
+
+Consider a document-cloud integration. Its single journey has this shape:
+
+1. **Paste a token.** Enter the test token through the same credential UI a user sees. The token reaches the application’s credential boundary; the fake never requires a live secret.
+2. **Load the project list.** Wait for projects returned by the fake service and choose one. This proves that credential state, the adapter, and the first remote read are connected.
+3. **Open a page tab in the same frame.** Select a page and record the editor frame’s stable identity. Opening the tab must reuse that frame rather than silently replacing it with a new browsing context.
+4. **Edit the page.** Change a small, unmistakable piece of content through the editor surface while continuing to assert the same frame identity.
+5. **Perform a guarded save.** Save with the current remote revision or equivalent write guard. Do not weaken the journey into an unconditional write merely because the fake would accept one.
+6. **Verify the refetch in the trace.** Read the fake service’s redacted request trace and assert that the guarded write was followed by the expected refetch. The UI reaching a saved-looking state is not proof that this request crossed the seam; the trace proves that it actually happened without exposing the pasted token.
+7. **Publish.** Trigger the normal publish action against the same fake-backed project and remain in the same editor frame.
+8. **Observe the accepted-state chip.** Finish on the stable UI outcome: the accepted-state chip appears for the published revision.
+
+The frame identity assertion spans the journey rather than appearing once at setup. Token paste, list load, tab selection, editing, saving, refetch, publishing, and acceptance must all occur through the same long-lived frame. If the application accidentally remounts or swaps the frame halfway through, the final chip alone can still look correct while in-memory editor state, subscriptions, or message routing have been discarded. The walking skeleton guards the integration joint, not just the screenshot at the end.
+
+The journey’s fake belongs at the [external-service seam](./external-service-seam.mdx), where requests can be observed without mocking the application’s own adapter away. Use the [stateful fake-service recipe](../project-recipes/stateful-fake-service.mdx) so the list, guarded write, refetch, publish, and accepted state are successive observations of one service state rather than unrelated canned responses.
+
+## The Trace Is Evidence, Not Another UI Assertion
+
+The redacted request trace closes a specific false-green path. A save handler can update local state optimistically, the accepted-looking UI can appear, and the guarded network request can be missing or malformed. Asking the same UI whether it saved only repeats the application’s own claim.
+
+Instead, inspect the fake from the other side of the seam. The trace entry should establish the request sequence and the non-secret guard metadata needed by the contract: the guarded save arrived, it targeted the selected page, and the application performed the follow-up refetch before publishing. Redaction happens before the trace becomes test evidence, so credential handling is exercised without turning the artifact into a credential leak.
+
+Keep this assertion narrow. The trace is not an invitation to reproduce every header, conflict response, or payload permutation in the browser journey. It supplies independent evidence for the one integration transition whose UI result could otherwise self-agree.
+
+## Put Every Matrix Below E2E
+
+The walking skeleton owns topology: can one representative action cross every required boundary and return as observable state? Cheaper suites own breadth:
+
+| Behavior family | Deliberate home | Why it does not extend the journey |
+|---|---|---|
+| Conflict matrices | Unit tests around revision and conflict policy; component tests for each conflict presentation | These vary guards and resolutions, not integration topology |
+| SSE failure cases | Unit tests for parsing, retry, ordering, and deduplication; component tests for disconnected and recovery states | A dropped, duplicated, or malformed event is a state-machine branch, not another full user journey |
+| Sanitizer cases | Unit tests over the complete malicious and malformed input corpus | Browser setup adds cost without improving proof of the transformation contract |
+| Credential handling | Unit tests for storage, redaction, expiry, and rejection; component tests for credential UI states | The skeleton pastes one safe test token only to prove wiring; it must not become a credential matrix |
+
+The split is deliberate even when a variant is important. Importance does not imply e2e. A conflict policy can deserve dozens of cases while deserving zero additional browser journeys. The [heavy-test decision rule](./heavy-test-decision.mdx) says to demote an assertion when a lower level expresses it; here, demotion is the planned architecture, not a rescue performed after the e2e suite becomes slow.
+
+<Warning>
+
+Do not append “just one more step” to the walking skeleton to cover a new branch. A step that changes the representative path replaces the old representative when it is genuinely better; it does not accumulate beside it. A variant that exercises the same joints moves to unit or component coverage.
+
+</Warning>
+
+## Write the Boundary Where Contributors Will See It
+
+Put the allocation beside the suite — for example, in `e2e/README.md` — rather than leaving it in a planning issue or a reviewer’s memory. The note should name all three parts of the contract:
+
+- `e2e/doc-cloud-walking-skeleton.spec.ts` is the feature’s **only** untagged e2e spec and walks token → list → same-frame edit → guarded save/refetch → publish → accepted state.
+- Conflict matrices, SSE failures, sanitizer cases, and credential variants belong to named unit/component suite locations.
+- A proposal to add an e2e step or variant must either replace the existing representative path or explain a genuinely new integration joint; “important behavior” alone is not sufficient.
+
+That local record survives the two moments when oral convention does not: a new contributor looking for where to add coverage, and a new agent session inferring policy from the files it can see. The README turns absence into an enforceable design choice. Without it, one spec looks merely unfinished.
+
+## Singularity Is the Pattern
+
+The value is not that this journey happens to be small today. The value is that it remains singular as the feature grows. The service may gain more conflict codes, event failures, sanitizer rules, credential states, and publish outcomes; the one journey still pays for one token paste, one project selection, one same-frame edit, one guarded write and verified refetch, and one publish acceptance.
+
+That makes the T1 cost structurally flat. One journey proves the integration wiring. Lower suites can grow in proportion to the feature’s behavioral surface because their cases are cheaper, more deterministic, and easier to diagnose. Resisting the pull to make the e2e “more complete” is therefore not maintenance austerity around the pattern. **That resistance is the pattern.**
