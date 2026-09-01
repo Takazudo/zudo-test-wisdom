@@ -132,7 +132,7 @@ The fake records a request trace after authentication but stores only a redacted
 Expose the trace through the test bridge, such as `window.__mockControls`, and let Playwright assert the protocol evidence:
 
 ```typescript
-await page.getByRole("button", { name: "Publish" }).click();
+await page.getByRole("button", { name: "Save" }).click();
 
 const guardedPut = await page.evaluate(() =>
   window.__mockControls

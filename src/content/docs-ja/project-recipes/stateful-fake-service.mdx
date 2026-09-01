@@ -132,7 +132,7 @@ declare global {
 証跡は `window.__mockControls` のようなテストブリッジを通じて公開し、Playwrightからプロトコル上の証拠を検証します。
 
 ```typescript
-await page.getByRole("button", { name: "Publish" }).click();
+await page.getByRole("button", { name: "Save" }).click();
 
 const guardedPut = await page.evaluate(() =>
   window.__mockControls
