@@ -1,0 +1,70 @@
+---
+title: Choosing the Seam for an External-Service Fake
+description: Decide between network interception and an adapter fake by locating the transport boundary the application actually owns.
+sidebar_position: 8
+---
+
+## Start With the Boundary, Not the Tool
+
+An API-dependent frontend needs a substitute for an external service, but "use MSW" is not yet a testing decision. First identify the last boundary the application crosses before work leaves the code under test. In a plain web app that boundary may be `fetch`. In a desktop app it may be a typed bridge whose implementation happens to call Rust. The fake belongs at that real boundary.
+
+| Application shape | Real seam | Fake there with | What remains real |
+|---|---|---|---|
+| Browser calls REST or GraphQL directly | HTTP request | MSW / network interception | `fetch`, URL construction, headers, serialization |
+| Frontend calls a backend bridge | Adapter interface | In-memory adapter implementation | UI, state, bridge call sites, domain behavior |
+| Transport is native, IPC, a socket, or otherwise not browser-interceptable | Adapter or protocol abstraction | Fake implementation of that abstraction | Everything above the transport |
+
+This is a visibility question, not a preference between libraries. A fake placed below a boundary the test runner cannot observe does nothing; a fake placed higher than necessary silently removes useful production code from the test.
+
+## Choose Network Interception When HTTP Is the Seam
+
+For a plain browser application that calls REST or GraphQL directly, MSW is usually the narrowest useful substitution. The application still executes its real `fetch` call, constructs the real URL and query parameters, writes the real headers and request body, and deserializes the response through the production client. Only the remote server is replaced.
+
+That distinction matters. A test can catch `/users` becoming `/user`, a JSON field being serialized under the wrong name, or a GraphQL variable being omitted because those mistakes reach the intercepted request. A fake JavaScript client returning domain objects would pass without exercising any of them. This is the separation described in [Backend & Node.js Testing](../project-recipes/backend-testing.mdx): the frontend can be independent of backend availability without pretending its own HTTP client does not exist.
+
+<Tip>
+
+Use MSW when removing HTTP would remove part of the behavior you mean to test. If HTTP is the application's only external-service seam, intercepting the network keeps the fake as far downstream as the browser test can reliably reach.
+
+</Tip>
+
+## Choose an Adapter Fake When HTTP Is Not Interceptable
+
+Now consider a packaged Tauri application. Its renderer calls a backend bridge, the bridge crosses Tauri IPC channels, and Rust performs native HTTP and consumes an SSE stream. From the browser's point of view there is no request to intercept: neither the native HTTP exchange nor the SSE frames pass through the renderer's service worker. MSW cannot see that traffic at all.
+
+Here the adapter seam is not an optimization; it is forced by the architecture. Define the frontend-facing backend bridge as an interface and swap its packaged implementation for a stateful in-memory implementation in mock dev mode. The main application still exercises the real components, state transitions, and calls into that interface, while the fake supplies the behavior that would otherwise begin across IPC. The [Tauri App Testing](../project-recipes/tauri-testing.mdx) recipe shows the underlying Backend Bridge Mock Adapter Pattern; [Stateful Fake Service](../project-recipes/stateful-fake-service.mdx) develops the complete fake-service recipe.
+
+The same choice covers transports other than HTTP: native sockets, filesystem-backed synchronization, platform channels, or any bridge whose implementation is unavailable in an ordinary browser. It also gives WebKit E2E the same test mode as Chromium. The runner starts the mock application and calls the adapter; it does not depend on service-worker registration timing, scope, or readiness, so WebKit runs do not acquire a separate source of registration flakiness.
+
+## Pay Back What the Adapter Fake Bypasses
+
+An adapter fake deliberately stops above the packaged transport. That makes the main E2E suite deterministic, but it also means those tests say nothing about the Rust-native HTTP/SSE implementation. Treat that gap as a named obligation, not as incidental missing coverage.
+
+Pair the fake with dedicated transport contract tests at the HTTP boundary. In the Tauri example, those tests should drive the real transport code closely enough to prove at least:
+
+- origins are canonicalized before requests are made;
+- redirects fail closed instead of forwarding authority to an unexpected destination;
+- bearer tokens are redacted from errors, logs, and retained diagnostics; and
+- SSE frames are parsed correctly across event boundaries, partial chunks, and terminal conditions.
+
+Those are transport properties. Reproducing them inside the adapter fake would only create a second implementation that can agree with itself. The adapter tests own application behavior above the bridge; the transport contract suite owns the bridge implementation and its HTTP/SSE boundary.
+
+<Warning>
+
+An adapter fake is not evidence that production connectivity works. If the adapter suite is green while the transport contract suite is absent, the architecture has traded a flaky test for an untested layer.
+
+</Warning>
+
+## One App Can Use Both Seams
+
+The choice is per architectural seam, not per repository. A Tauri product can run its entire main application E2E suite against a stateful adapter fake, with Playwright starting an explicit mock mode such as `pnpm dev:mock`. Every main-app scenario then uses the same controllable state machine in Chromium and WebKit, even though the packaged product ultimately talks through native IPC.
+
+The same repository may contain an admin renderer that calls an HTTP API directly. In that sub-app, HTTP really is the application seam, so MSW remains the better fit: it preserves the admin renderer's URL construction and serialization instead of hiding them behind an adapter invented only for tests.
+
+Do not standardize the repository on one mocking mechanism for aesthetic consistency. Standardize the decision: each surface fakes the boundary its production code actually crosses, and each gets a separate contract suite for the layer hidden by that fake.
+
+## Takeaway: Mock at the Real Architectural Seam
+
+**Mock at the application's real architectural seam. Use MSW when that seam is HTTP. Use an adapter fake when a bridge abstraction already exists or the production transport is not interceptable. Either way, contract-test the layer the fake bypasses.**
+
+That rule preserves the maximum useful production path without asking a test runner to observe traffic it cannot see. It also makes the remaining blind spot explicit: network interception leaves the real remote service outside the test, while an adapter fake leaves the concrete transport outside it. The companion contract suite is what turns either substitution into a defensible testing boundary.
