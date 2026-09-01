@@ -8,7 +8,7 @@ sidebar_position: 6
 
 The `createMockBackend()` pattern in [Tauri App Testing](./tauri-testing.mdx#backend-bridge-mock-adapter-pattern) is the minimal useful replacement for an external dependency. It supplies canned return values for a table of functions, making it a good fit for unit tests and component tests whose question is whether one caller handles one result correctly.
 
-A full e2e journey asks a different question. A user opens a document, edits it, loses an event stream, reconnects, encounters a remote edit, adopts the new history head, retries a publish operation, and sees the hosted state arrive. Those actions are coupled through server state. A fake function table can return each expected value, but it cannot establish that the later response follows from the earlier request. For this scope the test needs a fake **service**, not a fake **function table**.
+A full e2e journey asks a different question. A cloud-backed feature opens and edits a document, while its wider behavior also includes event-stream reconnection, remote edits, history-head adoption, publish retries, and hosted-state transitions. Those actions are coupled through server state even when the single browser journey exercises only one representative path. A fake function table can return each expected value, but it cannot establish that a later response follows from an earlier request. For this scope the test needs a fake **service**, not a fake **function table**.
 
 The service remains in-process and uses no network. The application's external-service adapter sends requests to the fake transport, which routes on `(method, path)` and returns real HTTP-shaped responses: status, headers, body, and streaming bodies. This is the adapter seam described in [Choosing the External-Service Test Seam](../decision-guide/external-service-seam.mdx), applied at enough depth to exercise the client state machine rather than one adapter method.
 
@@ -78,7 +78,7 @@ The same rule applies to the other guards:
 - Authorize each guarded route from the token's grant profile. A valid token without `publish` permission receives `403`; it does not silently succeed because the test is on a happy path.
 - Treat an expired token as unauthenticated and return `401`, separately from the valid-but-underprivileged `403` case.
 
-These are not edge-case decorations. Generation conflicts, replay, and grants are transitions in the client state machine. If the fake omits them, the walking skeleton walks around the most failure-prone product behavior.
+These are not edge-case decorations. Generation conflicts, replay, and grants are transitions in the client state machine. If the fake omits them, focused client-state-machine suites cannot exercise the product's most failure-prone behavior realistically.
 
 ## Make Failure Controls a First-Class API
 
@@ -123,7 +123,7 @@ declare global {
 
 `dropEventStreams()` closes every open SSE response and lets reconnect behavior run. `refuseNextEventStream()` makes exactly the next stream attempt fail, without depending on timing. `triggerRemoteEdit()` advances the generation and history head before emitting the corresponding event. `triggerHostedTransition()` changes the stored hosted state and emits the same event the cloud service would. Each control names a domain event, so a failed test says which condition was requested rather than which packet happened to disappear.
 
-The fixture tokens are equally intentional. Full access drives the complete happy journey; no-publish proves that guarded publish routes return `403`; expired proves the distinct `401` path. The values belong only to the fake and must never resemble production credentials.
+The fixture tokens are equally intentional. Full access drives the complete happy journey; focused tests use no-publish to prove that guarded publish routes return `403` and expired to prove the distinct `401` path. The values belong only to the fake and must never resemble production credentials.
 
 ## Assert the Request, Not Only the Screen
 
@@ -154,18 +154,17 @@ The UI may look correct because local optimistic state changed even when the gua
 
 ## Run One Walking Skeleton Through the Fake
 
-A valuable zero-network e2e does not try to exhaust every route. It connects the important layers in one coherent journey:
+A valuable zero-network e2e does not try to exhaust every route. It connects the important layers in one representative journey:
 
 1. Start with the full-access fixture and load the current document over `GET`.
-2. Save through the guarded `PUT`, asserting that generation and history-head preconditions were sent.
-3. Drop the SSE connection, observe reconnect, then refuse the next stream and observe deterministic recovery.
-4. Trigger a remote edit, receive the event, encounter the adoptable `409`, adopt the new head, and save again.
-5. Publish twice with one idempotency key and verify that the stored mutation occurs once while the response replays.
-6. Trigger the hosted transition and observe the UI update from the SSE event.
-7. Repeat the guarded actions with no-publish and expired fixtures to pin `403` and `401` behavior.
-8. Read the redacted trace and assert that the guarded requests actually crossed the seam.
+2. Edit through the normal UI and save through the guarded `PUT`, asserting that generation and history-head preconditions were sent.
+3. Read the redacted trace and assert that the guarded write was followed by the expected refetch.
+4. Publish once through the normal UI with an idempotency key, then trigger the hosted transition and observe the accepted state arrive through SSE.
+5. Finish on that stable accepted-state UI without adding another browser branch or token profile.
 
-Smaller unit and component tests should still cover the combinatorial details. The walking skeleton's job is different: prove that routing, state, transport shapes, controls, client transitions, and rendered behavior remain connected without reaching a live cloud service.
+The fake's remaining controls and fixture profiles still need coverage, but not as extra steps or variants in this journey. Focused unit, adapter, and component suites should drop or refuse streams, trigger a remote edit and adoptable `409`, replay an idempotency key, and pin the no-publish `403` and expired-token `401` paths.
+
+The walking skeleton's job is narrower: prove that one representative path keeps routing, state, transport shapes, client transitions, trace evidence, and rendered behavior connected without reaching a live cloud service. The cheaper suites grow around it while the browser journey stays singular.
 
 ## Known Weakness: Client and Fake Can Drift Together
 
