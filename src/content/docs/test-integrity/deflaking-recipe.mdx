@@ -46,6 +46,22 @@ assert(elapsed < budget)    // deterministic — asserts the property you actual
 
 A probabilistic assertion is almost always a sign you picked a convenient **proxy** instead of the real invariant. Fix the assertion, not the tolerance.
 
+#### Corollary — a recorded measurement produced by a tool outside your control
+
+Rule 3's example has a second shape. One CI gate measured four artifacts across four columns and compared every value byte-exactly with a checked-in manifest from which the documentation is generated. Two columns, `gzip9` and `glueGzip9`, were `gzip -9` output from Node's zlib. A **1-byte** delta in that output reddened `main` three times in one release range while the uncompressed artifacts were byte-identical. Dropping equality would discard the documentation-accuracy guard; keeping it would leave the gate red for a property the product did not promise. The [incident analysis and measurements](https://github.com/Takazudo/zudo-front-builder/issues/2878), the epic's [Verified root cause](https://github.com/Takazudo/zudo-front-builder/issues/2880#verified-root-cause-differs-slightly-from-the-issues-framing), and the [shipped decision record](https://github.com/Takazudo/zudo-front-builder/pull/2884) preserve the evidence.
+
+Decompose the assertion. For **each** asserted value, ask: **who produces it, and what is the property you actually care about?** Outputs of a pinned toolchain you control — the final wasm and JS glue — stay byte-exact. The product invariant — the size ceiling — stays a hard bound. Output of an external compressor, recorded only so the generated documentation remains accurate, gets a bounded band around the documented value:
+
+```
+assert(finalWasm == documented.finalWasm) // pinned toolchain output — byte-exact
+assert(gzip9 < ceiling) // product invariant — hard bound
+assert(abs(gzip9 - documented.gzip9) <= GZIP_DRIFT_TOLERANCE_BYTES) // external doc value — evidence-sized band
+```
+
+Size that band from evidence, not convenience. Here, Node 20, 22, and 24 produced 0 B of drift across zlib versions; heterogeneous runners showed 1 B of drift, reproduced identically on rerun; and replacing the compressor implementation moved output by 12–32 KB, far beyond anything a small band should absorb. The CPU-feature-dependent deflate path is the **working explanation** for the runner difference; the reproduced 1 B delta is the **observation**. The chosen 64 B band is therefore this gate's documented decision: 64× the observed noise and two orders of magnitude below a real compression-ratio regression, an implementation swap, or a four-digit hand edit. It is not a generally justified tolerance.
+
+Make the exception visible and accountable. The band must be a named, exported, commented, tested constant linked to an open issue, as required by [Required Behavior Rule 8 — Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate). Apply it only to the externally produced documentation-accuracy slice, never to the toolchain-pinned slice. Report nonzero in-band drift as a warning annotation (`::warning::` on GitHub Actions); leave the ceiling untouched as the real budget. A band is acceptable only for that external/documentation slice and only with this linked-issue paper trail. For the reporting half of the same gate pattern, see [Collect Then Fail: Aggregate Gate Diagnostics](../ci-operations/collect-then-fail-gates.mdx).
+
 ## Red CI you don't own — the gate operator's playbook
 
 Everything else on this page is written for the test's **author**: how to diagnose a flake and eliminate it. This section is for a different role. You are the **gate operator** — the human or autonomous agent holding a merge gate when a required check goes red on a test the diff never touched. You did not write the test, you cannot fix it inside this merge window, and Rule 2 has already told you what not to normalize. What Rule 2 does not give you is a decision procedure for the next 30 minutes. This is it.
