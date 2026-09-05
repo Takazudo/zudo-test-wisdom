@@ -1,0 +1,109 @@
+---
+title: 収集してから一度だけ失敗するCIゲート
+description: 高コストな手書きゲートで、測定を一度だけ行い、対処可能な検出事項をすべて報告し、警告だけなら成功を保ち、入力が無効な場合に限ってfail-fastする方法。
+sidebar_position: 9
+---
+
+## ルール
+
+**入力を生成するのに数分かかるゲートは、1回の実行でその入力から得られる検出事項をすべて報告しなければなりません。fail-fastするのは、入力そのものを信頼できなくするエラーだけです。**
+
+有効な測定値をビルドで得るためのコストをすでに払った後、最初の不一致で比較を止めると、手元にある情報を捨てることになります。次のコミットとCI実行で情報の質が上がるわけではありません。次の項目を見る許可を買い直しているだけです。したがって、失敗の単位はループが最初に遭遇したアサーションではなく、1つの高コストな入力から得られる検出事項の全集合です。
+
+これは特に[Level 3のビルド成果物ゲート](../testing-levels/level-3-build-output.mdx)で重要です。有用な比較は数ミリ秒でも、その比較を可能にするビルドには数分かかることがあります。throwされたアサーションを無料とみなさず、[CIゲート最適化](./ci-gate-optimization.mdx)に従ってラウンドトリップ全体のコストを計上してください。
+
+## 1回の実行につき1成果物しか報告しなかった失敗
+
+ある手書きの成果物予算スクリプトは、4つのwasm成果物をroot、highlight、render、parseの固定順で測定していました。文書化されたmanifestのアサーションは成果物ごとのループ内にありました。このアサーションは最初に不一致となった成果物でthrowし、比較ヘルパーもその成果物内の最初の不一致列でreturnしていました。
+
+この制御フローにより、ログは実際以上に完全に見えていました。3番目の成果物 `render` が不一致になると、スクリプトは4番目の `parse` の数値をログに出せるところまで進んでいましたが、manifestとの比較は実行しませんでした。v2.15.0のリリース中、`render` と `parse` には独立した不一致があり、どちらも最初の実行のログに現れていました。ゲートはまず `render` だけを報告し、それを修復した後の実行でようやく `parse` を報告しました。各発見の前には約155秒のwasmビルドがあり、ブロック中のリリースは、最初の実行ですでに得られていた情報のために直列のCIラウンドトリップを2回支払いました（[Takazudo/zudo-front-builder#2879](https://github.com/Takazudo/zudo-front-builder/issues/2879)）。
+
+修復経路を見ると設計上の誤りは明白でした。`--update-manifest` はすでに1回ですべての成果物を書き換えていた一方、アサート経路は同じ成果物を1つずつ発見していました。修復が集約型なのに診断が直列型なら、CIの仕組みを増やす前にアサーションの制御フローを調べてください。
+
+## 測定し、比較し、収集してから、一度だけ失敗する
+
+この修正は高コストな処理を追加しません。以前のループで混在していた4つの段階を分離します。
+
+1. すべての成果物を測定する。
+2. すべての有効な測定値を比較する。
+3. 構造化された検出事項を収集し、警告annotationを出力する。
+4. `error` severityの検出事項をすべて含めて一度だけthrowする。
+
+各検出事項には明示的な `severity` と安定した `code` を持たせます。severityは終了ステータスを制御し、codeは修復コマンドが適用できるかといった機械可読な処理を制御します。どちらもメッセージ文字列から推測してはいけません。
+
+```ts
+type Finding = {
+  severity: "error" | "warning";
+  code:
+    | "manifest-mismatch"
+    | "gzip-drift-within-tolerance"
+    | "ceiling-exceeded";
+  artifact: string;
+  column: string;
+  message: string;
+};
+
+const measured = [];
+
+for (const artifact of ARTIFACTS) {
+  const result = await measureArtifact(artifact);
+  assertBuildLogConsistent(result); // Invalid input: fail fast.
+  measured.push(result);
+}
+
+const findings: Finding[] = [
+  ...compareManifest(measured, documentedManifest),
+  ...checkCeilings(measured),
+];
+
+for (const finding of findings) {
+  if (finding.severity === "warning") {
+    console.log(`::warning::${finding.message}`);
+  }
+}
+
+const errors = findings.filter((finding) => finding.severity === "error");
+if (errors.length > 0) {
+  const repairable = errors.some(
+    (finding) => finding.code === "manifest-mismatch",
+  );
+  const repairHint = repairable ? "\nRun with --update-manifest to repair." : "";
+  throw new Error(formatFindings(findings) + repairHint);
+}
+```
+
+警告だけならgreenで終了しなければなりません。記録された外部測定値は、文書化された許容帯域内でドリフトしても不変条件を満たせます。この帯域内イベントを非ゼロ終了にすると、[フレイク根本原因カタログ & デフレイキングレシピ](../test-integrity/deflaking-recipe.mdx)のルール3の系をひそかに無効化してしまいます。GitHub Actionsの `::warning::` のようなannotationとして出力して証拠を残し、redは実際に不変条件を破った場合のために取っておいてください。
+
+修復ヒントにも同じ規律を適用します。manifest不一致は `--update-manifest` で修復できますが、ceiling超過は修復できません。修復可能なエラーと修復不可能なエラーが同時にある場合も含め、修復可能なcodeを持つ検出事項が少なくとも1つある場合にだけヒントを追加します。ceiling超過だけの失敗に汎用的な修復行を出すと、成果物を小さくできないコマンドへオペレーターを誘導してしまいます。
+
+## 信頼境界ではfail-fastを保つ
+
+検出事項の収集が正しいのは、それ以降の比較にも意味がある間だけです。ビルドログの整合性チェックにより、測定が不完全、別の成果物に属する、または何らかの理由で信頼できないと判明したら、ただちに停止してください。その結果から導くサイズ比較はすべて架空のものになります。
+
+境界は明確です。
+
+- **無効な入力：** fail-fastする。何かを比較する前に、再ビルドするか測定経路を修復する。
+- **有効な入力に対する比較の失敗：** 独立したエラーと警告をすべて収集し、終了ステータスを一度だけ決める。
+
+この区別により、「すべて収集する」が「破損後も続行する」に変わるのを防げます。スクリプトの効率も保たれます。高コストな各測定は一度だけ実行し、throwする時点だけを変えます。
+
+## ゲートスクリプトを本番コードとして扱う
+
+必須CIスクリプトは出荷の可否を決めるため、その比較と報告の契約にはLevel 1スイートが必要です。テストのたびにwasmをビルドしたりCLI全体を起動したりせずに済むよう、純粋関数をexportしてください。`compareManifest` と `checkCeilings` は検出事項オブジェクトを返し、`formatFindings` はfailureテキストを返して、そのテキストから警告を除外します。
+
+最低限のmatrixでは、個々の算術だけでなく、集約と終了のセマンティクスを検証します。
+
+- manifestが完全一致する場合は検出事項なし。
+- 2つの成果物の不一致が両方とも報告される。
+- 1つの成果物にある2つのドリフト列が両方とも報告される。
+- 2つの成果物のceiling超過が両方とも報告される。
+- 警告はfailureテキストから除外され、ゲートを失敗させない。
+- プロセスレベルのテスト1件が、スクリプト自身の `--self-test` エントリーポイントをspawnする。
+
+最後のテストが重要なのは、組み込みself-testは必須スイートから呼ばれるまで単なる主張だからです。実際の修正では、以前は何も実行していなかった `--self-test` 経路を含め、これらの契約を扱う17件のテストが追加されました（[Takazudo/zudo-front-builder#2884](https://github.com/Takazudo/zudo-front-builder/pull/2884)）。純粋なcomparatorのテストにより多数の組み合わせを安価に検証し、1件のspawnテストにより実際のコマンドライン境界が接続されたままであることを証明します。
+
+## マージされたテスト内でも同じルールを使う
+
+[Aggregate Suite Budget](../decision-guide/aggregate-suite-budget.mdx)の `expect.soft` の節は、同じ原則をテスト内に適用した形です。複数のテストが高コストなfixture walkを1回共有するようになった後、ハードな `expect` は最初の失敗でマージ済みテストを中断します。すると、3つの壊れたアサーションを明らかにするのに3回の実行が必要になります。最初の実行ですでに、3つすべてに必要な共有入力へ到達していても同じです。ソフトアサーションなら集約性を保てます。有効な共有入力を一度だけexerciseし、独立したアサーション失敗をすべて記録して、一緒に報告できます。
+
+ここでも信頼境界は同じです。fixtureのsetupが失敗し、ページやサービスの状態が無効なら、それ以降のアサーションには信頼できる対象がないため、実行すべきではありません。収集してから失敗する原則は、高コストな入力が信頼できる状態になった後に適用します。その入力がビルド成果物でもlive test fixtureでも同じです。
