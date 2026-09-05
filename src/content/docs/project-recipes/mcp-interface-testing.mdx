@@ -97,7 +97,7 @@ test("returns the wire-visible tool result", async () => {
 
 Assert the result the client receives: `content[].text`, `structuredContent`, and `isError`. Do not stop at the handler return value. In MCP, **tool failures are results, not exceptions**. If the test only awaits `callTool()`, a broken tool can return `isError: true` and the test still passes.
 
-Keep the SDK and protocol revision explicit. The SDK v2 counterpart uses `createMcpHandler(createServer)` and a `StreamableHTTPClientTransport` whose `fetch` option adapts requests into `handler.fetch(new Request(url, init))`; the placeholder URL is never dialed. In v2, import `createMcpHandler` from `@modelcontextprotocol/server` and the client transport from `@modelcontextprotocol/client`. The v2 documentation limits `InMemoryTransport` to the 2025-era protocol, so use the handler bridge when the test must exercise 2026-era HTTP behavior.
+Keep the SDK and protocol revision explicit. The SDK v2 counterpart uses `createMcpHandler(createServer)` and a `StreamableHTTPClientTransport` whose `fetch` option adapts requests into `handler.fetch(new Request(url, init))`; the placeholder URL is never dialed. In v2, import `createMcpHandler` from `@modelcontextprotocol/server` and the client transport from `@modelcontextprotocol/client`. The [v2 testing documentation](https://ts.sdk.modelcontextprotocol.io/v2/testing.html) limits `InMemoryTransport` to the 2025-era protocol, so use the handler bridge when the test must exercise 2026-era HTTP behavior.
 
 ## A3: Lock the Inventory and Contract
 
@@ -164,6 +164,7 @@ test("every recorded feature and tool has an owner", async () => {
       expect(feature.mcp.exempt).not.toBe("");
       continue;
     }
+    expect(feature.mcp.length, feature.id).toBeGreaterThan(0);
     for (const tool of feature.mcp) {
       expect(listed.has(tool), `${feature.id} -> ${tool}`).toBe(true);
       mapped.add(tool);
