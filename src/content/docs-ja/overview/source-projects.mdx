@@ -14,9 +14,9 @@ sidebar_position: 2
 
 | プロジェクト | タイプ | 主要なテストパターン |
 |------------|-------|-------------------|
-| **zudo-text** | Tauriテキストエディタ（モノレポ） | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、ステートフルなインメモリフェイクサービス、ウォーキングスケルトンe2e、階層化e2eタグ |
+| **zudo-text** | Tauriテキストエディタ（モノレポ） | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、ステートフルなインメモリフェイクサービス、ウォーキングスケルトンe2e、MCP契約テスト（インメモリSDKクライアント、インベントリロック）、階層化e2eタグ |
 | **zzmod** | コンテンツWebサイト（zfb + Preactアイランド） | Vitestユニット（jsdom、Testing Library/Preact、MSW）、本番ビルドPlaywright、タグベースの@smoke/@heavyレーン、CI画像インターセプト、ローカルb4push経由のCIオフ重量E2E |
-| **pgen** | パターンジェネレーター（モノレポ + GPUランタイム） | 決定論的PNGレンダリング、Miniflare + D1/R2ワーカーインテグレーション、タグ階層化Playwright e2e、GPUビジュアルリグレッション（SSIMドリフト、GLSLパリティ） |
+| **pgen** | パターンジェネレーター（モノレポ + GPUランタイム） | 決定論的PNGレンダリング、Miniflare + D1/R2ワーカーインテグレーション、タグ階層化Playwright e2e、GPUビジュアルリグレッション（SSIMドリフト、GLSLパリティ）、MCP契約テスト（インメモリSDKクライアント、インベントリロック） |
 | **mdx-formatter** | CLI + npmライブラリ（Rust napi） | VitestによるRustエンジンのコントラクトテスト、冪等性不変条件、コミット済みベースラインに対するスナップショットリグレッション、execFileによるCLIインテグレーション |
 | **zfb** | フロントエンドビルドオーケストレーター / SSG | Rustワークスペース `cargo test`（主要）、バインディング形状スタブ、生成コードの動的インポート、信頼できる唯一の情報源ガード、happy-domルーターの癖、NodeフリーなDockerスモークE2E |
 | **zudo-doc** | ドキュメントサイトフレームワーク | 6レベルのテスト分類（Vitestユニット → 静的dist読み取り → Playwrightマルチフィクスチャーe2e → verify-ui）、remark/rehypeゴールデンフィクスチャのコーパス + mdastツリーファクトリー |

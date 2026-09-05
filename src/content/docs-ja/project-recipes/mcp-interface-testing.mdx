@@ -1,0 +1,230 @@
+---
+title: MCPインターフェースのテスト
+description: インプロセスのハンドラーやプロトコルロックから、ポータブルなジャーニーやエージェントシナリオまで、MCPのプロダクトサーフェスに対する契約テストとカバレッジの証拠。
+sidebar_position: 7
+---
+
+## 2つの問いと2種類の証拠
+
+MCPインターフェースは、エージェントが利用するプロダクトサーフェスである。これをテストするには、別々の2つの問いに答える必要がある。
+
+- **A. インターフェースは仕様どおりに振る舞うか？** 契約の証拠は、スキーマ、ハンドラー、プロトコルの結果、トランスポート、認証、パッケージ化された実行ファイルを対象とする。
+- **B. プロダクトを十分に公開しているか？** カバレッジの証拠は、ユーザーレベルの機能とツールを結び付け、代表的なジョブをエンドツーエンドで証明し、エージェントに現実的なタスクを解かせる。
+
+ほとんどの契約チェックに、別プロセスも待ち受けソケットも必要ない。本物のSDKクライアントとサーバーをインプロセスで通信させられる。サーバーを起動したり接続したりするのは、パッケージ化されたstdioのスモークとライブチェックだけである。カバレッジにも2つの側面がある。機能マニフェストとポータブルなジャーニーは決定論的でインプロセス実行できる一方、エージェント駆動のシナリオはローカルインスタンスまたはデプロイ済みサービスに対して実行する。
+
+プロダクトがどのツールを提供すべきかは、プロダクト上の判断であり続ける。以下のチェックはその判断を明示し、テスト可能にするが、判断そのものを代行しない。
+
+## A1：トランスポートなしでハンドラーをテストする
+
+まずMCPより下の層から始める。ツールレジストリまたはその構築関数をエクスポートし、インプロセスのバックエンドを注入して、`tool.handler()`と`tool.inputSchema.safeParse()`を直接呼び出す。ここは次の内容を証明する最も安価な場所である。
+
+- strictなスキーマが未知のフィールドや範囲外の値を拒否すること
+- 省略したフィールドに意図したデフォルト値が入ること
+- バックエンドの失敗が実装エラーの漏えいではなく、実行可能なツールのガイダンスに変換されること
+- ファイルシステムへの書き込み、権限、クリーンアップ、キャッシュ保持が正しいこと
+
+バックエンドにはフェイクの`fetch`実装や、アプリケーションオブジェクトのインプロセスなrequestメソッドを使える。重要なのは、本番と同じリクエスト・レスポンス形状に従うことである。これは[外部サービスのシーム](../decision-guide/external-service-seam.mdx)であり、そのステートフル版は[ネットワーク不要E2Eのためのステートフルなフェイクサービス](./stateful-fake-service.mdx)で詳しく扱う。
+
+ハンドラーテストが答えるのは、実装が入力を結果へ正しく対応付けるかどうかである。登録、スキーマのシリアライズ、MCPクライアントから見える振る舞いまでは証明しない。
+
+## A2：インプロセスのプロトコル契約を実行する
+
+次に、実際の`McpServer`とSDKの`Client`を`InMemoryTransport.createLinkedPair()`で接続する。これは`@modelcontextprotocol/sdk@1.30.0`に固定されたプロジェクトで使うSDK 1.xの形である。リモート依存は注入したインプロセスの`fetch`代替に置き換えるが、MCPプロトコルの経路は本物のままにする。
+
+```typescript
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { expect, test } from "vitest";
+import { z } from "zod";
+
+test("returns the wire-visible tool result", async () => {
+  const backend = {
+    fetch: async () =>
+      Response.json({ path: "notes/guide.md", content: "hello" }),
+  };
+  const server = new McpServer({ name: "notes", version: "1.0.0" });
+  server.registerTool(
+    "read_note",
+    {
+      description: "Read one note by workspace-relative path.",
+      inputSchema: { path: z.string().describe("Workspace-relative note path.") },
+      outputSchema: {
+        path: z.string().describe("Resolved note path."),
+        content: z.string().describe("Complete note text."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ path }) => {
+      const response = await backend.fetch();
+      if (!response.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Could not read ${path}.` }],
+        };
+      }
+      const note = (await response.json()) as { path: string; content: string };
+      return {
+        content: [{ type: "text", text: note.content }],
+        structuredContent: note,
+      };
+    },
+  );
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "contract-test", version: "1.0.0" });
+
+  try {
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.callTool({
+      name: "read_note",
+      arguments: { path: "notes/guide.md" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+    expect(result.structuredContent).toEqual({
+      path: "notes/guide.md",
+      content: "hello",
+    });
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+```
+
+クライアントが受け取る結果、つまり`content[].text`、`structuredContent`、`isError`をアサートする。ハンドラーの戻り値だけで終わらせない。MCPでは**ツールの失敗は例外ではなく結果である**。単に`callTool()`をawaitするだけでは、壊れたツールが`isError: true`を返してもテストが通ってしまう。
+
+SDKとプロトコルリビジョンを明示する。SDK v2で対応する形は、`createMcpHandler(createServer)`と、`fetch`オプションでリクエストを`handler.fetch(new Request(url, init))`へ渡す`StreamableHTTPClientTransport`を使う。プレースホルダーのURLへ実際に接続することはない。v2では`createMcpHandler`を`@modelcontextprotocol/server`から、クライアントトランスポートを`@modelcontextprotocol/client`からimportする。v2のドキュメントでは`InMemoryTransport`が2025-eraプロトコルに限定されているため、2026-eraのHTTP挙動を検証するときはハンドラーブリッジを使う。
+
+## A3：インベントリと契約をロックする
+
+単一の`tools/list`契約テストで、意図しないサーフェスのドリフトを明確な失敗にする。ツール数と順序付きの名前を固定し、シリアライズされた各ツールの次の要素を確認する。
+
+- 入出力のプロパティ名と必須フィールド
+- `readOnlyHint`、`destructiveHint`、`idempotentHint`などのアノテーション
+- シリアライズされた入力・出力スキーマのSHA-256ダイジェスト
+
+厳密なスキーマに焦点を当てたテストがすでにある場合、エクスポートした`EXPECTED_TOOLS`定数はより単純なロックになる。正規化した`tools/list`を`toMatchFileSnapshot`で検査する方法も有効である。**descriptionはスナップショットに残す。** エージェントはその文言をもとにツールを選択・使用するため、JSON Schemaが変わらなくてもdescriptionの編集は挙動を変える。
+
+存在だけでなく、不在もロックする。公開、破壊的なアセット操作、その他のプロダクトルートを意図的にMCPへ公開しないなら、そのようなツールがないことをアサートする。これにより設計上の境界が実行可能な証拠になる。
+
+ドリフトロックの隣にスキーマ品質lintを加え、低コストな「十分使える」ことの代理指標にする。すべてのツールと入力プロパティにdescriptionがあり、データを返すツールが`outputSchema`を宣言し、アノテーションが存在して意図どおりであることを検査する。これはエージェントが正しいツールを選ぶことまでは証明しないが、選べなくなる典型的な原因を検出できる。
+
+## A4：実際のトランスポート境界をチェックする
+
+Streamable HTTPでは、SDKの`Client`を`StreamableHTTPClientTransport`経由で接続しつつ、`app.request`または`exports.default.fetch`を呼ぶ`fetch`を渡す。これによりソケットを開かずにネゴシエーションとプロトコルのシリアライズを実行できる。その隣で、少数の手書きJSON-RPCエンベロープを送り、HTTPエッジが担う挙動を固定する。認証はMCPトランスポートへ届く前に`401`、未対応メソッドは`405`、受理できないメディアネゴシエーションは`406`、大きすぎるbodyは`413`を返すことを確認する。
+
+stdioに同等のインプロセス短縮経路はない。`StdioClientTransport`はプロセスを起動するため、リリース時のスモーク1本に限定する。packしたtarballをインストールし、**ビルド済み**バイナリを起動して、順序付きインベントリを再度アサートする。ツールごとに起動してはならない。ログはstderrへ送りstdoutをプロトコル専用に保ち、サーバーより先にクライアントを閉じる。新しいテストを`Mcp-Session-Id`へ依存させない。ステートレスなサーバーは意図的にこれを発行しないことがある。
+
+MCP Inspectorは既製のワンショットスモークとして利用できる。リリースチェックの動作が勝手に変わらないようにバージョンを固定する。
+
+```bash
+npx @modelcontextprotocol/inspector@2.5.0 --cli node dist/server.js \
+  --method tools/list --format json
+
+npx @modelcontextprotocol/inspector@2.5.0 --cli node dist/server.js \
+  --method tools/call --tool-name read_note \
+  --tool-args-json '{"path":"notes/guide.md"}' --format json
+```
+
+stdioコマンドは`--cli`の直後に置く。後続のフラグで位置引数のコマンドが終了する。`isError: true`のツール結果はpayloadを出力しつつ終了コード`5`を返すため、シェルパイプラインをfail-closedにできる。認証付きHTTPサーバーへ非対話CIから接続する場合は`--stored-auth-only`を加える。
+
+HTTP実装には、`@modelcontextprotocol/conformance`でプロトコルレベルのカバレッジを追加できる。`server-initialize`、`tools-list`、適用可能な`tools-call-*`など、サーバーが実装を表明するシナリオだけを選ぶ。`--spec-version 2025-11-25`（新しいプレリリースCLIでは`--requirements`という名称）またはサーバーが実際に実装するリビジョンを固定する。意図した未対応項目は`--expected-failures`に記録し、tools-onlyサーバーにすべてのシナリオが適用されるように扱ってはならない。
+
+## B1：機能パリティを決定論的にする
+
+ユーザーレベルのジョブをレジストリとしてチェックインする。各行は機能を1つ以上のMCPツールに対応付けるか、適用除外の理由を記録する。エンドポイントではなくジョブをモデル化する。ノートトレイはディレクトリprefixであり、名前によるノート検索とノート本文内の検索は別々のユーザー意図である。1つのルートに1つのツールを強制するとインベントリが膨らみ、ツール数が増えるほどツール選択の精度は下がりやすい。
+
+```typescript
+export const MCP_FEATURES = [
+  { id: "note-tray", surface: "UI: directory tray", mcp: ["list_notes"] },
+  { id: "note-finder", surface: "UI: filename search", mcp: ["search_notes"] },
+  { id: "content-search", surface: "UI: full-note search", mcp: ["search_notes"] },
+  { id: "asset-upload", surface: "POST /api/assets", mcp: ["upload_asset"] },
+  {
+    id: "publishing",
+    surface: "UI: publish",
+    mcp: { exempt: "Deliberately absent from the narrow v1 authoring surface." },
+  },
+] as const satisfies readonly {
+  id: string;
+  surface: string;
+  mcp: readonly string[] | { exempt: string };
+}[];
+
+test("every recorded feature and tool has an owner", async () => {
+  const listed = new Set((await client.listTools()).tools.map((tool) => tool.name));
+  const mapped = new Set<string>();
+
+  for (const feature of MCP_FEATURES) {
+    if ("exempt" in feature.mcp) {
+      expect(feature.mcp.exempt).not.toBe("");
+      continue;
+    }
+    for (const tool of feature.mcp) {
+      expect(listed.has(tool), `${feature.id} -> ${tool}`).toBe(true);
+      mapped.add(tool);
+    }
+  }
+
+  expect([...listed].filter((tool) => !mapped.has(tool))).toEqual([]);
+});
+```
+
+マニフェストは、「v1では意図的に存在しない」機能やセッション専用grantも含め、不在を**記録された判断**にする。そのテストは、記録済みの対応関係が実在するツールを指し、一覧にあるツールが孤立していないことを証明する。一方、マニフェストと`tools/list`の両方から漏れた新機能は検出できない。
+
+プロダクトに権威あるサーフェスがある場合は、この穴を塞ぐ。フレームワークのルートテーブル、コマンドレジストリ、OpenAPI文書からテスト時に機能を導出し、マニフェストと適用除外リストとの差分を取り、未登録ルートを失敗させる。権威あるレジストリがなければ、「MCP機能マニフェストを更新するか、適用除外を記録する」を機能変更レビューの必須手順にする。それでも、ツールの存在は対応するジョブを達成できることまで証明しない。その証拠はB2とB3で補う。
+
+例の対応関係には引数レベルのチェックも必要である。ノートトレイは`list_notes(prefix)`、ノートファインダーは`search_notes(mode: "files")`、ノート本文全体の検索は`search_notes(mode: "content")`、アセットアップロードは`upload_asset`へ対応する。
+
+## B2：1つのポータブルなエージェントジャーニーを再利用する
+
+小さな`callTool(name, args)`ドライバーに対してジャーニーを1つ書く。プロジェクト作成、オーサリングセッション開始、編集、アセットのアップロード、履歴確認、結果の再読み込みを行う。その関数をインプロセスのアプリハーネス、Worker/HTTPハーネス、stdioハーネスから変更せず再利用する。各ハーネスはトランスポートとfixtureのセットアップを提供し、アサーションとユーザーストーリーは1つのsource of truthに保つ。
+
+これはMCP利用者の視点で適用した[ウォーキングスケルトン](../decision-guide/walking-skeleton-e2e.mdx)である。価値ある1つの経路が複数のツールファミリーをまたいで接続されたままであることを証明する。このジャーニー自体は1本に保ち、バリエーションと失敗条件はA1とA2の焦点を絞ったテストに担わせる。
+
+## B3：ワンショットのエージェントシナリオを実行する
+
+Level 6に似たこの証拠では、**MCPツールだけ**を与えられたエージェントが実際のジョブを完了できるかを問う。各ジョブを独立したMarkdownタスクカードとして保存し、評価対象の機能領域ごとに最低1枚を用意する。読み取り専用カードは冪等で、複数ツールを必要とし、単一の安定した値を返し、対象コンテンツからそのままコピーしたキーワードを避ける。期待値はエージェントに見せるカードの外へ置く。
+
+````markdown
+# Task: Locate the release owner
+
+Fixture: `mcp-eval/read-release-owner`
+Access: read-only
+
+Using only the configured MCP tools, find the person responsible for the
+release whose rollback note mentions the blue deployment ring.
+
+Return exactly the person's handle and nothing else.
+
+Evaluator-only expected answer: stored in `answers.json`, never sent to the agent.
+````
+
+ローカルエージェントのMCPクライアント設定を、ローカルサーバー（`wrangler dev`またはstdioバイナリ）か、使い捨てprefix下のデプロイ済みサービスへ向ける。最終値は文字列の直接比較で判定し、ツールごとの**verified / failed / unverified**台帳を保存する。`k`回の試行では、pass@k（「可能」：1回以上成功）とpass^k（「信頼できる」：全試行成功）を報告し、不安定さを平均値で隠さない。
+
+読み取り専用カードが対象にするのは取得だけである。編集、アップロード、移動については、使い捨てprefixまたはfixtureで動く変更カードを追加する。結果の状態を決定論的にアサートし、失敗後もクリーンアップする。1回の失敗を自動的に機能不足と判断してはならない。まず、機能不足、ツールの不具合、認証、fixtureの問題、エージェントの失敗のどれかを診断する。確認できた機能ギャップだけをB1へ戻し、プロダクトとしてツールを追加するか適用除外を記録する。
+
+[Level 6](../testing-levels/level-6-ai-based-verification.mdx)の規律に従い、これらのシナリオは独立した手動または定期実行レーンで動かし、PRゲートにはしない。台帳とトランスクリプトをissueまたはPRに保存し、AIの判断が本当に主観的な部分だけを扱うまで決定論的な判定基準を厳密にする。`vitest-evals`は定期Vitestレーンで試行をまとめられ、promptfooの`mcp` providerはシナリオのpromptをサーバーへ接続できる。どちらを使ってもfixture、直接的な判定、台帳は必要である。
+
+## 各チェックを実行する場所
+
+| チェック | 実行場所 | 答える問い | 決定論的か | レーン |
+|---------|---------|-----------|-------------|-------|
+| A1 ハンドラー | インプロセス | スキーマ、対応付け、エラー、副作用は正しく振る舞うか？ | はい | PRゲート |
+| A2 プロトコル | インプロセスのSDKクライアント/サーバー | クライアントから仕様どおりのMCP結果が見えるか？ | はい | PRゲート |
+| A3 インベントリ | インプロセスの`tools/list` | 宣言済み契約または不在がドリフトしていないか？ | はい | PRゲート |
+| A4 HTTPエッジ | インプロセスのfetchブリッジ | ネゴシエーション、認証、HTTPガードが保たれるか？ | はい | PRゲート |
+| A4 stdioパッケージ | インストール済みtarballからのローカルサブプロセス | 出荷バイナリが起動し、ロック済みインベントリを公開するか？ | はい | リリーススモーク |
+| B1 パリティマニフェスト | インプロセスのインベントリとプロダクトレジストリ | 記録済みカバレッジ判断は完全で孤立がないか？ | はい | PRゲート |
+| B2 ポータブルジャーニー | インプロセス、Workerとstdioのハーネスでも再利用 | 価値ある1つのマルチツールジョブが接続されているか？ | はい | PRゲート、パッケージ版はリリース時 |
+| B3 エージェントシナリオ | ローカルのサーバー/サブプロセスまたはデプロイ済みサービス | エージェントが代表的なジョブを実際に完了できるか？ | いいえ、反復試行 | 手動または定期実行 |
+
+## 証拠を誠実に保つ
+
+各主張を、[検証マップ](../test-integrity/verification-map.mdx)上で証明可能な最下層のチェックに対応付ける。greenなハンドラーテストから良好なwire契約を主張することはできず、ロック済みインベントリからエージェントがジョブを完了できるとは主張できず、読み取り専用のエージェントカードから変更操作のカバレッジを主張することもできない。
+
+ライブ実行やエージェント駆動の実行では必ず、[ライブ証拠のエビデンス契約](../test-integrity/live-proof-evidence-contracts.mdx)のfail-closedな台帳パターンを使う。必要な観測を事前宣言し、未実行チェックを`unverified`のまま保ち、必須項目がすべて`verified`になるまで全体を失敗とする。これにより、決定論的なプロダクトの証拠と、エージェントが提供する探索的な証拠の境界を維持できる。

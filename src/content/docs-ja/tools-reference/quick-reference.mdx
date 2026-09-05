@@ -12,6 +12,7 @@ sidebar_position: 1
 | [1](../testing-levels/level-1-unit-tests.mdx) | jest | `pnpm add -D jest` | `pnpm jest` |
 | [1](../testing-levels/level-1-unit-tests.mdx) | vitest + Miniflare（バックエンド/Workers） | `pnpm add -D vitest miniflare` | `pnpm vitest run` |
 | [1](../testing-levels/level-1-unit-tests.mdx) | vitest + @cloudflare/vitest-pool-workers（in-worker/Workers） | `pnpm add -D vitest @cloudflare/vitest-pool-workers` | `pnpm vitest run` |
+| [1](../testing-levels/level-1-unit-tests.mdx) | `@modelcontextprotocol/sdk`インメモリクライアント（[MCP契約テスト](../project-recipes/mcp-interface-testing.mdx)） | `pnpm add -D @modelcontextprotocol/sdk` | `InMemoryTransport`で`pnpm vitest run` |
 | [2](../testing-levels/level-2-dom-tests.mdx) | vitest + jsdom | `pnpm add -D vitest jsdom` | `pnpm vitest run` |
 | [2](../testing-levels/level-2-dom-tests.mdx) | vitest + happy-dom | `pnpm add -D vitest happy-dom` | `pnpm vitest run` |
 | [2](../testing-levels/level-2-dom-tests.mdx) | @testing-library/react | `pnpm add -D @testing-library/react` | （テスト内で使用） |
@@ -19,6 +20,7 @@ sidebar_position: 1
 | [3](../testing-levels/level-3-build-output.mdx) | vitest（ビルドファイル読み取り） | `pnpm add -D vitest` | `pnpm build && pnpm vitest run --project build` |
 | [3](../testing-levels/level-3-build-output.mdx) | cheerio + fs/path | `pnpm add -D cheerio` | （テスト内で使用） |
 | [3](../testing-levels/level-3-build-output.mdx) / [4](../testing-levels/level-4-e2e-browser.mdx) | リンクチェック + html-validate（[サイト整合性ゲート](../project-recipes/site-integrity-checks.mdx)） | `pnpm add -D html-validate` | `pnpm build && pnpm check:html && pnpm check:links` |
+| [3](../testing-levels/level-3-build-output.mdx) / [4](../testing-levels/level-4-e2e-browser.mdx) | MCP Inspector CLI（[パッケージサーバーのスモーク](../project-recipes/mcp-interface-testing.mdx)） | （`npx`で実行） | `npx @modelcontextprotocol/inspector --cli <server> --method tools/list --format json` |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | Playwright | `pnpm add -D @playwright/test` の後に `npx playwright install --with-deps` | `npx playwright test` |
 | [4](../testing-levels/level-4-e2e-browser.mdx) | headless-browser | （Claude Codeスキル） | `/headless-browser` |
 | [5](../testing-levels/level-5-visual-verification.mdx) | verify-ui | （Claude Codeスキル） | `/verify-ui` |
