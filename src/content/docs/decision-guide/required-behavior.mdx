@@ -242,6 +242,21 @@ Declaring work done while heavy-lane coverage for the changed code is unrun is e
 
 </Warning>
 
+#### Split Confirm Checks by Input Availability
+
+In an agent workflow, a _confirm task_ is a validation pass with named checks. It runs after sibling work has merged into a base branch, and its job is to exercise the merged result rather than add features.
+
+Classify every named check by when its input exists, and write both lists and their owners in the task text:
+
+- **Local checks on the merged base — run by the child.** These are available as soon as the child is spawned: fast gates, unit suites, self-tests, formatting, and typechecking.
+- **Checks on the PR or a CI run — run by the manager after the push.** These include reading a job log, confirming that a required check is green, and observing a warning annotation. In the worktree/epic workflow shape, where the root PR opens only after all topics have merged and review has finished, those inputs cannot exist when the child is spawned. This is a property of that workflow shape, not a universal restriction on children or CI.
+
+Stating both lists prevents the executor from silently skipping the CI half or stalling while it waits for a PR that cannot exist yet.
+
+[Takazudo/zudo-front-builder#2883](https://github.com/Takazudo/zudo-front-builder/issues/2883) provides a worked case. Its confirm sub-issue asked for five local commands and two CI-log reads. The child ran all five local commands, then reported the two log checks as deferred and explained that the root PR did not exist. After the root PR opened, the manager performed those checks and posted the observations on the sub-issue, including the run URL and whether the drift warning annotation appeared. This ad hoc split cost nothing only because the child reported the deferral explicitly instead of marking the whole task done.
+
+Following Rule 9, assign expensive verification once to the executor that can run it: either a capable local host or the CI run. Input availability determines the split, not whether a check is cheap. A confirm task may still run a full local build on the merged base.
+
 ## Summary Checklist
 
 Before declaring any fix complete:
@@ -256,3 +271,4 @@ Before declaring any fix complete:
 - [ ] All red checks on own PR are resolved or carry `@flaky` with a linked issue
 - [ ] No `test.skip`, `@flaky`, or loosened tolerances introduced without a linked issue
 - [ ] If change touches heavy-lane-only code, related heavy specs were run on a capable host
+- [ ] Confirm tasks separate child-runnable local checks from manager-runnable PR/CI checks, and say which is which
