@@ -97,7 +97,7 @@ test("returns the wire-visible tool result", async () => {
 
 クライアントが受け取る結果、つまり`content[].text`、`structuredContent`、`isError`をアサートする。ハンドラーの戻り値だけで終わらせない。MCPでは**ツールの失敗は例外ではなく結果である**。単に`callTool()`をawaitするだけでは、壊れたツールが`isError: true`を返してもテストが通ってしまう。
 
-SDKとプロトコルリビジョンを明示する。SDK v2で対応する形は、`createMcpHandler(createServer)`と、`fetch`オプションでリクエストを`handler.fetch(new Request(url, init))`へ渡す`StreamableHTTPClientTransport`を使う。プレースホルダーのURLへ実際に接続することはない。v2では`createMcpHandler`を`@modelcontextprotocol/server`から、クライアントトランスポートを`@modelcontextprotocol/client`からimportする。v2のドキュメントでは`InMemoryTransport`が2025-eraプロトコルに限定されているため、2026-eraのHTTP挙動を検証するときはハンドラーブリッジを使う。
+SDKとプロトコルリビジョンを明示する。SDK v2で対応する形は、`createMcpHandler(createServer)`と、`fetch`オプションでリクエストを`handler.fetch(new Request(url, init))`へ渡す`StreamableHTTPClientTransport`を使う。プレースホルダーのURLへ実際に接続することはない。v2では`createMcpHandler`を`@modelcontextprotocol/server`から、クライアントトランスポートを`@modelcontextprotocol/client`からimportする。 [v2のテストドキュメント](https://ts.sdk.modelcontextprotocol.io/v2/testing.html) では`InMemoryTransport`が2025-eraプロトコルに限定されているため、2026-eraのHTTP挙動を検証するときはハンドラーブリッジを使う。
 
 ## A3：インベントリと契約をロックする
 
@@ -164,6 +164,7 @@ test("every recorded feature and tool has an owner", async () => {
       expect(feature.mcp.exempt).not.toBe("");
       continue;
     }
+    expect(feature.mcp.length, feature.id).toBeGreaterThan(0);
     for (const tool of feature.mcp) {
       expect(listed.has(tool), `${feature.id} -> ${tool}`).toBe(true);
       mapped.add(tool);
