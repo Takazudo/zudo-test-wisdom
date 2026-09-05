@@ -1,0 +1,231 @@
+---
+title: Testing an MCP Interface
+description: Contract tests and coverage evidence for an MCP product surface, from in-process handlers and protocol locks to portable journeys and agent scenarios.
+sidebar_position: 7
+---
+
+## Two Questions, Two Kinds of Evidence
+
+An MCP interface is a product surface consumed by agents. Testing it means answering two separate questions:
+
+- **A. Does the interface behave as specified?** Contract evidence covers schemas, handlers, protocol results, transports, authentication, and the packaged executable.
+- **B. Does it expose enough of the product?** Coverage evidence connects user-level capabilities to tools, proves a representative job end to end, and asks an agent to solve realistic tasks.
+
+Most contract checks need neither a separate process nor a listening socket. A real SDK client and server can communicate in-process. Only the packaged-stdio smoke and live checks spawn or dial a server. Coverage also has two halves: the feature manifest and portable journey are deterministic and can run in-process; agent-driven scenarios run against a local instance or the deployed service.
+
+Which tools the product should offer remains a product decision. The checks below make that decision explicit and testable; they do not make it.
+
+## A1: Test Handlers Without a Transport
+
+Start below MCP. Export the tool registry or its construction function, inject an in-process backend, then call `tool.handler()` and `tool.inputSchema.safeParse()` directly. This is the cheapest place to prove:
+
+- strict schemas reject unknown fields and out-of-range values;
+- omitted fields receive the intended defaults;
+- backend failures become actionable tool guidance rather than leaked implementation errors;
+- filesystem writes, permissions, cleanup, and cache retention are correct.
+
+The backend can be a fake `fetch` implementation or an application object's in-process request method. The important property is that it follows the same request and response shapes as production. This is the [external-service seam](../decision-guide/external-service-seam.mdx); a stateful version is developed in [Stateful Fake Service for Zero-Network E2E](./stateful-fake-service.mdx).
+
+Handler tests answer whether the implementation maps inputs to results. They do not prove registration, schema serialization, or behavior visible to an MCP client.
+
+## A2: Exercise the In-Process Protocol Contract
+
+Next, connect a real `McpServer` and SDK `Client` with `InMemoryTransport.createLinkedPair()`. This is the SDK 1.x shape used by projects pinned to `@modelcontextprotocol/sdk@1.30.0`. Replace remote dependencies with injected in-process `fetch` stand-ins, but keep the MCP protocol path real.
+
+```typescript
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { expect, test } from "vitest";
+import { z } from "zod";
+
+test("returns the wire-visible tool result", async () => {
+  const backend = {
+    fetch: async () =>
+      Response.json({ path: "notes/guide.md", content: "hello" }),
+  };
+  const server = new McpServer({ name: "notes", version: "1.0.0" });
+  server.registerTool(
+    "read_note",
+    {
+      description: "Read one note by workspace-relative path.",
+      inputSchema: { path: z.string().describe("Workspace-relative note path.") },
+      outputSchema: {
+        path: z.string().describe("Resolved note path."),
+        content: z.string().describe("Complete note text."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+    },
+    async ({ path }) => {
+      const response = await backend.fetch();
+      if (!response.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Could not read ${path}.` }],
+        };
+      }
+      const note = (await response.json()) as { path: string; content: string };
+      return {
+        content: [{ type: "text", text: note.content }],
+        structuredContent: note,
+      };
+    },
+  );
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "contract-test", version: "1.0.0" });
+
+  try {
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.callTool({
+      name: "read_note",
+      arguments: { path: "notes/guide.md" },
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+    expect(result.structuredContent).toEqual({
+      path: "notes/guide.md",
+      content: "hello",
+    });
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+```
+
+Assert the result the client receives: `content[].text`, `structuredContent`, and `isError`. Do not stop at the handler return value. In MCP, **tool failures are results, not exceptions**. If the test only awaits `callTool()`, a broken tool can return `isError: true` and the test still passes.
+
+Keep the SDK and protocol revision explicit. The SDK v2 counterpart uses `createMcpHandler(createServer)` and a `StreamableHTTPClientTransport` whose `fetch` option adapts requests into `handler.fetch(new Request(url, init))`; the placeholder URL is never dialed. In v2, import `createMcpHandler` from `@modelcontextprotocol/server` and the client transport from `@modelcontextprotocol/client`. The [v2 testing documentation](https://ts.sdk.modelcontextprotocol.io/v2/testing.html) limits `InMemoryTransport` to the 2025-era protocol, so use the handler bridge when the test must exercise 2026-era HTTP behavior.
+
+## A3: Lock the Inventory and Contract
+
+A single `tools/list` contract test should make accidental surface drift loud. Pin the tool count and ordered names, then inspect each serialized tool:
+
+- input and output property names and required fields;
+- annotations such as `readOnlyHint`, `destructiveHint`, and `idempotentHint`;
+- a SHA-256 digest of the serialized input and output schemas.
+
+An exported `EXPECTED_TOOLS` constant is a simpler lock when exact schemas already have focused tests. A normalized `tools/list` snapshot checked with `toMatchFileSnapshot` is another good option. **Keep descriptions in the snapshot:** agents select and use tools from that language, so a description edit changes behavior even when the JSON Schema does not.
+
+Lock absence as well as presence. If publishing, destructive asset operations, or another product route is deliberately unavailable through MCP, assert that no such tool exists. This turns a design boundary into executable evidence.
+
+Add a schema-quality lint beside the drift lock as a cheap “usable enough” proxy: every tool and every input property has a description, every data-returning tool declares an `outputSchema`, and annotations are present and intentional. This cannot prove an agent will choose the right tool, but it catches common reasons that it will not.
+
+## A4: Check the Real Transport Boundaries
+
+For Streamable HTTP, connect an SDK `Client` through `StreamableHTTPClientTransport`, but supply a `fetch` that calls `app.request` or `exports.default.fetch`. This exercises negotiation and protocol serialization without opening a socket. Beside it, send a few hand-authored JSON-RPC envelopes to pin behavior owned by the HTTP edge: authentication returns `401` before the MCP transport sees the request, unsupported methods return `405`, unacceptable media negotiation returns `406`, and oversized bodies return `413`.
+
+Stdio has no equivalent in-process shortcut. `StdioClientTransport` spawns a process, so reserve it for one release smoke: install the packed tarball, launch the **built** binary, and re-assert the ordered inventory. Do not spawn once per tool. Keep stdout protocol-clean by sending logs to stderr, close the client before the server, and avoid building new tests around `Mcp-Session-Id`; stateless servers may intentionally issue none.
+
+The MCP Inspector can provide an off-the-shelf one-shot smoke. Pin the version so a release check does not change underneath you:
+
+```bash
+npx @modelcontextprotocol/inspector@2.5.0 --cli node dist/server.js \
+  --method tools/list --format json
+
+npx @modelcontextprotocol/inspector@2.5.0 --cli node dist/server.js \
+  --method tools/call --tool-name read_note \
+  --tool-args-json '{"path":"notes/guide.md"}' --format json
+```
+
+Put the stdio command immediately after `--cli`; later flags terminate the positional command. A tool result with `isError: true` still prints its payload but exits `5`, which makes shell pipelines fail closed. Add `--stored-auth-only` for non-interactive CI against an authenticated HTTP server.
+
+For HTTP implementations, `@modelcontextprotocol/conformance` adds protocol-level coverage. Select only scenarios the server claims, such as `server-initialize`, `tools-list`, and the applicable `tools-call-*` cases, and pin `--spec-version 2025-11-25` (called `--requirements` in newer prerelease CLIs) or the revision the server actually implements. Record intentional gaps with `--expected-failures`; do not imply that every scenario applies to a tools-only server.
+
+## B1: Make Feature Parity Deterministic
+
+Check in a registry of user-level jobs. Each row maps a feature to one or more MCP tools or records why the feature is exempt. Model jobs rather than endpoints: a note tray is a directory prefix, while finding a note by name and searching inside notes are distinct user intents. Forcing one route to equal one tool bloats the inventory, and tool-selection accuracy tends to fall as the tool count grows.
+
+```typescript
+export const MCP_FEATURES = [
+  { id: "note-tray", surface: "UI: directory tray", mcp: ["list_notes"] },
+  { id: "note-finder", surface: "UI: filename search", mcp: ["search_notes"] },
+  { id: "content-search", surface: "UI: full-note search", mcp: ["search_notes"] },
+  { id: "asset-upload", surface: "POST /api/assets", mcp: ["upload_asset"] },
+  {
+    id: "publishing",
+    surface: "UI: publish",
+    mcp: { exempt: "Deliberately absent from the narrow v1 authoring surface." },
+  },
+] as const satisfies readonly {
+  id: string;
+  surface: string;
+  mcp: readonly string[] | { exempt: string };
+}[];
+
+test("every recorded feature and tool has an owner", async () => {
+  const listed = new Set((await client.listTools()).tools.map((tool) => tool.name));
+  const mapped = new Set<string>();
+
+  for (const feature of MCP_FEATURES) {
+    if ("exempt" in feature.mcp) {
+      expect(feature.mcp.exempt).not.toBe("");
+      continue;
+    }
+    expect(feature.mcp.length, feature.id).toBeGreaterThan(0);
+    for (const tool of feature.mcp) {
+      expect(listed.has(tool), `${feature.id} -> ${tool}`).toBe(true);
+      mapped.add(tool);
+    }
+  }
+
+  expect([...listed].filter((tool) => !mapped.has(tool))).toEqual([]);
+});
+```
+
+The manifest makes omission a **recorded decision**, including “deliberately absent in v1” capabilities and session-only grants. Its test proves that recorded mappings resolve and that listed tools are not orphans. It cannot notice a new feature omitted from both the manifest and `tools/list`.
+
+Close that gap wherever the product has an authoritative surface. Derive capabilities at test time from a framework route table, command registry, or OpenAPI document, then diff them against the manifest plus its exemptions so an unregistered route fails. If no authoritative registry exists, make “update the MCP feature manifest or record an exemption” a required feature-change review step. Even then, tool existence does not prove the mapped job is achievable; B2 and B3 supply that evidence.
+
+The example mappings need argument-level checks too: note tray maps to `list_notes(prefix)`, note finder to `search_notes(mode: "files")`, whole-note content search to `search_notes(mode: "content")`, and asset upload to `upload_asset`.
+
+## B2: Reuse One Portable Agent Journey
+
+Write one journey against a tiny `callTool(name, args)` driver: create a project, begin an authoring session, edit, upload an asset, inspect history, and read the result back. Reuse that function unchanged from the in-process app harness, Worker/HTTP harness, and stdio harness. Each harness supplies transport and fixture setup; the assertions and user story remain one source of truth.
+
+This is the [walking skeleton](../decision-guide/walking-skeleton-e2e.mdx) applied from the MCP consumer's point of view. It proves that one valuable route through the product remains connected across tool families. It should stay singular while focused A1 and A2 tests carry permutations and failures.
+
+## B3: Run One-Shot Agent Scenarios
+
+The Level-6-shaped evidence asks whether an agent given **only** the MCP tools can finish real jobs. Store each job as an independent Markdown task card, with at least one card for every feature area under evaluation. Read-only cards should be idempotent, require multiple tools, produce one stable value, and avoid keywords copied verbatim from the target content. Keep the expected answer outside the agent-visible card.
+
+````markdown
+# Task: Locate the release owner
+
+Fixture: `mcp-eval/read-release-owner`
+Access: read-only
+
+Using only the configured MCP tools, find the person responsible for the
+release whose rollback note mentions the blue deployment ring.
+
+Return exactly the person's handle and nothing else.
+
+Evaluator-only expected answer: stored in `answers.json`, never sent to the agent.
+````
+
+Point the local agent's MCP client configuration at a local server (`wrangler dev` or the stdio binary) or the deployed service under a disposable prefix. Judge the final value by direct string comparison and preserve a per-tool **verified / failed / unverified** ledger. Across `k` trials, report pass@k (“possible”: at least one succeeds) and pass^k (“reliable”: all succeed); do not hide instability behind an average.
+
+Read-only cards cover retrieval only. Add mutation cards for editing, uploading, and moving under a disposable prefix or fixture. Assert resulting state deterministically and clean it up even after failure. One unsuccessful run is not automatically a missing-feature finding: diagnose missing capability, tool defect, authentication, fixture trouble, or agent failure first. Only a confirmed capability gap feeds B1, where the product either adds a tool or records an exemption.
+
+Follow the discipline of [Level 6](../testing-levels/level-6-ai-based-verification.mdx): run these scenarios in a separate manual or scheduled lane, never as a PR gate. Archive the ledger and transcript on the issue or PR, and tighten deterministic criteria until AI judgment covers only the genuinely subjective part. `vitest-evals` can organize trials in a scheduled Vitest lane; promptfoo's `mcp` provider can connect scenario prompts to the server. Neither removes the need for fixtures, direct verdicts, or the ledger.
+
+## Where Each Check Runs
+
+| Check | Runs where | Question answered | Deterministic? | Lane |
+|-------|------------|-------------------|----------------|------|
+| A1 handler | In-process | Do schemas, mapping, errors, and side effects behave? | Yes | PR gate |
+| A2 protocol | In-process SDK client/server | Does the client see the specified MCP result? | Yes | PR gate |
+| A3 inventory | In-process `tools/list` | Did the declared contract or absence drift? | Yes | PR gate |
+| A4 HTTP edge | In-process fetch bridge | Do negotiation, auth, and HTTP guards hold? | Yes | PR gate |
+| A4 stdio package | Local subprocess from installed tarball | Does the shipped binary start and expose the locked inventory? | Yes | Release smoke |
+| B1 parity manifest | In-process inventory plus product registry | Are recorded coverage decisions complete and non-orphaned? | Yes | PR gate |
+| B2 portable journey | In-process; reused by Worker and stdio harnesses | Is one valuable multi-tool job connected? | Yes | PR gate; packaged variant at release |
+| B3 agent scenarios | Local server/subprocess or deployed service | Can an agent actually complete representative jobs? | No, repeated trials | Manual or scheduled |
+
+## Keep the Evidence Honest
+
+Map each claim to the lowest check that can prove it in the [Verification Map](../test-integrity/verification-map.mdx). A green handler test cannot claim a good wire contract; a locked inventory cannot claim that an agent completes a job; a read-only agent card cannot claim mutation coverage.
+
+For every live or agent-driven run, use the fail-closed ledger pattern from [Live-Proof Evidence Contracts](../test-integrity/live-proof-evidence-contracts.mdx). Predeclare required observations, keep unexecuted checks `unverified`, and fail the overall run unless every required entry becomes `verified`. That preserves the boundary between deterministic product evidence and the exploratory evidence agents provide.

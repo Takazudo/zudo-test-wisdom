@@ -1,0 +1,109 @@
+---
+title: Collect-Then-Fail CI Gates
+description: How an expensive hand-written gate can measure once, report every actionable finding, preserve warning-only success, and reserve fail-fast for invalid input.
+sidebar_position: 9
+---
+
+## The Rule
+
+**A gate whose input costs minutes to produce must report every finding from that input in one run. Fail fast only when an error makes the input itself untrustworthy.**
+
+Once a build has paid to produce valid measurements, stopping at the first bad comparison discards information that is already available. The next commit and CI run do not improve that information; they merely buy permission to see the next item. The right unit of failure is therefore the complete set of findings from one expensive input, not the first assertion encountered by a loop.
+
+This is especially important for [Level 3 built-artifact gates](../testing-levels/level-3-build-output.mdx). Their useful comparison may take milliseconds, while the build that makes comparison possible takes minutes. Use [CI Gate Optimization](./ci-gate-optimization.mdx) to account for that full round-trip cost rather than treating a thrown assertion as free.
+
+## The Failure That Reported One Artifact per Run
+
+A hand-written artifact-budget script measured four wasm artifacts in a fixed order: root, highlight, render, then parse. It asserted the documented manifest inside that per-artifact loop. The assertion threw on the first mismatching artifact, and its comparison helper returned on the first bad column within that artifact.
+
+That control flow made the log misleadingly complete. When the third artifact, `render`, mismatched, the script had enough data to print the fourth artifact's numbers, but it never compared `parse` with the manifest. During the v2.15.0 release, `render` and `parse` had independent mismatches that were both visible in the first run's log. The gate reported `render`; after that was repaired, the next run finally reported `parse`. Each discovery waited behind roughly 155 seconds of wasm build, so one blocked release paid two serial CI round trips for information the first run already held ([Takazudo/zudo-front-builder#2879](https://github.com/Takazudo/zudo-front-builder/issues/2879)).
+
+The repair path exposed the design error. `--update-manifest` already rewrote every artifact in one pass, while the asserting path discovered those same artifacts one at a time. When repair is aggregate but diagnosis is serial, inspect the assertion's control flow before adding more CI machinery.
+
+## Measure, Compare, Collect, Then Fail Once
+
+The fix adds no expensive work. Separate four phases that the old loop had interleaved:
+
+1. Measure every artifact.
+2. Compare every valid measurement.
+3. Collect structured findings and emit warning annotations.
+4. Throw once with every error-severity finding.
+
+Give each finding an explicit `severity` and a stable `code`. Severity controls the exit status; code controls machine-readable handling such as whether a repair command applies. Do not infer either from message text.
+
+```ts
+type Finding = {
+  severity: "error" | "warning";
+  code:
+    | "manifest-mismatch"
+    | "gzip-drift-within-tolerance"
+    | "ceiling-exceeded";
+  artifact: string;
+  column: string;
+  message: string;
+};
+
+const measured = [];
+
+for (const artifact of ARTIFACTS) {
+  const result = await measureArtifact(artifact);
+  assertBuildLogConsistent(result); // Invalid input: fail fast.
+  measured.push(result);
+}
+
+const findings: Finding[] = [
+  ...compareManifest(measured, documentedManifest),
+  ...checkCeilings(measured),
+];
+
+for (const finding of findings) {
+  if (finding.severity === "warning") {
+    console.log(`::warning::${finding.message}`);
+  }
+}
+
+const errors = findings.filter((finding) => finding.severity === "error");
+if (errors.length > 0) {
+  const repairable = errors.some(
+    (finding) => finding.code === "manifest-mismatch",
+  );
+  const repairHint = repairable ? "\nRun with --update-manifest to repair." : "";
+  throw new Error(formatFindings(findings) + repairHint);
+}
+```
+
+Warnings alone must exit green. A recorded external measurement can drift within a documented tolerated band and still satisfy the invariant; turning that in-band event into a nonzero exit silently defeats the Rule 3 corollary in [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx). Emit it as an annotation such as GitHub Actions' `::warning::`, retain it as evidence, and reserve red for an actual invariant breach.
+
+The repair hint follows the same discipline. A manifest mismatch is repairable by `--update-manifest`; a ceiling breach is not. Append the hint only if at least one finding has the repairable code, including when repairable and non-repairable errors appear together. A generic repair line on a ceiling-only failure sends the operator toward a command that cannot make the artifact smaller.
+
+## Keep Fail-Fast at the Trust Boundary
+
+Collecting findings is correct only while later comparisons remain meaningful. If a build-log consistency check says the measurement is incomplete, belongs to a different artifact, or otherwise cannot be trusted, stop immediately. Every size comparison derived from that result would be fiction.
+
+The boundary is precise:
+
+- **Invalid input:** fail fast. Rebuild or repair the measurement path before comparing anything.
+- **Valid input with failed comparisons:** collect every independent error and warning, then decide the exit status once.
+
+That distinction prevents “collect everything” from becoming “continue after corruption.” It also keeps the script efficient: the gate performs each expensive measurement once and merely changes when it decides to throw.
+
+## Treat the Gate Script as Production Code
+
+A required CI script decides whether work can ship, so its comparison and reporting contracts deserve a Level 1 suite. Export pure functions rather than forcing tests to build wasm or invoke the entire CLI: `compareManifest` and `checkCeilings` return finding objects, while `formatFindings` returns failure text and omits warnings from that text.
+
+The minimum matrix exercises aggregation and exit semantics, not just individual arithmetic:
+
+- an exact manifest match produces no findings;
+- mismatches in two artifacts are both reported;
+- two drifted columns in one artifact are both reported;
+- ceiling breaches in two artifacts are both reported;
+- warnings are omitted from the failure text and do not make the gate fail;
+- one process-level test spawns the script's own `--self-test` entry point.
+
+That final test matters because an embedded self-test is only a claim until some required suite invokes it. The shipped fix added 17 tests around these contracts, including the previously uninvoked `--self-test` path ([Takazudo/zudo-front-builder#2884](https://github.com/Takazudo/zudo-front-builder/pull/2884)). Pure comparator tests make the many combinations cheap; the one spawned test proves the actual command-line seam remains connected.
+
+## The Same Rule Inside a Merged Test
+
+The `expect.soft` passage in [Aggregate Suite Budget](../decision-guide/aggregate-suite-budget.mdx) is the in-test form of the same principle. After several tests share one expensive fixture walk, a hard `expect` aborts the merged test at its first failure. Three broken assertions then take three runs to reveal, even though the first run reached the shared input needed by all three. Soft assertions preserve the aggregation: exercise the valid shared input once, record every independent assertion failure, and report them together.
+
+The trust boundary remains the same there too. If fixture setup fails and the page or service state is invalid, later assertions have no reliable subject and should not run. Collect-then-fail applies after expensive input becomes trustworthy, whether that input is a built artifact or a live test fixture.

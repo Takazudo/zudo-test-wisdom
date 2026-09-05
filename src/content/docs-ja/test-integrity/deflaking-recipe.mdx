@@ -46,6 +46,22 @@ assert(elapsed < budget)    // 決定論的 — 本当に気にしている性�
 
 確率的なアサーションは、ほとんどの場合、本物の不変条件ではなく都合のよい**代理指標（proxy）**を選んでしまったサインです。許容誤差ではなく、アサーションの方を直してください。
 
+#### 系 — 制御できないツールが生成する記録値
+
+ルール3の例には、もう1つの形があります。あるCIゲートは4つのartifactを4つの列で計測し、ドキュメントの生成元となるチェックイン済みmanifestの全値とbyte単位で完全一致するか比較していました。そのうち `gzip9` と `glueGzip9` の2列は、Nodeのzlibによる `gzip -9` の出力でした。この出力の**1 byte**の差によって、非圧縮artifactがbyte単位で同一だったにもかかわらず、1つのrelease rangeで `main` が3回redになりました。完全一致をやめればドキュメント精度のguardを失い、維持すればプロダクトが保証していない性質のためにゲートがredのままになります。[インシデントの分析と計測値](https://github.com/Takazudo/zudo-front-builder/issues/2878)、epicの[Verified root cause](https://github.com/Takazudo/zudo-front-builder/issues/2880#verified-root-cause-differs-slightly-from-the-issues-framing)、そして[実装されたdecision record](https://github.com/Takazudo/zudo-front-builder/pull/2884)に、その根拠が残されています。
+
+アサーションを分解してください。アサートする**値ごと**に、**誰が生成するのか、そして本当に気にしている性質は何か？**と問います。自分たちが管理する固定toolchainの出力 — final wasmとJS glue — はbyte単位の完全一致を維持します。プロダクトの不変条件 — size ceiling — はhard boundのままにします。生成ドキュメントを正確に保つ目的でのみ記録している外部compressorの出力には、ドキュメント値を中心とするbounded bandを適用します：
+
+```
+assert(finalWasm == documented.finalWasm) // pinned toolchain output — byte-exact
+assert(gzip9 < ceiling) // product invariant — hard bound
+assert(abs(gzip9 - documented.gzip9) <= GZIP_DRIFT_TOLERANCE_BYTES) // external doc value — evidence-sized band
+```
+
+bandの幅は、都合ではなく根拠から決めてください。このケースでは、Node 20、22、24のzlib version間のdriftは0 Bでした。異なるrunner間では1 Bのdriftが観測され、再実行でもまったく同じ値が再現されました。一方、compressorの実装を入れ替えると出力は12〜32 KB変化し、小さなbandで吸収すべき範囲をはるかに超えました。runner間の差について、CPU featureに依存するdeflate pathは**現時点の説明仮説**であり、再現された1 Bの差が**観測事実**です。したがって64 Bというbandは、このゲートのために文書化された選択です。観測noiseの64倍であり、実際のcompression ratio regression、実装の入れ替え、または4桁の手編集より2桁小さい値です。一般に正当化された許容値ではありません。
+
+例外は可視化し、説明責任を持たせます。[Required Behavior ルール8 — ゲートを不正操作しない](../decision-guide/required-behavior.mdx#4つの実行ルール-ルール8-—-ゲートを不正操作しない)が求めるとおり、bandはopen issueにリンクされた、名前付き・export済み・コメント付き・テスト済みの定数にしなければなりません。適用先は外部生成されたドキュメント精度のsliceだけであり、固定toolchainのsliceには決して適用しません。0でないband内のdriftは、失敗ではなくwarning annotation（GitHub Actionsでは `::warning::`）として報告します。真のbudgetであるceilingには手を触れません。bandを許容できるのは、この外部生成／ドキュメント精度のsliceに限られ、かつissueリンクによるpaper trailがある場合だけです。同じゲートpatternのreporting側については、[Collect Then Fail: Aggregate Gate Diagnostics](../ci-operations/collect-then-fail-gates.mdx)を参照してください。
+
 ## 自分のものではない赤いCI — ゲートオペレーターのプレイブック
 
 このページの他のすべての内容は、テストの**作者**に向けて書かれています：flakeをどう診断し、どう排除するか。このセクションは別の役割のためのものです。あなたは**ゲートオペレーター** — 差分（diff）が一切触れていないテストで必須チェックが赤くなったとき、マージゲートを握っている人間または自律エージェントです。あなたはそのテストを書いていないし、このマージウィンドウの中でそれを直すこともできません。そしてルール2は、何を常態化してはいけないかをすでに教えてくれています。ルール2が与えてくれないのは、これからの30分をどう動くかの判断手続きです。それがこれです。
