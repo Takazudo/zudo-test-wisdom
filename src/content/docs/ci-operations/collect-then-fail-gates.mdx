@@ -14,7 +14,7 @@ This is especially important for [Level 3 built-artifact gates](../testing-level
 
 ## The Failure That Reported One Artifact per Run
 
-A hand-written artifact-budget script measured four wasm artifacts in a fixed order: root, highlight, render, then parse. It asserted the documented manifest inside that per-artifact loop. The assertion threw on the first mismatching artifact, and its comparison helper returned on the first bad column within that artifact.
+A hand-written artifact-budget script in [zudo-front-builder](https://github.com/Takazudo/zudo-front-builder) (zfb), Takazudo's Rust-based frontend build orchestrator, measured four wasm artifacts in a fixed order: root, highlight, render, then parse. It asserted the documented manifest inside that per-artifact loop. The assertion threw on the first mismatching artifact, and its comparison helper returned on the first bad column within that artifact.
 
 That control flow made the log misleadingly complete. When the third artifact, `render`, mismatched, the script had enough data to print the fourth artifact's numbers, but it never compared `parse` with the manifest. During the v2.15.0 release, `render` and `parse` had independent mismatches that were both visible in the first run's log. The gate reported `render`; after that was repaired, the next run finally reported `parse`. Each discovery waited behind roughly 155 seconds of wasm build, so one blocked release paid two serial CI round trips for information the first run already held ([Takazudo/zudo-front-builder#2879](https://github.com/Takazudo/zudo-front-builder/issues/2879)).
 

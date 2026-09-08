@@ -14,7 +14,7 @@ sidebar_position: 9
 
 ## 1回の実行につき1成果物しか報告しなかった失敗
 
-ある手書きの成果物予算スクリプトは、4つのwasm成果物をroot、highlight、render、parseの固定順で測定していました。文書化されたmanifestのアサーションは成果物ごとのループ内にありました。このアサーションは最初に不一致となった成果物でthrowし、比較ヘルパーもその成果物内の最初の不一致列でreturnしていました。
+[zudo-front-builder](https://github.com/Takazudo/zudo-front-builder)（zfb、Takazudo の Rust 製フロントエンドビルドオーケストレーター）にある、ある手書きの成果物予算スクリプトは、4つのwasm成果物をroot、highlight、render、parseの固定順で測定していました。文書化されたmanifestのアサーションは成果物ごとのループ内にありました。このアサーションは最初に不一致となった成果物でthrowし、比較ヘルパーもその成果物内の最初の不一致列でreturnしていました。
 
 この制御フローにより、ログは実際以上に完全に見えていました。3番目の成果物 `render` が不一致になると、スクリプトは4番目の `parse` の数値をログに出せるところまで進んでいましたが、manifestとの比較は実行しませんでした。v2.15.0のリリース中、`render` と `parse` には独立した不一致があり、どちらも最初の実行のログに現れていました。ゲートはまず `render` だけを報告し、それを修復した後の実行でようやく `parse` を報告しました。各発見の前には約155秒のwasmビルドがあり、ブロック中のリリースは、最初の実行ですでに得られていた情報のために直列のCIラウンドトリップを2回支払いました（[Takazudo/zudo-front-builder#2879](https://github.com/Takazudo/zudo-front-builder/issues/2879)）。
 

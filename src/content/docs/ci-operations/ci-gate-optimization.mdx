@@ -10,7 +10,7 @@ Every component rule for making a CI gate faster is already written down in this
 
 What none of them owns is the **acceptance contract** those rules exist to serve: *make the gate faster without changing what is tested.* Split across four pages, they leave four holes that an optimization can finish faster and green straight through, having proven none of it. The number that improved may not be the number anyone waits on. The improvement may be one lucky hosted sample. The suite may have quietly dropped a test and picked up another in its place. And a pass-on-retry may be paying for part of the speedup off the books.
 
-This page is the protocol that closes those four holes — eight steps, each naming only what is new and pointing at the mechanic that already exists. The worked numbers throughout come from the zudo-front-builder PR-gate optimization ([Takazudo/zudo-front-builder#2701](https://github.com/Takazudo/zudo-front-builder/pull/2701)), and each is labelled by the clock it belongs to, because that is Step 1.
+This page is the protocol that closes those four holes — eight steps, each naming only what is new and pointing at the mechanic that already exists. The worked numbers throughout come from the PR-gate optimization of [zudo-front-builder](https://github.com/Takazudo/zudo-front-builder) (zfb), the Rust-based frontend build orchestrator this site itself runs on ([Takazudo/zudo-front-builder#2701](https://github.com/Takazudo/zudo-front-builder/pull/2701)), and each is labelled by the clock it belongs to, because that is Step 1.
 
 ## Step 1: Define the Clocks Up Front
 

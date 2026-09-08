@@ -8,7 +8,7 @@ Every other page in this guide answers *what* to run at a given tier: which asse
 
 So far on this site, "staging" has meant exactly one thing: the environment-tiered contract suite pointed at a preview deploy, in [Environment-Tiered Testing](./environment-tiered-testing.mdx). That is staging in the *deploy-target* sense -- one suite, three URLs. This page introduces staging in the *branch* sense: a topology that decides when heavy CI runs and when production changes at all. Both are cost + stability levers; they are not the same lever, and an agent-driven solo project needs both.
 
-The pattern here was evaluated 2026-07-05 for adoption in zudo-pattern-gen, and is already proven in another project's release flow. It is written for the specific shape that makes it pay off: a high-volume, agent-heavy workflow shipping into a `main` branch that auto-deploys.
+The pattern here was evaluated 2026-07-05 for adoption in pgen (`zudolab/zudo-pattern-gen`), Takazudo's private GPU pattern generator with a Cloudflare Workers backend, and is already proven in another project's release flow. It is written for the specific shape that makes it pay off: a high-volume, agent-heavy workflow shipping into a `main` branch that auto-deploys.
 
 ## The Problem: Every Agent Merge Is a Production Deploy
 
