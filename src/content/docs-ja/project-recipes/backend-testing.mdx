@@ -256,7 +256,7 @@ describe("session handler (Map-stub)", () => {
 
 ## vitest-pool-workersによる実workerdテスト
 
-MiniflareはNode上でWorkersランタイムをエミュレートします。`@cloudflare/vitest-pool-workers`はさらに一歩進みます。Vitestのテストファイルは、Node側のエミュレーション層ではなく`wrangler.toml`経由で結線された実際のD1/KV/R2バインディングを持つ、本物の`workerd`アイソレートの**内側**で実行されます。実例：Cloudflare Workers 上の非公開ファイル同期サービスである zudo-file-sync は、この方式でin-workerのスイートを実行しています。
+MiniflareはNode上でWorkersランタイムをエミュレートします。`@cloudflare/vitest-pool-workers`はさらに一歩進みます。Vitestのテストファイルは、Node側のエミュレーション層ではなく`wrangler.toml`経由で結線された実際のD1/KV/R2バインディングを持つ、本物の`workerd`アイソレートの**内側**で実行されます。
 
 ```ts
 // vitest.config.ts
