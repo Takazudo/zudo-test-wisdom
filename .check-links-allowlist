@@ -15,18 +15,6 @@
 # writes the missing JA mirror page), DELETE the entry — the
 # strict gate then surfaces real regressions in the same category.
 #
-# ----- Broken Links in Built HTML (2 entries) -------------------------
-#
-# The EN docs/claude/index.mdx (generated: true) uses <CategoryNav> which
-# emits nav cards to the first pages of claude-md and claude-skills when
-# rendered under the JA locale. There are no JA claude-md or claude-skills
-# pages (claude-resources generates EN-only pages; generated: true pages are
-# exempt from bilingual mirroring per CLAUDE.md).
-# The JA /docs/claude/ page is served via i18n fallback from the EN page, so
-# the CategoryNav still fires with the JA prefix, linking to specific child
-# pages that have no JA mirror. This is a known structural limitation of
-# the generated/i18n interaction — not a fixable broken link.
-dist/ja/docs/claude/index.html:688:/ja/docs/claude-md/root
-dist/ja/docs/claude/index.html:688:/ja/docs/claude-skills/headless-browser
+# ----- Broken Links in Built HTML (0 entries) -------------------------
 
 # ----- Absolute Links Bypassing Base Path (0 entries) -------------
