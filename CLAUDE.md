@@ -104,7 +104,9 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill and symlink it to `
 
 Improving the shared template is an upstream change — see `/dev-upstream-report`.
 
-The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry. The template's deterministic default derives `<packageName>-wisdom` = `zudo-test-wisdom-wisdom`, which is NOT the name `.gitignore` pins — leaving an untracked duplicate skill directory on every run.
+The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry, so that is the name generated regardless of what the template would derive. Since zudo-doc 5.19.1 the template's derivation is **suffix-aware** (`zudolab/zudo-doc#3154`): a `PROJECT_NAME` already ending in `-wisdom` is used as-is, so the derived default here is `zudo-test-wisdom` rather than the doubled `zudo-test-wisdom-wisdom` it produced before. `.gitignore` covers that project-name variant too, so neither name leaves a tracked stray.
+
+The doubled-suffix behaviour is historical. The template still computes the legacy `<packageName>-wisdom` name, but only to detect leftover directories from the old rule and warn about them — and that warning is silent here, because it fires only when the derived default is actually in use and this repo always passes the explicit override.
 
 **Playwright needs no manual install step.** `headless-browser` bundles Playwright and installs it on demand; `verify-ui` falls back to that bundle, or to its own directory when used standalone. Both self-heal on a fresh machine and retry once — see each skill's SKILL.md. Agents must NOT stop and ask the user to run `npx playwright install`; a missing browser is a setup gap, not a decision.
 
