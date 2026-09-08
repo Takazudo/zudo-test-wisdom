@@ -264,7 +264,7 @@ test("commit density stays invariant -- fixed mode", async ({ page }) => {
 });
 ```
 
-Splitting the pgen case this way produced, across three bundled Chromium runs, Free timings of **22.3 / 17.1 / 21.9s** and Fixed timings of **15.5 / 11.3 / 16.8s** — every one of them under 45s, against the same unchanged 60s per-test budget. The scenarios were never slow. Only their sum was.
+Splitting the pgen case -- a private GPU pattern generator -- this way produced, across three bundled Chromium runs, Free timings of **22.3 / 17.1 / 21.9s** and Fixed timings of **15.5 / 11.3 / 16.8s** — every one of them under 45s, against the same unchanged 60s per-test budget. The scenarios were never slow. Only their sum was.
 
 When the stages genuinely cannot be split — they share expensive state, or the later stage asserts on something the earlier one produced — keep them in one `test()` but **write the arithmetic down**: sum the worst case of every stage deadline plus setup and teardown, derive an explicit `test.setTimeout()` from that sum, and leave the sum in a comment so the next person editing a stage deadline can see what they are spending.
 
@@ -903,7 +903,7 @@ export const test = base.extend({
 
 <Note>
 
-This image-interception pattern from zzmod removes network latency for image assets; it runs on the `@smoke` lane when `CI=true`.
+This image-interception pattern from [Takazudo Modular](https://takazudomodular.com/) (`zzmod`; source not public) removes network latency for image assets; it runs on the `@smoke` lane when `CI=true`.
 
 </Note>
 

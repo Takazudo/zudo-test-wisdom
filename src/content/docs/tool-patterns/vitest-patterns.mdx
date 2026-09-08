@@ -398,7 +398,7 @@ This is the config-level half of [When jsdom Is Not Enough](../testing-levels/le
 
 ## Separate Configs for Different Test Types
 
-A pattern from mdx-formatter: separate configurations for unit tests, API tests, and function tests:
+A pattern from [mdx-formatter](https://github.com/Takazudo/mdx-formatter), a Markdown/MDX formatter (Node CLI + npm library over a Rust engine): separate configurations for unit tests, API tests, and function tests:
 
 ```
 vitest.config.ts          # Default: unit tests
@@ -474,7 +474,7 @@ describe("idempotency", () => {
 
 ## Miniflare + D1/R2 Integration Tests
 
-From pgen: testing Cloudflare Workers with local D1 database and R2 storage using Miniflare:
+From pgen (a private GPU pattern generator with a Cloudflare Workers backend): testing Cloudflare Workers with local D1 database and R2 storage using Miniflare:
 
 ```typescript
 // tests/integration.test.ts
@@ -530,7 +530,7 @@ Miniflare runs the same Workers runtime locally, so integration tests closely ma
 
 ## happy-dom Gotchas
 
-happy-dom is fast, but it has a handful of behaviors you cannot recover by reading more of your own code -- they are framework quirks. From zfb-runtime's client-router suite, here are the escape hatches and the one import-order trap that cost the most time to discover.
+happy-dom is fast, but it has a handful of behaviors you cannot recover by reading more of your own code -- they are framework quirks. From zfb-runtime's client-router suite -- a package of [zfb](https://github.com/Takazudo/zudo-front-builder), the Rust-based frontend build orchestrator this site runs on -- here are the escape hatches and the one import-order trap that cost the most time to discover.
 
 ### Disable real file loading with a shim
 

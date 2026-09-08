@@ -398,7 +398,7 @@ pnpm add -D vitest @vitest/browser playwright
 
 ## テストタイプ別の設定分離
 
-mdx-formatterのパターン：ユニットテスト、APIテスト、関数テスト用の別々の設定：
+[mdx-formatter](https://github.com/Takazudo/mdx-formatter)（Rust（napi）エンジン上のNode CLI + npmライブラリであるMarkdown/MDXフォーマッター）のパターン：ユニットテスト、APIテスト、関数テスト用の別々の設定：
 
 ```
 vitest.config.ts          # Default: unit tests
@@ -474,7 +474,7 @@ describe("idempotency", () => {
 
 ## Miniflare + D1/R2 インテグレーションテスト
 
-pgenの実例：MiniflareによるローカルD1データベースとR2ストレージを使ったCloudflare Workersのテスト：
+pgen（Cloudflare Workersバックエンドを持つ非公開のGPUパターンジェネレーター）の実例：MiniflareによるローカルD1データベースとR2ストレージを使ったCloudflare Workersのテスト：
 
 ```typescript
 // tests/integration.test.ts
@@ -530,7 +530,7 @@ Miniflareは同じWorkersランタイムをローカルで実行するため、�
 
 ## happy-dom の落とし穴
 
-happy-dom は高速ですが、自分のコードをいくら読み返しても気づけない挙動がいくつかあります。これらはフレームワーク固有のクセだからです。zfb-runtime のクライアントルーターのテストから、特に発見に時間を要したエスケープハッチと、import 順序に関する罠を紹介します。
+happy-dom は高速ですが、自分のコードをいくら読み返しても気づけない挙動がいくつかあります。これらはフレームワーク固有のクセだからです。zfb-runtime -- このサイトが走るビルドツールである[zfb](https://github.com/Takazudo/zudo-front-builder)のパッケージ -- のクライアントルーターのテストから、特に発見に時間を要したエスケープハッチと、import 順序に関する罠を紹介します。
 
 ### シムで実ファイルの読み込みを無効化する
 
