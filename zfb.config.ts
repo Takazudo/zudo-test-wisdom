@@ -78,6 +78,10 @@ export default defineConfig(
       "/docs/claude-skills/",
       "/docs/claude-agents/",
       "/docs/claude-commands/",
+      // Keeps the hand-maintained JA stub (src/content/docs-ja/claude/index.mdx)
+      // authoritative for /ja/docs/claude/ -- without this, zudo-doc's claude-resources
+      // generator (5.14.0+) tries to overwrite it and throws since it lacks `generated: true`.
+      "/docs/claude/",
     ],
     footer: {
       links: [],
