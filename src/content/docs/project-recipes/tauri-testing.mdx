@@ -113,7 +113,7 @@ The core crate pattern lets you run `cargo test` in CI without building the full
 
 <Warning>
 
-Once `cd core && cargo test` becomes the project's only Rust gate, a `#[cfg(test)]` module added to the app crate because it touches Tauri dependencies silently never runs — not in CI, not in the pre-push gate, and not in any scheduled re-exam. This happened in practice: seven security-relevant transport tests covering redirect fail-closed behavior, SSE boundary parsing, and token redaction sat in an app crate outside every automated tier (zudolab/zudo-text#5855).
+Once `cd core && cargo test` becomes the project's only Rust gate, a `#[cfg(test)]` module added to the app crate because it touches Tauri dependencies silently never runs — not in CI, not in the pre-push gate, and not in any scheduled re-exam. This happened in practice in zudo-text (a Tauri desktop text editor; private monorepo): seven security-relevant transport tests covering redirect fail-closed behavior, SSE boundary parsing, and token redaction sat in an app crate outside every automated tier (zudolab/zudo-text#5855).
 
 Close both sides of the gap: either **extract the pure logic into the core crate**, or **wire an explicit app-crate test run on a runner that can build the Tauri crate**. When adopting the core crate pattern, also audit the app crate for stray `#[cfg(test)]` modules so existing tests do not disappear from the gate unnoticed.
 
