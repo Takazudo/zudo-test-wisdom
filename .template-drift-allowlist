@@ -6,9 +6,9 @@
 # Format: one repo-relative path per line (no leading slash).
 # Blank lines and `#` comments are ignored.
 #
-# Reconciled through the zudo-doc 5.13.1 baseline. The 4.4 migration established
+# Reconciled through the zudo-doc 5.19.1 baseline. The 4.4 migration established
 # the single-entry `zudoDoc()` config and removed the ejected pages/lib +
-# src/{config,components,utils,types,integrations} shells. Only four
+# src/{config,components,utils,types,integrations} shells. Only three
 # template files diverge from the pinned baseline; everything else is either
 # byte-identical to the template or host-owned (not template-tracked).
 #
@@ -17,6 +17,12 @@
 # host reconstruction (and its `pages/[locale]/index.tsx` sibling) was deleted
 # in favour of `home: { wide: true }` in zfb.config.ts and the package-owned
 # routes, which also pass a `tags` prop the reconstruction had gone stale on.
+#
+# The former `scripts/check-links.js` entry was dropped at the 5.19.1 bump.
+# It existed only for the local unquoted-attribute compatibility patch tracked
+# as zudolab/zudo-doc#3720; 5.19.1 closes that issue upstream, handling
+# unquoted attributes, HTML entity decoding and protocol-relative hrefs
+# natively, so the host now runs the template file verbatim.
 
 # ── docHistory-patched route stubs ────────────────────────────────────────
 # create-zudo-doc patches the base + i18n doc-route stubs when the docHistory
@@ -27,14 +33,6 @@
 # base/features templates, so the drift check flags them.
 pages/docs/[[...slug]].tsx
 pages/[locale]/docs/[[...slug]].tsx
-
-# ── Minified HTML compatibility: check-links.js ───────────────────────────
-# zfb's production HTML emits unquoted href/id attributes. The 5.13.1
-# scaffold checker only recognizes quoted values, which makes its built-site
-# pass silently skip navigation links and anchors. Keep the scaffold checker
-# plus the small unquoted-attribute compatibility patch guarded by
-# scripts/check-links.test.mjs. Tracked upstream as zudolab/zudo-doc#3720.
-scripts/check-links.js
 
 # ── Host brand customization: global.css ──────────────────────────────────
 # global.css carries host brand overrides on top of the v4 base template: the

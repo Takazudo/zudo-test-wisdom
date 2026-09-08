@@ -9,6 +9,6 @@ Updated by /dev-bump-zudo-deps on every sync — keep `pinned:` accurate.
 - files: pages/docs/[[...slug]].tsx, pages/index.tsx, pages/[locale]/docs/[[...slug]].tsx, public/favicon-16x16.png, public/favicon-32x32.png, public/favicon.ico, public/favicon.svg, scripts/check-links.js, scripts/setup-doc-skill.sh, src/styles/global.css, tsconfig.json
 - source: packages/create-zudo-doc/templates/base/ -> repo root; packages/create-zudo-doc/templates/features/i18n/files/ -> repo root
 - track: releases
-- pinned: 7ca73f197021961603c22042748c23d9ce9d6c50 (v5.13.1)
-- updated: 2026-08-29
-- notes: Preserve the two doc-history route patches, host branding in global.css, the explicit test-wisdom setup-skill argument, and check-links.js support for unquoted attributes in minified zfb HTML without accepting escaped demo markup (zudolab/zudo-doc#3720); every intentional divergence is documented in .template-drift-allowlist, while non-allowlisted files must match the scaffold exactly.
+- pinned: 987b703057f5fb338068c1790399a184c8eebb93 (v5.19.1)
+- updated: 2026-09-08
+- notes: Preserve the two doc-history route patches, host branding in global.css, and the explicit test-wisdom setup-skill argument; every intentional divergence is documented in .template-drift-allowlist, while non-allowlisted files must match the scaffold exactly. The former check-links.js unquoted-attribute patch retired at this sync: 5.19.1 handles unquoted attributes, HTML entity decoding and protocol-relative hrefs natively and still rejects escaped demo markup (zudolab/zudo-doc#3720 closed upstream), so scripts/check-links.js now tracks the template verbatim.
