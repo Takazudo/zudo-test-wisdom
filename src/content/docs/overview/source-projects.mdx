@@ -12,14 +12,20 @@ They are organized into four categories: [Tool Patterns](../tool-patterns/index.
 
 ## The Projects
 
-| Project | Type | Key Testing Patterns |
-|---------|------|---------------------|
-| **zudo-text** | Tauri text editor (monorepo) | Vitest unit across workspace packages, Rust `cargo test` core crate, dual-browser Playwright (Chromium CI / WebKit local), mock backend adapter + console-error monitoring, stateful in-memory fake service, walking-skeleton e2e, MCP contract tests (in-memory SDK client, inventory lock), tiered e2e tags |
-| **zzmod** | Content website (zfb + Preact islands) | Vitest unit (jsdom, Testing Library/Preact, MSW), production-build Playwright, tag-based @smoke/@heavy lanes, CI image interception, heavy E2E off-CI via local b4push |
-| **pgen** | Pattern generator (monorepo + GPU runtime) | Deterministic PNG rendering, Miniflare + D1/R2 worker integration, tag-tiered Playwright e2e, GPU visual-regression (SSIM drift, GLSL parity), MCP contract tests (in-memory SDK client, inventory lock) |
-| **mdx-formatter** | CLI + npm library (Rust napi) | Contract-testing the Rust engine via Vitest, idempotency invariant, snapshot regression vs committed baselines, CLI integration via execFile |
-| **zfb** | Frontend build orchestrator / SSG | Rust workspace `cargo test` (primary), binding-shape stubs, emitted-code dynamic import, single-source-of-truth guard, happy-dom router quirks, node-free Docker smoke E2E |
-| **zudo-doc** | Doc-site framework | 6-level test taxonomy (Vitest unit → static dist reads → Playwright multi-fixture E2E → verify-ui), remark/rehype golden-fixture corpus + mdast tree factories |
+This table is the reference entry for the project code-names that recur throughout the guide: what each one is, whether its source is public, and the patterns it contributed. Pages that cite a project carry a one-line gloss at first mention; the fuller description lives here.
+
+| Project | What It Is | Key Testing Patterns |
+|---------|------------|----------------------|
+| **zudo-text** | Tauri desktop text editor; private monorepo. | Vitest unit across workspace packages, Rust `cargo test` core crate, dual-browser Playwright (Chromium CI / WebKit local), mock backend adapter + console-error monitoring, stateful in-memory fake service, walking-skeleton e2e, MCP contract tests (in-memory SDK client, inventory lock), tiered e2e tags |
+| **[Takazudo Modular](https://takazudomodular.com/)** (`zzmod`) | Takazudo's own hardware webshop / product-catalog site (zfb + Preact islands). Source is not public; live at the link above. | Vitest unit (jsdom, Testing Library/Preact, MSW), production-build Playwright, tag-based @smoke/@heavy lanes, CI image interception, heavy E2E off-CI via local b4push |
+| **pgen** | GPU pattern generator with a Cloudflare Workers backend; private (`zudolab/zudo-pattern-gen`). | Deterministic PNG rendering, Miniflare + D1/R2 worker integration, tag-tiered Playwright e2e, GPU visual-regression (SSIM drift, GLSL parity), MCP contract tests (in-memory SDK client, inventory lock) |
+| **[mdx-formatter](https://github.com/Takazudo/mdx-formatter)** | Markdown/MDX formatter -- Node CLI + npm library over a Rust (napi) engine. | Contract-testing the Rust engine via Vitest, idempotency invariant, snapshot regression vs committed baselines, CLI integration via execFile |
+| **[zfb](https://github.com/Takazudo/zudo-front-builder)** | Rust-based frontend build orchestrator / static-site generator; the build tool this site runs on. | Rust workspace `cargo test` (primary), binding-shape stubs, emitted-code dynamic import, single-source-of-truth guard, happy-dom router quirks, node-free Docker smoke E2E |
+| **[zudo-doc](https://github.com/zudolab/zudo-doc)** | The doc-site framework this guide is built with, on top of zfb. | 6-level test taxonomy (Vitest unit → static dist reads → Playwright multi-fixture E2E → verify-ui), remark/rehype golden-fixture corpus + mdast tree factories |
+| **[zmanuals](https://github.com/Takazudo/takazudomodular-manuals)** | Takazudo Modular's hardware-manual site -- Japanese translations plus a PDF pipeline. | Crawl-all-pages Playwright spec + fast HTTP smoke crawler, plus `pdf:verify`/`pdf:validate` data-pipeline consistency checks |
+| **[zudosg](https://github.com/Takazudo/zudo-sg)** | Component library + style-guide monorepo (`@zudo-sg/ui`, plus demo and doc sites). | Strict link-check + html-validate run together as a Level 3 build-output gate on every PR |
+| **[zdtp](https://github.com/Takazudo/zudo-design-token-panel)** | Design-token inspection panel component (`@takazudo/zdtp`) -- used by this very site. | jsdom/browser project split for component tests -- jsdom for the bulk, a `browser` project for the handful that assert real computed styles |
+| **takazudo-auth** | Session-gated auth app; private. | Environment-tiered login flows with Playwright `storageState` session reuse across dev, preview, and production |
 
 ## Common Theme
 

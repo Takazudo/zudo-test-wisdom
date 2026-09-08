@@ -256,7 +256,7 @@ describe("session handler (Map-stub)", () => {
 
 ## Real workerd Testing with vitest-pool-workers
 
-Miniflare emulates the Workers runtime in Node. `@cloudflare/vitest-pool-workers` goes one step further: Vitest test files run **inside** an actual `workerd` isolate, with real D1/KV/R2 bindings wired through `wrangler.toml` rather than a Node-side emulation layer. Live practice: zudo-file-sync runs its in-worker suites this way.
+Miniflare emulates the Workers runtime in Node. `@cloudflare/vitest-pool-workers` goes one step further: Vitest test files run **inside** an actual `workerd` isolate, with real D1/KV/R2 bindings wired through `wrangler.toml` rather than a Node-side emulation layer. Live practice: zudo-file-sync -- a private file-sync service on Cloudflare Workers -- runs its in-worker suites this way.
 
 ```ts
 // vitest.config.ts

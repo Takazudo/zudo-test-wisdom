@@ -12,14 +12,20 @@ sidebar_position: 2
 
 ## プロジェクト一覧
 
-| プロジェクト | タイプ | 主要なテストパターン |
-|------------|-------|-------------------|
-| **zudo-text** | Tauriテキストエディタ（モノレポ） | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、ステートフルなインメモリフェイクサービス、ウォーキングスケルトンe2e、MCP契約テスト（インメモリSDKクライアント、インベントリロック）、階層化e2eタグ |
-| **zzmod** | コンテンツWebサイト（zfb + Preactアイランド） | Vitestユニット（jsdom、Testing Library/Preact、MSW）、本番ビルドPlaywright、タグベースの@smoke/@heavyレーン、CI画像インターセプト、ローカルb4push経由のCIオフ重量E2E |
-| **pgen** | パターンジェネレーター（モノレポ + GPUランタイム） | 決定論的PNGレンダリング、Miniflare + D1/R2ワーカーインテグレーション、タグ階層化Playwright e2e、GPUビジュアルリグレッション（SSIMドリフト、GLSLパリティ）、MCP契約テスト（インメモリSDKクライアント、インベントリロック） |
-| **mdx-formatter** | CLI + npmライブラリ（Rust napi） | VitestによるRustエンジンのコントラクトテスト、冪等性不変条件、コミット済みベースラインに対するスナップショットリグレッション、execFileによるCLIインテグレーション |
-| **zfb** | フロントエンドビルドオーケストレーター / SSG | Rustワークスペース `cargo test`（主要）、バインディング形状スタブ、生成コードの動的インポート、信頼できる唯一の情報源ガード、happy-domルーターの癖、NodeフリーなDockerスモークE2E |
-| **zudo-doc** | ドキュメントサイトフレームワーク | 6レベルのテスト分類（Vitestユニット → 静的dist読み取り → Playwrightマルチフィクスチャーe2e → verify-ui）、remark/rehypeゴールデンフィクスチャのコーパス + mdastツリーファクトリー |
+この表は、ガイド全体で繰り返し登場するプロジェクトのコードネームを引くためのリファレンスです -- それが何であるか、ソースが公開されているか、そしてどんなパターンをもたらしたか。各ページはプロジェクトに言及するとき、初出で一行の説明を添えます。より詳しい説明はこの表にあります。
+
+| プロジェクト | 何であるか | 主要なテストパターン |
+|------------|-----------|-------------------|
+| **zudo-text** | Tauriデスクトップテキストエディタ。非公開のモノレポ。 | ワークスペースパッケージ横断のVitestユニット、Rust `cargo test` コアクレート、デュアルブラウザPlaywright（Chromium CI / WebKitローカル）、モックバックエンドアダプター + コンソールエラーモニタリング、ステートフルなインメモリフェイクサービス、ウォーキングスケルトンe2e、MCP契約テスト（インメモリSDKクライアント、インベントリロック）、階層化e2eタグ |
+| **[Takazudo Modular](https://takazudomodular.com/)** (`zzmod`) | Takazudo自身のハードウェアWebショップ / 商品カタログサイト（zfb + Preactアイランド）。ソースは非公開。上記リンク先で公開中。 | Vitestユニット（jsdom、Testing Library/Preact、MSW）、本番ビルドPlaywright、タグベースの@smoke/@heavyレーン、CI画像インターセプト、ローカルb4push経由のCIオフ重量E2E |
+| **pgen** | Cloudflare Workersバックエンドを持つGPUパターンジェネレーター。非公開（`zudolab/zudo-pattern-gen`）。 | 決定論的PNGレンダリング、Miniflare + D1/R2ワーカーインテグレーション、タグ階層化Playwright e2e、GPUビジュアルリグレッション（SSIMドリフト、GLSLパリティ）、MCP契約テスト（インメモリSDKクライアント、インベントリロック） |
+| **[mdx-formatter](https://github.com/Takazudo/mdx-formatter)** | Markdown/MDXフォーマッター -- Rust（napi）エンジン上のNode CLI + npmライブラリ。 | VitestによるRustエンジンのコントラクトテスト、冪等性不変条件、コミット済みベースラインに対するスナップショットリグレッション、execFileによるCLIインテグレーション |
+| **[zfb](https://github.com/Takazudo/zudo-front-builder)** | Rustベースのフロントエンドビルドオーケストレーター / 静的サイトジェネレーター。このサイトが走るビルドツール。 | Rustワークスペース `cargo test`（主要）、バインディング形状スタブ、生成コードの動的インポート、信頼できる唯一の情報源ガード、happy-domルーターの癖、NodeフリーなDockerスモークE2E |
+| **[zudo-doc](https://github.com/zudolab/zudo-doc)** | このガイドが構築されているドキュメントサイトフレームワーク。zfbの上に構築されている。 | 6レベルのテスト分類（Vitestユニット → 静的dist読み取り → Playwrightマルチフィクスチャーe2e → verify-ui）、remark/rehypeゴールデンフィクスチャのコーパス + mdastツリーファクトリー |
+| **[zmanuals](https://github.com/Takazudo/takazudomodular-manuals)** | Takazudo Modularのハードウェアマニュアルサイト -- 日本語翻訳とPDFパイプライン。 | crawl-all-pages Playwrightスペック + 高速HTTPスモーククローラー、加えて `pdf:verify`/`pdf:validate` によるデータパイプライン整合性チェック |
+| **[zudosg](https://github.com/Takazudo/zudo-sg)** | コンポーネントライブラリ + スタイルガイドのモノレポ（`@zudo-sg/ui`、デモサイトとドキュメントサイトを含む）。 | strictなリンクチェック + html-validateをすべてのPRでLevel 3ビルド出力ゲートとしてまとめて実行 |
+| **[zdtp](https://github.com/Takazudo/zudo-design-token-panel)** | デザイントークン検査パネルコンポーネント（`@takazudo/zdtp`）-- このサイト自身でも使われている。 | コンポーネントテストのjsdom/browserプロジェクト分割 -- 大部分はjsdom、実際の算出スタイルをアサートするひと握りは `browser` プロジェクトで |
+| **takazudo-auth** | セッションでゲートされた認証アプリ。非公開。 | dev・preview・本番をまたぐ、Playwright `storageState` によるセッション再利用を伴う環境階層化ログインフロー |
 
 ## 共通テーマ
 
