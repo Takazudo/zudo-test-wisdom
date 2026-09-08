@@ -90,6 +90,14 @@ The pure-unit project's default `testTimeout` is doing real work here: raising i
 
 </Tip>
 
+<Note>
+
+**"Guardrail" means two different things across this guide.** On this page it is *runner-level*: the strict default `testTimeout` whose whole job is to turn a genuinely hung test into a fast failure. In the [deflaking recipe](../test-integrity/deflaking-recipe.mdx) -- the native-suite note under its Part 1 root-cause catalog -- it is *per-wait*: a fixed deadline layered on a wait that is **already** event-keyed, where the synchronization is correct and the only open question is whether that deadline's value is defensible.
+
+Telling them apart matters because the standard deflaking prescription -- "replace the wall-clock wait with an event-keyed one" -- is a no-op against the second kind: there is no wall-clock wait left to replace, only a number to justify. What both senses do share is one discipline: raise either only from a measured latency distribution, never on a hunch. The 60s project budget above qualifies because it is derived from the largest child timeout it has to contain; a number picked to turn a red run green does not remove a flake, it hides one.
+
+</Note>
+
 ### `extends: true` Is Required
 
 Vitest project configs do **not** inherit the root config by default. Add a project to `test.projects` without `extends: true`, and root-level `resolve.alias` and `test.server.deps.inline` silently stop applying to that project -- no error, no warning, the tests just run against unresolved dependencies. In a Preact-compat repo aliasing `react` to `preact/compat`, that surfaces as every test transitively importing a precompiled React-flavored runtime failing with `Cannot find package 'react'`, because the alias that would have redirected the import never reached that project.
