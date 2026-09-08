@@ -662,7 +662,7 @@ The why-comment on each entry is the load-bearing part, not bureaucratic ceremon
 
 The monitor above buffers `page.on` events in **Node**, and that is the part worth generalising. When the outcome under test is a browser-level terminal event — a download, a popup, a file chooser — Playwright observes it in Node, while the diagnostics that explain it live in the page, and the page's execution context is allowed to disappear at exactly that boundary. The durable shape is a page-side bridge whose records are copied into Node the moment they arrive, plus the browser's own terminal event registered before the trigger and raced against everything that means red.
 
-Worked case: the export flow in `zudo-pattern-gen` — a dialog that generates a file and hands it to the browser — produced two false negatives in a row out of that one seam.
+Worked case: the export flow in pgen — a dialog that generates a file and hands it to the browser — produced two false negatives in a row out of that one seam.
 
 ### Two false negatives from the same seam
 
