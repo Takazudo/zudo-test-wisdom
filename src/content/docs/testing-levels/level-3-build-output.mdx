@@ -212,7 +212,7 @@ describe("build output", () => {
 
 ## Example: MDX Formatter Contract Testing
 
-A real-world pattern from mdx-formatter: the Vitest suite tests the Rust formatting engine by running it on fixture files and comparing output. This is Level 3, not Level 1, because `format()` is a thin JS wrapper that drives a compiled native engine produced by the build -- the object under test is that build artifact, not hand-written TypeScript logic. (If your formatter were pure JS/TS with no compiled backend, this same idempotency check would belong at Level 1 instead.)
+A real-world pattern from [mdx-formatter](https://github.com/Takazudo/mdx-formatter): the Vitest suite tests the Rust formatting engine by running it on fixture files and comparing output. This is Level 3, not Level 1, because `format()` is a thin JS wrapper that drives a compiled native engine produced by the build -- the object under test is that build artifact, not hand-written TypeScript logic. (If your formatter were pure JS/TS with no compiled backend, this same idempotency check would belong at Level 1 instead.)
 
 ```typescript
 // tests/format.test.ts
