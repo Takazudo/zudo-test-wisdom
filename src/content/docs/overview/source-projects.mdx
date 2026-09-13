@@ -24,7 +24,7 @@ This table is the reference entry for the project code-names that recur througho
 | **[zudo-doc](https://github.com/zudolab/zudo-doc)** | The doc-site framework this guide is built with, on top of zfb. | 6-level test taxonomy (Vitest unit → static dist reads → Playwright multi-fixture E2E → verify-ui), remark/rehype golden-fixture corpus + mdast tree factories |
 | **[zmanuals](https://github.com/Takazudo/takazudomodular-manuals)** | Takazudo Modular's hardware-manual site -- Japanese translations plus a PDF pipeline. | Crawl-all-pages Playwright spec + fast HTTP smoke crawler, plus `pdf:verify`/`pdf:validate` data-pipeline consistency checks |
 | **[zudosg](https://github.com/Takazudo/zudo-sg)** | Component library + style-guide monorepo (`@zudo-sg/ui`, plus demo and doc sites). | Strict link-check + html-validate run together as a Level 3 build-output gate on every PR |
-| **[zdtp](https://github.com/Takazudo/zudo-design-token-panel)** | Design-token inspection panel component (`@takazudo/zdtp`) -- used by this very site. | jsdom/browser project split for component tests -- jsdom for the bulk, a `browser` project for the handful that assert real computed styles |
+| **[zdtp](https://github.com/Takazudo/zudo-design-token-panel)** | Design-token inspection panel component (`@takazudo/zdtp`); its test setup is a source for these patterns, but it is not a dependency of this site. | jsdom/browser project split for component tests -- jsdom for the bulk, a `browser` project for the handful that assert real computed styles |
 | **takazudo-auth** | Session-gated auth app; private. | Environment-tiered login flows with Playwright `storageState` session reuse across dev, preview, and production |
 
 ## Common Theme

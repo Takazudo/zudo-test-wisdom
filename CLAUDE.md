@@ -100,11 +100,11 @@ This repo contains test-related Claude Code skills under `.claude/skills/`:
 
 Run `pnpm setup:doc-skill` to generate the test-wisdom skill and symlink it to `~/.claude/skills/` (and `~/.codex/skills/`).
 
-**It also symlinks the tracked skills** (`verify-ui`, `verify-ui-ai`, `headless-browser`) into the same global directory by default — a `create-zudo-doc@5.2.1`+ template feature (`LINK_TRACKED_SKILLS`), pulled in by the Aug-2026 zudo-doc 5.x migration, not something this repo added. `scripts/setup-doc-skill.sh` is a create-zudo-doc **template file** guarded by `pnpm check:template-drift`, so it must not be edited locally: a local edit fails the drift check and is silently overwritten on the next template re-sync. Pass `--no-link-tracked-skills` to skip that step and symlink only the generated skill.
+**It also symlinks the tracked skills** (`verify-ui`, `verify-ui-ai`, `headless-browser`) into the same global directory by default — a create-zudo-doc 5.x template feature (`LINK_TRACKED_SKILLS`), pulled in by the Aug-2026 zudo-doc 5.x migration, not something this repo added. `scripts/setup-doc-skill.sh` is a create-zudo-doc **template file** guarded by `pnpm check:template-drift`; local edits must be intentional and recorded in `.template-drift-allowlist`, otherwise they are silently overwritten on the next template re-sync. Pass `--no-link-tracked-skills` to skip that step and symlink only the generated skill.
 
 Improving the shared template is an upstream change — see `/dev-upstream-report`.
 
-The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry, so that is the name generated regardless of what the template would derive. Since zudo-doc 5.19.1 the template's derivation is **suffix-aware** (`zudolab/zudo-doc#3154`): a `PROJECT_NAME` already ending in `-wisdom` is used as-is, so the derived default here is `zudo-test-wisdom` rather than the doubled `zudo-test-wisdom-wisdom` it produced before. `.gitignore` covers that project-name variant too, so neither name leaves a tracked stray.
+The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry, so that is the name generated regardless of what the current zudo-doc 5.x template would derive. Its derivation is **suffix-aware** (`zudolab/zudo-doc#3154`): a `PROJECT_NAME` already ending in `-wisdom` is used as-is, so the derived default here is `zudo-test-wisdom` rather than the doubled `zudo-test-wisdom-wisdom` it produced before. `.gitignore` covers that project-name variant too, so neither name leaves a tracked stray.
 
 The doubled-suffix behaviour is historical. The template still computes the legacy `<packageName>-wisdom` name, but only to detect leftover directories from the old rule and warn about them — and that warning is silent here, because it fires only when the derived default is actually in use and this repo always passes the explicit override.
 
@@ -116,13 +116,14 @@ One invariant to preserve if you touch the install path: browser downloads must 
 
 ## Typography
 
-- Futura for page h1 titles and header site name (`font-futura` class)
-- Noto Sans JP for body text
-- Headings use font-weight 400 (normal), not bold
+- The `futura-editorial` theme pack owns display typography: Jost at weight 400 for doc h1 titles, the home hero heading, and the header site name.
+- Heading weights follow the pack: doc h2 uses 400 and h3 uses 500.
+- The pack supplies Noto Sans for Latin body text and Space Mono for code.
+- The host's only font override adds Noto Sans JP before system fallbacks in the pack's sans stack. Keep its `head` webfont links in `zfb.config.ts`; the pack's bundled fonts cover Latin glyphs only.
 
 ## Project Layout
 
-zudo-doc 4.x is a thin host shell — all wiring (components, config types,
+zudo-doc 5.x is a thin host shell — all wiring (components, config types,
 utils, routes, chrome) lives inside `@takazudo/zudo-doc`, driven by the single
 `zudoDoc()` config.
 

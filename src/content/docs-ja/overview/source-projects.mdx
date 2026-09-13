@@ -24,7 +24,7 @@ sidebar_position: 2
 | **[zudo-doc](https://github.com/zudolab/zudo-doc)** | このガイドが構築されているドキュメントサイトフレームワーク。zfbの上に構築されている。 | 6レベルのテスト分類（Vitestユニット → 静的dist読み取り → Playwrightマルチフィクスチャーe2e → verify-ui）、remark/rehypeゴールデンフィクスチャのコーパス + mdastツリーファクトリー |
 | **[zmanuals](https://github.com/Takazudo/takazudomodular-manuals)** | Takazudo Modularのハードウェアマニュアルサイト -- 日本語翻訳とPDFパイプライン。 | crawl-all-pages Playwrightスペック + 高速HTTPスモーククローラー、加えて `pdf:verify`/`pdf:validate` によるデータパイプライン整合性チェック |
 | **[zudosg](https://github.com/Takazudo/zudo-sg)** | コンポーネントライブラリ + スタイルガイドのモノレポ（`@zudo-sg/ui`、デモサイトとドキュメントサイトを含む）。 | strictなリンクチェック + html-validateをすべてのPRでLevel 3ビルド出力ゲートとしてまとめて実行 |
-| **[zdtp](https://github.com/Takazudo/zudo-design-token-panel)** | デザイントークン検査パネルコンポーネント（`@takazudo/zdtp`）-- このサイト自身でも使われている。 | コンポーネントテストのjsdom/browserプロジェクト分割 -- 大部分はjsdom、実際の算出スタイルをアサートするひと握りは `browser` プロジェクトで |
+| **[zdtp](https://github.com/Takazudo/zudo-design-token-panel)** | デザイントークン検査パネルコンポーネント（`@takazudo/zdtp`）。このサイトの依存関係ではなく、これらのパターンのソースプロジェクト。 | コンポーネントテストのjsdom/browserプロジェクト分割 -- 大部分はjsdom、実際の算出スタイルをアサートするひと握りは `browser` プロジェクトで |
 | **takazudo-auth** | セッションでゲートされた認証アプリ。非公開。 | dev・preview・本番をまたぐ、Playwright `storageState` によるセッション再利用を伴う環境階層化ログインフロー |
 
 ## 共通テーマ

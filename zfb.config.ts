@@ -32,9 +32,38 @@ export default defineConfig(
     // host-reconstructed pages/index.tsx + pages/[locale]/index.tsx, which
     // existed only because zudo-doc 4.2.1 had no toggle (zudo-doc#2959);
     // 4.4.x added `home.wide`, so the package-owned routes are used again.
-    home: { wide: true },
+    home: {
+      wide: true,
+      introMarkdown: `zudo-test-wisdom is Takazudo's frontend testing strategy guide for AI coding agents and the developers who review their work. It collects practical lessons from real projects to help you decide what to test and how to verify a change.
+
+The guide covers six testing levels, from unit tests to AI-based visual verification as a last resort. Use the decision guide to choose the level a change needs, and the test integrity articles to spot flaky tests, false greens, and tests that merely agree with the implementation.
+
+Install the \`test-wisdom\` Claude Code skill from this repository with \`pnpm setup:doc-skill\`, then use \`/test-wisdom <topic>\` to find relevant articles during development. The bundled \`verify-ui\` and \`headless-browser\` skills help check computed styles, screenshots, and browser interactions.
+
+- [Overview](/docs/overview/) — the guide's purpose, audience, and skill setup.
+- [Testing Levels](/docs/testing-levels/) — what each level can verify and when to move beyond it.
+- [Decision Guide](/docs/decision-guide/) — choose a testing level and decide where and when to run tests.
+- [Test Integrity](/docs/test-integrity/) — recognize misleading passes and keep tests trustworthy.`,
+    },
+    // Pack-owned editorial typography, colors, and chrome.
+    themePack: "futura-editorial",
     locales: {
-      ja: { label: "JA", dir: "src/content/docs-ja" },
+      ja: {
+        label: "JA",
+        dir: "src/content/docs-ja",
+        description:
+          "AIエージェントと開発者に向けた、Takazudoのフロントエンドテスト戦略ガイド",
+        introMarkdown: `zudo-test-wisdomは、Takazudoがまとめたフロントエンドのテスト戦略ガイドです。AIコーディングエージェントと、その成果をレビューする開発者に向けて、実際のプロジェクトで得た知見をもとに、何をテストし、変更をどう検証するかを紹介します。
+
+ユニットテストから、最終手段としてのAIによる視覚検証までを6つのテストレベルに整理し、判断ガイドで変更内容に合ったレベルの選び方を紹介します。フレイクや偽グリーン、実装と同じ思い込みをなぞるだけの「自己一致」など、テストの信頼性を損なう落とし穴も解説します。
+
+Claude Code用の\`test-wisdom\`スキルは、このリポジトリで\`pnpm setup:doc-skill\`を実行すると導入できます。開発中に\`/test-wisdom <topic>\`で関連記事を参照でき、同梱の\`verify-ui\`と\`headless-browser\`で計算済みスタイルやスクリーンショット、ブラウザ上の操作を確認できます。
+
+- [概要](/ja/docs/overview/) — ガイドの目的と対象読者、スキルの導入方法
+- [テストレベル](/ja/docs/testing-levels/) — 各レベルで確認できることと、検証を一段進めるタイミング
+- [判断ガイド](/ja/docs/decision-guide/) — テストレベルの選び方と、テストを実行する場所・タイミング
+- [テスト完全性](/ja/docs/test-integrity/) — 見かけの成功に惑わされず、テストの信頼性を保つための考え方`,
+      },
     },
     metaTags: {
       description: true,
