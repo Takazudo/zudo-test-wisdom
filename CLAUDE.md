@@ -116,9 +116,10 @@ One invariant to preserve if you touch the install path: browser downloads must 
 
 ## Typography
 
-- Futura for page h1 titles and header site name (`font-futura` class)
-- Noto Sans JP for body text
-- Headings use font-weight 400 (normal), not bold
+- The `futura-editorial` theme pack owns display typography: Jost at weight 400 for doc h1 titles, the home hero heading, and the header site name.
+- Heading weights follow the pack: doc h2 uses 400 and h3 uses 500.
+- The pack supplies Noto Sans for Latin body text and Space Mono for code.
+- The host's only font override adds Noto Sans JP before system fallbacks in the pack's sans stack. Keep its `head` webfont links in `zfb.config.ts`; the pack's bundled fonts cover Latin glyphs only.
 
 ## Project Layout
 

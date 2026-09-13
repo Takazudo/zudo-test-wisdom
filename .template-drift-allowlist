@@ -38,10 +38,9 @@ pages/[locale]/docs/[[...slug]].tsx
 scripts/check-links.js
 scripts/setup-doc-skill.sh
 
-# ── Host brand customization: global.css ──────────────────────────────────
-# global.css carries host brand overrides on top of the v4 base template: the
-# Noto Sans JP `--font-sans` stack (theme.css defaults to system-ui), the
-# `--font-futura` brand face, and the `[data-header-logo]` Futura header rule.
-# Everything else (design tokens, base rules, feature CSS) ships from
-# @takazudo/zudo-doc via theme.css / content.css / features.css.
+# ── Japanese font fallback: global.css ────────────────────────────────────
+# global.css extends the futura-editorial pack's Latin-only Noto Sans stack
+# with Noto Sans JP, loaded through zfb.config.ts `head`. Its scoped :root
+# selector preserves that fallback when the pack stylesheet loads later.
+# Display typography and chrome styling stay owned by the package/theme pack.
 src/styles/global.css
