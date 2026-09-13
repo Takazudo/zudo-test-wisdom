@@ -183,6 +183,21 @@ In a packaged Tauri app, the transport is Rust-native HTTP and SSE behind Tauri 
 
 A full-journey e2e test needs the [stateful fake service](./stateful-fake-service.mdx) form instead of this minimal stub: an in-memory service that preserves the real server's guards, exposes deterministic failure controls, and records a redacted request trace. Keep the small adapter for focused unit and component cases; use the stateful form when the journey must prove that earlier requests drive later responses across the client state machine.
 
+## Automating the Real Tauri Boundary
+
+The browser lane and the native lane answer different questions. Playwright against a dev server proves frontend behavior in a real browser engine; it does not prove Tauri IPC, native window creation, cross-window event delivery, AppKit focus, or OS close handling. For those cases, build a dedicated test-only Tauri bundle with an embedded WebDriver and drive its real WebViews through WebdriverIO.
+
+Treat the native lane as a narrow integration test, not a replacement for browser E2E:
+
+1. Gate the Rust WebDriver plugin behind an opt-in Cargo feature and a dedicated Tauri capability/configuration.
+2. Give the bundle a unique identifier, isolated fixture state, incognito WebView stores, and no personal account credentials.
+3. Serialize the suite when it owns a fixed driver port or creates real application windows.
+4. Use W3C keyboard and pointer actions. A DOM `dispatchEvent()` is not evidence that native focus, clipboard, or editor input paths work.
+5. Capture sanitized evidence from every WebDriver window on failure, then clean fixture state and terminate only the exact test-bundle process.
+6. Separately prove that the ordinary production build excludes the driver dependency, permission, alternate bootstrap, and test markers.
+
+This lane is especially valuable for a regression that crosses renderer realms. A jsdom test can model separate module graphs and a shared fake backend, but only the native lane can establish that a real child window sent its handback, the host applied it before restore, and the OS close destroyed the child exactly once.
+
 ## The 8-Step Escalation Ladder
 
 For Tauri apps, the escalation ladder extends beyond the standard testing levels:
@@ -195,12 +210,12 @@ For Tauri apps, the escalation ladder extends beyond the standard testing levels
 | 4 | Playwright WebKit (dev server) | Frontend rendering bugs |
 | 5 | Playwright WebKit (production build) | Build-specific frontend bugs |
 | 6 | verify-ui + headless-browser | CSS/visual bugs in frontend |
-| 7 | Tauri dev mode manual test | IPC integration bugs |
+| 7 | Test-only Tauri bundle + embedded WebDriver (or manual dev-mode fallback) | IPC, native-window, focus, and close-lifecycle bugs |
 | 8 | Tauri production build manual test | Full app packaging bugs |
 
 <Note>
 
-Steps 1-6 are automatable and should be in CI. Steps 7-8 require the full Tauri application and are typically manual or require specialized CI with display servers.
+Steps 1-6 are broadly automatable and should be in CI. Step 7 can also be automated on a platform-capable runner with a feature-isolated embedded WebDriver; otherwise it falls back to manual testing. Step 8 remains the final production-bundle inspection and manual journey.
 
 </Note>
 
@@ -243,9 +258,10 @@ node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
 **Steps 7-8: Need full Tauri app**
 
 ```bash
-# Step 7: Tauri dev mode
-pnpm tauri dev
-# Manual testing in the actual Tauri window
+# Step 7: isolated native integration lane (project-specific command)
+pnpm native-e2e:build
+pnpm native-e2e:smoke
+# If no native driver harness exists, test the same journey manually in tauri dev.
 
 # Step 8: Production build
 pnpm tauri build

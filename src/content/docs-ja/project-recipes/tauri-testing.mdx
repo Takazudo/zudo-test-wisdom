@@ -183,6 +183,21 @@ const backend =
 
 フルジャーニーのe2eテストには、この最小限のスタブではなく[ステートフルなフェイクサービス](./stateful-fake-service.mdx)が必要です。本物のサーバーと同じガードを維持し、決定論的な失敗制御を公開し、秘匿化済みのリクエスト証跡を記録するインメモリサービスです。対象を絞ったユニットテストやコンポーネントテストでは小さなアダプターを使い、一連のジャーニーで先行するリクエストがクライアントのステートマシンを介して後続のレスポンスを決めることまで証明するときは、ステートフルな形を使ってください。
 
+## 実際のTauri境界を自動化する
+
+ブラウザレーンとネイティブレーンが答える問いは異なります。dev serverに対するPlaywrightは、実ブラウザエンジン内のfrontend behaviorを証明しますが、Tauri IPC、native window creation、window間event delivery、AppKit focus、OSのclose handlingまでは証明しません。これらにはembedded WebDriverを組み込んだテスト専用Tauri bundleをビルドし、WebdriverIOから実際のWebViewを操作します。
+
+ネイティブレーンはブラウザE2Eの代替ではなく、対象を絞ったintegration testとして扱ってください。
+
+1. Rust WebDriver pluginをオプトインCargo featureと専用Tauri capability/configurationの背後に置く。
+2. bundleには固有identifier、分離したfixture state、incognito WebView storeを与え、個人アカウントのcredentialを使わない。
+3. 固定driver portを所有する場合や実際のapplication windowを作成する場合はsuiteを直列化する。
+4. W3C keyboard/pointer actionsを使う。DOMの `dispatchEvent()` は、native focus、clipboard、editor input pathが動く証拠にはならない。
+5. 失敗時には全WebDriver windowから秘匿化済みevidenceを保存し、その後fixture stateを消去して完全一致するtest-bundle processだけを終了する。
+6. 通常のproduction buildにdriver dependency、permission、alternate bootstrap、test markerが含まれないことを別途証明する。
+
+このレーンは、renderer realmをまたぐregressionで特に有効です。jsdomテストでは別々のmodule graphと共有fake backendをモデル化できますが、実際のchild windowがhandbackを送り、hostがrestore前に適用し、OS closeがchildを正確に1回だけ破棄したことまで確立できるのはネイティブレーンだけです。
+
 ## 8ステップエスカレーションラダー
 
 Tauriアプリの場合、エスカレーションラダーは標準のテストレベルを超えて拡張されます：
@@ -195,12 +210,12 @@ Tauriアプリの場合、エスカレーションラダーは標準のテスト
 | 4 | Playwright WebKit（devサーバー） | フロントエンドレンダリングバグ |
 | 5 | Playwright WebKit（本番ビルド） | ビルド固有のフロントエンドバグ |
 | 6 | verify-ui + headless-browser | フロントエンドのCSS/ビジュアルバグ |
-| 7 | Tauriデブモードの手動テスト | IPC連携バグ |
+| 7 | テスト専用Tauri bundle + embedded WebDriver（またはdev modeの手動fallback） | IPC、native window、focus、close lifecycleのバグ |
 | 8 | Tauri本番ビルドの手動テスト | 完全なアプリパッケージングバグ |
 
 <Note>
 
-ステップ1-6は自動化可能でCIに含めるべきです。ステップ7-8は完全なTauriアプリケーションが必要で、通常は手動またはディスプレイサーバーを備えた専用CIが必要です。
+ステップ1-6は広く自動化でき、CIに含めるべきです。ステップ7も、platform-capable runnerとfeature-isolated embedded WebDriverがあれば自動化できます。用意できない場合は手動テストへfallbackします。ステップ8はproduction bundleの最終inspectionとmanual journeyです。
 
 </Note>
 
@@ -243,9 +258,10 @@ node $HOME/.claude/skills/verify-ui/scripts/verify-styles.mjs \
 **ステップ7-8: 完全なTauriアプリが必要**
 
 ```bash
-# Step 7: Tauri dev mode
-pnpm tauri dev
-# Manual testing in the actual Tauri window
+# Step 7: isolated native integration lane (project-specific command)
+pnpm native-e2e:build
+pnpm native-e2e:smoke
+# If no native driver harness exists, test the same journey manually in tauri dev.
 
 # Step 8: Production build
 pnpm tauri build
