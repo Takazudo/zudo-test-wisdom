@@ -8,7 +8,7 @@
 #
 # Reconciled through the zudo-doc 5.22.1 baseline. The 4.4 migration established
 # the single-entry `zudoDoc()` config and removed the ejected pages/lib +
-# src/{config,components,utils,types,integrations} shells. Only three
+# src/{config,components,utils,types,integrations} shells. Only five
 # template files diverge from the pinned baseline; everything else is either
 # byte-identical to the template or host-owned (not template-tracked).
 #
