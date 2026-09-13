@@ -33,6 +33,8 @@ export default defineConfig(
     // existed only because zudo-doc 4.2.1 had no toggle (zudo-doc#2959);
     // 4.4.x added `home.wide`, so the package-owned routes are used again.
     home: { wide: true },
+    // Pack-owned editorial typography, colors, and chrome.
+    themePack: "futura-editorial",
     locales: {
       ja: { label: "JA", dir: "src/content/docs-ja" },
     },
