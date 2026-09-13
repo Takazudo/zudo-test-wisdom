@@ -63,7 +63,8 @@ All documentation files use `.mdx` format with YAML frontmatter.
 
 ### Frontmatter Fields
 
-Schema defined in `src/content.config.ts`:
+The schema is supplied by `@takazudo/zudo-doc`; override it with
+`buildDocsSchema` in `zfb.config.ts` when this site needs additional fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -117,9 +118,11 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill, then symlink every
 
 ## Typography
 
-- Futura for page h1 titles and header site name (`font-futura` class)
-- Noto Sans JP for body text
-- Headings use font-weight 400 (normal), not bold
+- The `futura-editorial` theme pack owns display typography: Jost at weight 400
+  for page h1 titles, the home hero heading, and the header site name.
+- The pack supplies Noto Sans for Latin body text and Space Mono for code.
+- The host adds Noto Sans JP to the pack's sans stack for Japanese glyphs.
+- Heading weights follow the pack: h2 uses 400 and h3 uses 500.
 
 ## Hosting & CI/CD
 
