@@ -6,7 +6,7 @@
 # Format: one repo-relative path per line (no leading slash).
 # Blank lines and `#` comments are ignored.
 #
-# Reconciled through the zudo-doc 5.19.1 baseline. The 4.4 migration established
+# Reconciled through the zudo-doc 5.22.1 baseline. The 4.4 migration established
 # the single-entry `zudoDoc()` config and removed the ejected pages/lib +
 # src/{config,components,utils,types,integrations} shells. Only three
 # template files diverge from the pinned baseline; everything else is either
@@ -18,11 +18,11 @@
 # in favour of `home: { wide: true }` in zfb.config.ts and the package-owned
 # routes, which also pass a `tags` prop the reconstruction had gone stale on.
 #
-# The former `scripts/check-links.js` entry was dropped at the 5.19.1 bump.
-# It existed only for the local unquoted-attribute compatibility patch tracked
-# as zudolab/zudo-doc#3720; 5.19.1 closes that issue upstream, handling
-# unquoted attributes, HTML entity decoding and protocol-relative hrefs
-# natively, so the host now runs the template file verbatim.
+# The script entries below intentionally retain correctness fixes that are
+# present in this host's 5.19.1 scaffold but absent from the published 5.22.1
+# create-zudo-doc template: Bash 3.2-safe config/locale handling and
+# quoted-attribute/single-pass HTML scans. Keep them until the upstream
+# template carries the equivalent fixes again.
 
 # ── docHistory-patched route stubs ────────────────────────────────────────
 # create-zudo-doc patches the base + i18n doc-route stubs when the docHistory
@@ -33,6 +33,10 @@
 # base/features templates, so the drift check flags them.
 pages/docs/[[...slug]].tsx
 pages/[locale]/docs/[[...slug]].tsx
+
+# ── Retained scaffold correctness fixes absent from 5.22.1 ───────────────
+scripts/check-links.js
+scripts/setup-doc-skill.sh
 
 # ── Host brand customization: global.css ──────────────────────────────────
 # global.css carries host brand overrides on top of the v4 base template: the
