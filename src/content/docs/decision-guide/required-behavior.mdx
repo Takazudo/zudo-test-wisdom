@@ -197,6 +197,8 @@ Making a gate pass by editing existing assertions requires a fresh-context revie
 
 Projects should enumerate their concrete gate-file list in their testing strategy doc (for example: the runner config, the fixture setup script, both CI workflow files, and the pre-push script).
 
+A runner per-test timeout or liveness deadline is a **guardrail, not an assertion**: it turns a hang into a diagnosable failure and asserts nothing about the product. Raising it is not a loosened assertion tolerance, provided you show that the new value is derived **either from a measured latency distribution (baseline versus under load) or from the child deadline the budget has to contain**, link an open issue, and obtain the same fresh-context review for any gate-defining file edit, including runner config. See the ["A fixed deadline as a failure guardrail on an already event-keyed wait" bullet in the deflaking recipe's root-cause catalog](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog) and [Per-Project Timeout Budgets](../tool-patterns/vitest-patterns.mdx#project-level-vitest-configs-per-project-timeout-budgets).
+
 ```
 # Wrong — no issue reference
 test.skip('banner renders correctly', () => { ... })
@@ -207,6 +209,9 @@ expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
 # Wrong — gate-defining file edited to make a gate pass, no fresh-context review
 testMatch: ['**/*.spec.ts', '!**/banner-*.spec.ts'] // silently excludes failing spec
 
+# Wrong — no derivation, no open issue, no fresh-context review
+testTimeout: 30_000 // was 5000
+
 # Right (a) — legitimate skip: a real, deliberate skip, not a flake
 // skipped: https://github.com/your-org/your-app/issues/55 — pending backend flag rollout
 test.skip('banner renders correctly', () => { ... })
@@ -215,13 +220,34 @@ test.skip('banner renders correctly', () => { ... })
 # with @flaky in the title, exactly matching the quarantine pipeline's convention
 // quarantined: https://github.com/your-org/your-app/issues/55
 test('banner renders correctly @flaky', () => { ... })
+
+# Right (c) — project-scoped guardrail; runner config received fresh-context review
+test: {
+  projects: [
+    { extends: true, test: { name: 'unit', include: ['src/**/*.test.ts'] } },
+    {
+      extends: true,
+      test: {
+        name: 'scripts',
+        include: ['scripts/**/*.test.ts'],
+        // 2x the largest 30s child deadline; open issue:
+        // https://github.com/your-org/your-app/issues/56
+        testTimeout: 60_000,
+      },
+    },
+  ],
+}
 ```
 
 <Note>
 
-These are two different exits, not interchangeable spellings of the same thing. `test.skip` + `@flaky` together is the graveyard state [Heavy Test Decision Rule](./heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky) forbids: a skipped test collects no results, so a "quarantined" test that is also skipped runs nowhere and silently rots. Use (a) when the test should not run at all right now (with a real reason). Use (b) — the actual quarantine convention — when the test should keep running and reporting, just not block the gate.
+Skip (a) and quarantine (b) are two different exits, not interchangeable spellings of the same thing. `test.skip` + `@flaky` together is the graveyard state [Heavy Test Decision Rule](./heavy-test-decision.mdx#the-quarantine-pipeline-for-flaky) forbids: a skipped test collects no results, so a "quarantined" test that is also skipped runs nowhere and silently rots. Use (a) when the test should not run at all right now (with a real reason). Use (b) — the actual quarantine convention — when the test should keep running and reporting, just not block the gate.
 
 </Note>
+
+For projects that condense Rule 8 into their own agent-facing docs, use this one-sentence summary:
+
+> Never weaken a gate without a linked open issue; require fresh-context review for assertion changes made to pass the gate and all edits to gate-defining files; and treat runner timeouts and liveness deadlines as guardrails, not assertions, raising them only with a linked open issue and a value derived either from a measured latency distribution (baseline versus under load) or from the child deadline the budget must contain.
 
 ### Rule 9 — Scoped Heavy Verification
 
