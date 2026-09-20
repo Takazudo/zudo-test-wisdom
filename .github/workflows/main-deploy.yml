@@ -7,10 +7,12 @@
 #   4. Merges both build outputs and deploys to Cloudflare Workers
 #   5. Sends IFTTT notification with deploy status
 #
-# Inter-job data sharing uses upload-artifact/download-artifact with
-# retention-days: 1, scoped to github.run_id. Chosen over actions/cache
-# because cache saves are best-effort and can silently fail, leaving
-# fail-on-cache-miss consumers to hard-error on a green producer.
+# Inter-job data sharing uses upload-artifact@v7/download-artifact@v8; uploads
+# keep the default archive: true, with retention-days: 1, scoped to
+# github.run_id. Downloads use artifact names, so the v5 ID-only path-layout
+# change does not apply. Chosen over actions/cache because cache saves are
+# best-effort and can silently fail, leaving fail-on-cache-miss consumers to
+# hard-error on a green producer.
 #
 # Concurrency: only one production deploy runs at a time.
 # We do NOT cancel in-progress runs -- the earlier deploy should finish.
@@ -69,14 +71,14 @@ jobs:
         run: pnpm build
 
       - name: Upload site build output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-${{ github.run_id }}
           path: dist/
           retention-days: 1
           if-no-files-found: error
-          # run_id is reused on "Re-run all jobs"; v4 rejects a duplicate
-          # artifact name, so allow the rerun to replace the prior attempt's.
+          # run_id is reused on "Re-run all jobs"; artifact names are immutable
+          # by default, so allow the rerun to replace the prior attempt's.
           overwrite: true
 
   # ---------------------------------------------------------------------------
@@ -107,7 +109,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Download dist (built by build-site)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist-${{ github.run_id }}
           path: dist/
@@ -152,14 +154,14 @@ jobs:
             --out-dir doc-history-out
 
       - name: Upload doc history output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: doc-history-${{ github.run_id }}
           path: doc-history-out/
           retention-days: 1
           if-no-files-found: error
-          # run_id is reused on "Re-run all jobs"; v4 rejects a duplicate
-          # artifact name, so allow the rerun to replace the prior attempt's.
+          # run_id is reused on "Re-run all jobs"; artifact names are immutable
+          # by default, so allow the rerun to replace the prior attempt's.
           overwrite: true
 
   # ---------------------------------------------------------------------------
@@ -176,13 +178,13 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Download site build output
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist-${{ github.run_id }}
           path: dist/
 
       - name: Download doc history output
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: doc-history-${{ github.run_id }}
           path: doc-history-out/
