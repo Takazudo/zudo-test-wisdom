@@ -76,6 +76,7 @@ export default defineConfig({
           name: "scripts",
           include: ["scripts/**/__tests__/**/*.test.ts"],
           // subprocess-heavy: budget 2x the largest 30s child timeout
+          // open issue: https://github.com/your-org/your-app/issues/56
           testTimeout: 60_000,
         },
       },
@@ -92,9 +93,9 @@ The pure-unit project's default `testTimeout` is doing real work here: raising i
 
 <Note>
 
-**"Guardrail" means two different things across this guide.** On this page it is *runner-level*: the strict default `testTimeout` whose whole job is to turn a genuinely hung test into a fast failure. In the [deflaking recipe](../test-integrity/deflaking-recipe.mdx) -- the native-suite note under its Part 1 root-cause catalog -- it is *per-wait*: a fixed deadline layered on a wait that is **already** event-keyed, where the synchronization is correct and the only open question is whether that deadline's value is defensible.
+**"Guardrail" means two different things across this guide.** On this page it is *runner-level*: the strict default `testTimeout` whose whole job is to turn a genuinely hung test into a fast failure. In the deflaking recipe's ["A fixed deadline as a failure guardrail on an already event-keyed wait" bullet](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog) -- the native-suite note under its Part 1 root-cause catalog -- it is *per-wait*: a fixed deadline layered on a wait that is **already** event-keyed, where the synchronization is correct and the only open question is whether that deadline's value is defensible.
 
-Telling them apart matters because the standard deflaking prescription -- "replace the wall-clock wait with an event-keyed one" -- is a no-op against the second kind: there is no wall-clock wait left to replace, only a number to justify. What both senses do share is one discipline: raise either only from a derivation you can show -- a measured latency distribution, or the child deadline the budget has to contain -- never on a hunch. The 60s project budget above qualifies because it is derived from the largest child timeout it has to contain; a number picked to turn a red run green does not remove a flake, it hides one.
+Telling them apart matters because the standard deflaking prescription -- "replace the wall-clock wait with an event-keyed one" -- is a no-op against the second kind: there is no wall-clock wait left to replace, only a number to justify. What both senses do share is one discipline: raise either only from a derivation you can show -- **either a measured latency distribution (baseline versus under load) or the child deadline the budget has to contain** -- never on a hunch. The 60s project budget above meets the derivation requirement because it is derived from the largest child timeout it has to contain; a number picked to turn a red run green does not remove a flake, it hides one. [Rule 8 — Never Game the Gate](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate) also requires a linked open issue and the same fresh-context review as any other edit to runner config, a gate-defining file.
 
 </Note>
 

@@ -197,6 +197,8 @@ PR #42 authored by agent-session-A
 
 プロジェクトは、テスト戦略ドキュメントに具体的なゲートファイルの一覧を列挙すべきです（例：ランナー設定、フィクスチャセットアップスクリプト、両方のCIワークフローファイル、pre-pushスクリプト）。
 
+ランナーのテストごとのタイムアウトやハング検知用の期限（liveness deadline）は、**アサーションではなくガードレール**です。ハングを診断可能な失敗に変えるためのもので、プロダクトの性質を検証するものではありません。そのため、**通常時と負荷時のレイテンシ分布の実測、または予算内に収める必要のある子プロセスの期限のいずれかから**新しい値を導いたことを示し、オープンなissueへのリンクを付けた引き上げは、アサーションの許容値の緩和には当たりません。ただし、ランナー設定を含むゲートを定義するファイルを編集する場合は、他の変更と同じフレッシュコンテキストのレビューが必須です。デフレーキングレシピの根本原因カタログにある[「すでにイベントに同期している待機の、ハング検知用の固定期限」の項目](../test-integrity/deflaking-recipe.mdx#part-1-—-根本原因カタログ)と、[プロジェクトごとのタイムアウト予算](../tool-patterns/vitest-patterns.mdx#プロジェクトレベルのvitest設定-プロジェクトごとのタイムアウト予算)を参照してください。
+
 ```
 # Wrong — no issue reference
 test.skip('banner renders correctly', () => { ... })
@@ -207,6 +209,9 @@ expect(page).toHaveScreenshot({ maxDiffPixels: 500 }) // was 50
 # Wrong — gate-defining file edited to make a gate pass, no fresh-context review
 testMatch: ['**/*.spec.ts', '!**/banner-*.spec.ts'] // silently excludes failing spec
 
+# Wrong — no derivation, no open issue, no fresh-context review
+testTimeout: 30_000 // was 5000
+
 # Right (a) — legitimate skip: a real, deliberate skip, not a flake
 // skipped: https://github.com/your-org/your-app/issues/55 — pending backend flag rollout
 test.skip('banner renders correctly', () => { ... })
@@ -215,13 +220,34 @@ test.skip('banner renders correctly', () => { ... })
 # with @flaky in the title, exactly matching the quarantine pipeline's convention
 // quarantined: https://github.com/your-org/your-app/issues/55
 test('banner renders correctly @flaky', () => { ... })
+
+# Right (c) — project-scoped guardrail; runner config received fresh-context review
+test: {
+  projects: [
+    { extends: true, test: { name: 'unit', include: ['src/**/*.test.ts'] } },
+    {
+      extends: true,
+      test: {
+        name: 'scripts',
+        include: ['scripts/**/*.test.ts'],
+        // 2x the largest 30s child deadline; open issue:
+        // https://github.com/your-org/your-app/issues/56
+        testTimeout: 60_000,
+      },
+    },
+  ],
+}
 ```
 
 <Note>
 
-この2つは同じことの言い換えではなく、別々の出口です。`test.skip` と `@flaky` を組み合わせるのは、[ヘビーテスト判断ルール](./heavy-test-decision.mdx#flaky-の隔離パイプライン)が禁じる墓場状態そのものです：スキップされたテストは結果を一切収集しないため、「隔離」されているはずのテストが同時にスキップされていると、どこでも実行されず静かに腐っていきます。(a) は、テストを今は一切実行すべきでない、正当な理由がある場合に使います。(b) — 本来の隔離の慣習 — は、テストの実行と報告は続けつつ、ゲートはブロックさせたくない場合に使います。
+(a) のスキップと (b) の隔離は、同じことの言い換えではなく、別々の出口です。`test.skip` と `@flaky` を組み合わせるのは、[ヘビーテスト判断ルール](./heavy-test-decision.mdx#flaky-の隔離パイプライン)が禁じる墓場状態そのものです：スキップされたテストは結果を一切収集しないため、「隔離」されているはずのテストが同時にスキップされていると、どこでも実行されず静かに腐っていきます。(a) は、テストを今は一切実行すべきでない、正当な理由がある場合に使います。(b) — 本来の隔離の慣習 — は、テストの実行と報告は続けつつ、ゲートはブロックさせたくない場合に使います。
 
 </Note>
+
+ルール8をプロジェクト独自のエージェント向けドキュメントに要約して載せる場合は、次の1文を使ってください：
+
+> ゲートを弱める変更にはオープンなissueへのリンクを、ゲートを通すためのアサーション変更とゲートを定義するファイルのあらゆる編集にはフレッシュコンテキストのレビューを必須とし、ランナーのタイムアウトやハング検知用の期限はアサーションではなくガードレールとして扱い、その引き上げは、オープンなissueへのリンクを付け、新しい値を実測のレイテンシ分布（通常時と負荷時の比較）または予算内に収める必要のある子プロセスの期限のいずれかから導いた場合に限って認める。
 
 ### ルール9 — スコープを絞った重い検証
 

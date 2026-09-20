@@ -76,10 +76,12 @@ The reason-string taxonomy on [Heavy Test Decision Rule § Same Rules, Rust Synt
 ### `--run-ignored`: the Quarantine/Exam Lane
 
 ```sh
-cargo nextest run --workspace --profile ci                              # T1: the PR gate -- never runs an #[ignore]'d test, whatever its reason
+cargo nextest run --workspace --profile ci                              # T1: PR gate -- no quarantined tests; env-gated ignored tests use explicit lanes
 cargo nextest run --workspace --profile exam --run-ignored ignored-only # T3: the quarantine/exam lane -- runs ONLY the ignored set
 cargo nextest run --workspace --profile exam --run-ignored all          # full-inventory sanity run -- everything, ignored and not; not a gate
 ```
+
+The PR gate excludes quarantined tests by policy; selecting `--profile ci` alone does not distinguish quarantine from environment requirements. Tests ignored solely for environment requirements run under `--profile ci` in explicit, name-filtered `--run-ignored ignored-only` lanes, as the env-gate lanes in the worked YAML below show.
 
 `--run-ignored ignored-only` is the nextest analogue of Playwright's `--grep "@flaky"` quarantine lane from [Scheduled Re-exam](../ci-operations/scheduled-re-exam.mdx) — except it selects on the *presence* of `#[ignore]`, not on the reason string's content. nextest never parses what is inside the quotes; the string is for humans and grep, not for nextest's own filtering. A workspace whose ignored set mixes `heavy:` and `flaky:` reasons runs both in the same `ignored-only` invocation, which erases a distinction the Playwright side keeps separate via independent `--grep` expressions. Narrow with a name filter when the two need to be judged differently:
 
@@ -204,6 +206,8 @@ test-group = 'heavy-serial-build'
 Three identical-SHA hosted runs of that split reduced the median **required `health` job** time from 22m22s to 18m54s -- the clock is that one job's own duration, not the gate's wall time -- while running 5,807 of 5,807 tests with zero retries and zero failures. That interval is this one wave's own start and end; the 18m30s at the top of this section is the same job clock after every later wave, so the two figures are different endpoints, not a disagreement.
 
 The decision rule is narrow on purpose: **split only when the two classes are independently proven not to contend.** Proven means each class's isolation mechanism is identified and verified to exist (Migration Checklist step 3), not inferred from two groups happening to go green once. A split made on a guess reintroduces exactly the port and shared-state races the `max-threads = 1` group was created to suppress, and it reintroduces them as intermittent failures rather than as a config error.
+
+The worked case measured the required `health` job's wall-clock median and checked retries and test identity across identical-SHA hosted runs. It did not measure peak memory, so these results do not establish that the runner has enough memory to run both classes concurrently.
 
 Accept the split on evidence, and state the evidence: the **median over at least three identical-SHA hosted runs**, with **test identity unchanged** (key the comparison on [test identity, not test title](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-key-cross-run-triage-on-test-identity-not-on-test-title)), **zero new retries**, and every artifact still retained. The median is the right statistic for a claim about a job's typical duration; a claim about the *tail* is a different claim needing a different one -- [flipping `fullyParallel`](./playwright-patterns.mdx#fullyparallel-defaults-to-false-—-the-mega-file-tail-flip-it-as-an-experiment-not-as-a-recommendation) compares **maxima over at least five attempts** for exactly that reason, and this section does not displace it. Read the durations from [job-level timestamps](../ci-operations/ci-runner-sizing.mdx#timing-retros-read-job-level-timestamps), and hold the [retry budget](../decision-guide/execution-tiers.mdx#retry-budgets) fixed across every sample -- a split that buys wall clock by spending retry budget has bought nothing.
 
