@@ -1,0 +1,182 @@
+---
+title: Local Heavy-Lane Admission
+description: When concurrent agent sessions starve one dev machine and a healthy suite goes red -- a machine-wide admission gate, a verdict classification, and a deferral rule that cannot become a laundering path.
+sidebar_position: 10
+---
+
+## The Gap This Page Fills
+
+[Execution Tiers](./execution-tiers.mdx) treats other sessions on the same box as **wall-clock noise**: a ~10-minute lane clocks ~15, and the advice is not to gate on the number. That covers duration. It does not cover the case where contention changes the **result**.
+
+The setup that exposes it: several AI agent sessions work on one dev machine at once -- parallel worktrees, more than one repo, two different agent CLIs side by side. Each session eventually runs its own heavy lane: `b4push`, a Playwright suite, a production build plus a full test run. Two or three of those overlapping exhaust memory, and suites go red:
+
+- browser launch failures and `Target closed`
+- timeouts on waits that are correctly event-keyed
+- `ECONNREFUSED` to a server the suite starts itself
+- processes killed with exit 137
+
+Nothing in the code under test is wrong, and nothing in the test is wrong either.
+
+Two principles this guide already holds make that red awkward to handle:
+
+- **Tests stay machine-spec independent.** Longer timeouts and fewer workers "because my laptop is busy" tune the suite to one machine.
+- **"It's just flaky" is never accepted** -- [deflaking Rule 2](../test-integrity/deflaking-recipe.mdx#the-three-rules). Resource starvation *is* a diagnosis, but every fix in the deflaking recipe edits the test, and here the test is fine.
+
+A reader following those pages literally either keeps "fixing" a healthy test or quietly accepts the red. This page is the third option, in three rules.
+
+<Note>
+
+This is the local-side counterpart of [runner-sizing Rule 2](../ci-operations/ci-runner-sizing.mdx#the-four-runner-sizing-rules) ("a bigger runner does NOT fix memory-bounded failures"). On CI the machine is yours alone and the lever is the lane's shape. Locally the machine is shared and the lever is **who is allowed to start**.
+
+</Note>
+
+## Rule 1: Put the Machine Knowledge in the Scheduler, Not in the Tests
+
+Heavy lanes pass through a **machine-wide admission gate**:
+
+- a **slot semaphore** -- default one heavy run at a time, across every session, repo, and agent CLI on the machine
+- a **memory gate** -- do not start below N MB available
+
+The suite itself is untouched, so it stays machine-independent. The one place that knows "this box cannot run two Playwright suites" is the one place allowed to know it.
+
+This is different from [lane over-subscription](../test-integrity/deflaking-recipe.mdx#part-1-—-root-cause-catalog-7-lane-over-subscription-the-failure-whose-identity-roams), where a single lane asks for more than the machine has and the fix is the lane's own worker cap. Here each lane is correctly sized *for a machine it has to itself*. The defect is that nothing arbitrates between lanes.
+
+### What counts as heavy
+
+Full e2e / integration suites, anything that launches a browser, `b4push`, a production build followed by a full test run, `cargo build --workspace`. Unit tests, type-check, lint, and single-file test runs are **not** heavy.
+
+**Wrap only heavy steps.** A queued lint is wasted wall-clock, and a gate that slows cheap feedback gets bypassed.
+
+### Implementation lessons
+
+Each of these was learned the hard way. The gate is a ~350-line shell script; the design decisions matter more than the code.
+
+**Use fd-based `flock(2)` slots, not lock files with PIDs.** Agent sessions die mid-run constantly -- API error, token limit, killed terminal. With a lock held on an open file descriptor, the kernel frees the slot the instant the process goes away. No daemon, no heartbeat, no stale-lock GC, and nothing for anyone to "clean up".
+
+```bash
+exec 200>>"$GATE_DIR/slot-$i.lock"
+flock -n 200   # held by the open fd; released by the kernel when this process dies
+```
+
+Stock macOS has no `flock(1)`. A `perl` one-liner calling `flock()` on the inherited fd is a drop-in backend.
+
+**Spawn the suite with the lock fd closed, in its own process group.** A detached dev server or browser that inherits the fd pins the slot long after the run ends. The process group is what lets a run cap kill the whole tree (pnpm → vitest → workers, playwright → browsers) instead of only the top process.
+
+```bash
+setsid "$@" 200>&- &
+```
+
+**Add a hard run cap.** Self-releasing locks do nothing about a run that *hangs* -- the holder is alive, so the slot stays taken. On expiry, TERM the group, KILL it 10 seconds later, exit 124.
+
+**Add a watchdog for the gate's own death.** If the gate is SIGKILLed, its lock frees while the suite keeps running, and the next waiter starts on top of it -- exactly the overlap the gate exists to prevent. A small watchdog subshell polls the gate's PID and takes the suite's process group down when the gate is gone.
+
+**Check memory while holding the slot.** Queue for a slot first, then wait for headroom. Checking memory before queueing lets every waiter stampede the moment memory frees up.
+
+**Make nested calls a no-op.** The gate exports a marker variable to the wrapped command; a gated script that calls another gated script runs it directly. With one slot, a nested acquire deadlocks against its own parent until the wait times out.
+
+**Set slot count and memory threshold per machine, never per call.** All callers must agree on the numbers. They belong in the shell profile. A caller that raises its own slot count to get through has simply turned the gate off.
+
+**Pass the exit code through unchanged.** The gate labels the outcome (Rule 2); it never converts a red into a green.
+
+**Fail open.** No lock backend, or an unwritable state directory → print a warning and run the command unguarded. The gate must not become a new way for a test run to break.
+
+### Call the gate from the project's script, not from agent instructions
+
+An instruction like "always run heavy suites through the gate" works until one agent forgets, and one forgetful caller is enough to starve everyone else. Put the call in the project's own `b4push` script instead, fail-open when the gate is absent:
+
+```bash
+heavy() {
+  local g="${HEAVY_GATE:-$HOME/.local/bin/heavy-gate}"
+  if [ -x "$g" ] && [ -z "${CI:-}" ]; then "$g" -- "$@"; else "$@"; fi
+}
+
+heavy pnpm test:e2e
+```
+
+Every caller is serialized without having to remember a rule. The repo stays usable for people and CI runners that do not have the gate -- on CI the machine is not shared, so the wrapper steps aside.
+
+### One pool or two
+
+Short browser-automation work (an agent taking a screenshot, a computed-style check) is a second kind of contended resource. It can share the heavy pool or get its own.
+
+| | One pool | Two pools |
+|---|---|---|
+| Simplicity | One queue, one set of numbers | Two queues to reason about |
+| Memory accounting | Honest -- nothing else heavy is running | The pools do not know about each other |
+| Short UI check during a 20-minute suite | Waits the full 20 minutes | Proceeds |
+
+The field setup uses **two**: a browser pool with a slot semaphore only, and a heavy pool with the semaphore plus the memory gate. A 10-second screenshot queued behind a 20-minute suite is a strong incentive to skip the visual check, which is a worse outcome than mild overlap. The memory gate is what keeps the two pools honest with each other -- a heavy run will not start while browser work has the machine under the threshold, and a failing run that overlapped something hungry gets labelled by Rule 2. Start with one pool; split when short checks are visibly being starved.
+
+## Rule 2: Classify the Outcome Before Reading the Failure
+
+The gate samples available memory for the duration of the run and records the minimum. With that and the exit code it emits one last line:
+
+```
+gate: verdict=PASS|FAIL|ENV_SUSPECT exit=N secs=N min_mem_mb=N reason=...
+```
+
+| Verdict | Signature | Do |
+| --- | --- | --- |
+| contention (exit 75) | Queue or memory wait timed out. **The suite never ran.** | Retry later, or defer (Rule 3). Never bypass the gate. Never report it as a test failure. |
+| `ENV_SUSPECT` | Exit 137 (SIGKILL -- the OOM killer's mark), run-cap expiry, or non-zero exit with minimum memory under a low-water mark | Rerun **once** -- the gate already guarantees it runs alone. Green → it was starvation, done. Red again → Rule 3. |
+| `FAIL` | Non-zero exit with memory to spare | A real failure. Fix it. Not deferrable. |
+
+Read the verdict line *before* the failure output. A `Target closed` stack trace reads like a product bug for twenty minutes; `min_mem_mb=212` reads like starvation in one second.
+
+Append the same fields to a ledger file. A week of entries answers "is this machine's threshold set right?" with data instead of recollection.
+
+<Warning>
+
+**The broken-expectation override.** Output that names a broken expectation -- assertion diff, type error, lint error, missing module, snapshot mismatch -- is a **real failure regardless of verdict**. Starvation makes things slow, absent, or dead. It does not make `expected 3, received 4`. `ENV_SUSPECT` is a hint for where to look first, never a pass.
+
+</Warning>
+
+The environment-shaped signatures are the ones from the top of this page: timeouts, browser launch failures, `Target closed`, `ECONNREFUSED` to a self-started server, a killed process.
+
+**One rerun, not "rerun until green".** The solo rerun is a controlled experiment: same command, contention removed. It has two informative outcomes. A second and third rerun are [pass-on-retry](../test-integrity/deflaking-recipe.mdx#the-three-rules) wearing a lab coat.
+
+## Rule 3: Deferral That Cannot Become a Laundering Path
+
+Some heavy steps cannot produce a trustworthy local result today. Blocking the whole workflow on them is wrong; calling them green is worse. **Defer** the step -- move its verdict to a machine that can give one.
+
+### Deferrable only if all three hold
+
+1. **The local result is untrustworthy for an environmental reason**: exit 75; or `ENV_SUSPECT` that stayed red on the solo rerun; or the step cannot run on this platform at all.
+2. **The output shows no broken expectation** (the Rule 2 override).
+3. **Something else WILL run that exact step** -- a CI job that mirrors it, or another machine.
+
+If (3) fails -- no CI job covers the step and no other machine will run it -- it is **not deferrable. It is unverified.** Report it as unverified and stop short of merging. This clause is what keeps deferral from becoming a laundering path: a step can only be deferred *to* somewhere.
+
+"Mirrors that exact step" is literal. A CI job that runs the unit suite does not settle a deferred e2e step. If the local lane is [T4 because CI cannot run it](./execution-tiers.mdx#the-five-tiers-t4-local-heavy-lane----convenience-not-enforcement), the owed party is another machine, not CI.
+
+### The procedure
+
+1. **Record it.** Raise an issue labelled `deferred-verification` carrying the exact command, the verdict line, the tail of the output, the machine / OS, and which CI job or machine owes the result.
+2. **Continue**, and list the step in the final report as **deferred** -- never as passed.
+3. **Settle it.** CI green on that step → close the issue. CI red → it was a real failure all along; fix it under that issue. Steps owed to another machine stay open until they run there.
+
+The issue is the mechanism, not paperwork. A deferred step with no open record is indistinguishable, a day later, from a step that was skipped.
+
+### Platform-bound steps are the same rule
+
+A macOS-only lane on a WSL/Linux box (and the reverse) is the same situation with a different signature: the local machine cannot give a verdict, another one can. Same three conditions, same issue label, same "deferred, not passed" in the report. One rule covers both, which matters because agents otherwise invent a second, looser convention for "can't run here".
+
+### How this squares with deflaking Rule 2
+
+"Defer to CI", read carelessly, sounds like the thing Rule 2 bans. It is the opposite. Accepting a flake means the red is **explained away** and nobody owes anything. Deferral means the red is **diagnosed** (verdict line, solo rerun, no broken expectation), **recorded** (an open issue), and its verdict is **moved to a machine that can give one** -- and a red there is binding.
+
+## What Never to Do
+
+- Run a heavy suite ungated because the queue is slow.
+- Raise slots or lower the memory threshold for one call to get through.
+- Treat exit 75 or `ENV_SUSPECT` as a pass, or rerun more than once hoping for green.
+- Weaken the test -- longer timeouts, fewer workers, skipped specs -- to fit this machine. Machine limits are the scheduler's problem.
+- Tag the victim `@flaky`. Quarantine is for nondeterminism proven to be in the test; this test is healthy.
+- Report a deferred step as passed, or defer a step nothing else will run.
+
+## Related Pages
+
+- [Execution Tiers](./execution-tiers.mdx) -- T4, the local heavy lane this gate sits in front of
+- [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) -- the three rules deferral has to stay consistent with, and lane over-subscription, the single-lane sibling of this problem
+- [CI Runner Sizing](../ci-operations/ci-runner-sizing.mdx) -- the CI-side counterpart: memory-bounded failures are not fixed by a bigger machine
+- [Required Testing Behavior](./required-behavior.mdx) -- the anti-gaming rules a weakened timeout would violate

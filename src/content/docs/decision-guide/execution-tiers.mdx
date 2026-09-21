@@ -185,6 +185,8 @@ Treat "5–10 min" as a soft design target for the lane's **structure** (what is
 
 **Agent anti-pattern:** measure a local lane once on a contended machine, see it exceed the target, declare the acceptance criterion "buggy", and trigger a redesign. That spends real effort chasing load noise. This is the local-timing cousin of the deflaking rule -- wait on the real completion signal, not a fixed deadline; see [the deflaking recipe](../test-integrity/deflaking-recipe.mdx).
 
+**Contention can change the *result*, not just the duration.** Two or three heavy lanes overlapping on one box exhaust memory, and a healthy suite goes red -- browser launch failures, `Target closed`, timeouts, exit 137. That is not noise to shrug off and not a test to "fix": serialize heavy lanes through a machine-wide admission gate, classify the outcome before reading the failure, and defer only to a machine that will actually run the step. See [Local Heavy-Lane Admission](./local-heavy-lane-admission.mdx).
+
 **The stronger form of this warning: do not spend hours *producing* a local number either.** The rule above says a local wall-clock figure is not trustworthy enough to gate on. The corollary, learned the expensive way, is that it is not worth the machine time to obtain. An agent anchored a plan's acceptance criteria to a local full-suite baseline and spent ~3 hours across 4 of 6 shards without producing a usable number -- while the CI instrumentation that answers the same question had been merged, by the same agent, an hour earlier.
 
 </Warning>
@@ -401,6 +403,7 @@ A Tauri text-editor app has keyboard-shortcut e2e specs that are only trustworth
 ## Related Pages
 
 - [Heavy Test Decision Rule](./heavy-test-decision.mdx) -- the per-test procedure: demote, delete, or assign a tier by asking *why* it is heavy
+- [Local Heavy-Lane Admission](./local-heavy-lane-admission.mdx) -- when concurrent sessions starve the T4 lane: admission gate, verdict classification, and the deferral rule
 - [Scheduled Re-exam and Night Exam](../ci-operations/scheduled-re-exam.mdx) -- the concrete T3/T4 implementation pattern
 - [CI Runner Sizing](../ci-operations/ci-runner-sizing.mdx) -- runner shapes, pricing, and the sizing rules behind the T2/T3 hardware choices this page assumes
 - [Release Rounds: A develop→main Branch Strategy](../ci-operations/release-rounds-branch-strategy.mdx) -- gating T2/T3 heavy lanes by base branch instead of running them on every PR
