@@ -133,6 +133,8 @@ vitest --shard=1/4
 
 Sharding caps how many test files a single worker process loads before the run rolls to a fresh process, which keeps peak heap under the ceiling regardless of the machine's total RAM. Note that `--shard=1/4` runs only the *first* of four shards — a CI lane must run all four (`1/4` through `4/4`, in a matrix or in sequence) or three-quarters of the suite silently goes unrun. The flag bounds per-process memory; it does not by itself execute the whole suite. (Evidence: zudolab/zudo-pattern-gen#1912 — a heap-OOM lane in pgen, Takazudo's private GPU pattern generator with a Cloudflare Workers backend, that survived the 2→4vCPU upgrade and only went green once `--shard` bounded the per-process file count.) See [Vitest Patterns](../tool-patterns/vitest-patterns.mdx) for the surrounding worker- and timeout-budget configuration.
 
+The local-side counterpart -- a shared dev machine starved by concurrent heavy lanes, where the lever is admission rather than lane shape -- is [Local Heavy-Lane Admission](../decision-guide/local-heavy-lane-admission.mdx).
+
 <Warning>
 
 **"It passed after I upsized" is not proof the size was the cause.** A memory-bounded failure that clears on a bigger runner has often just moved below the noise threshold for that day's file ordering — it will resurface the next time the suite grows. Confirm the mechanism (is peak heap the binding constraint?) before you attribute the fix to vCPU.
