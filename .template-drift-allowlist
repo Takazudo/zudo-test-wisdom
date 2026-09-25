@@ -6,7 +6,7 @@
 # Format: one repo-relative path per line (no leading slash).
 # Blank lines and `#` comments are ignored.
 #
-# Reconciled through the zudo-doc 5.26.2 baseline. The 4.4 migration established
+# Reconciled through the zudo-doc 5.27.0 baseline. The 4.4 migration established
 # the single-entry `zudoDoc()` config and removed the ejected pages/lib +
 # src/{config,components,utils,types,integrations} shells. Only three
 # template files diverge from the pinned baseline; everything else is either
