@@ -1,0 +1,68 @@
+---
+title: Test Lifecycle
+sidebar_position: 11
+---
+
+## Keep detection for a reason
+
+A supported product can need more tests as its contracts and environments grow. The goal is useful, affordable detection, not a constant test count. Retaining a test, running it for this change, and reusing an earlier success are different decisions. A retained but unrun test detects no current failure.
+
+| Decision | What changes | Required explanation |
+| --- | --- | --- |
+| Retain | Keep ongoing detection | Supported behavior and failure it protects |
+| Replace or consolidate | Implementation and duplication | Replacement evidence, retained boundaries, lost detection |
+| Select by change | Scope of this run | Changed inputs and dependency closure |
+| Reuse a result | Recalculation | Equivalent relevant inputs, environment, and provenance |
+| Change frequency | Detection timing | Accepted delay and pre-merge/release obligations |
+| Retire | End detection | Completed temporary role, ended contract, replacement, structural removal, or accepted risk |
+
+[Execution tiers](./execution-tiers.mdx) own environment, timing, and budget. [Change-scoped verification](../ci-operations/change-scoped-verification.mdx) owns selection and reuse. [Transient-red development](../ci-operations/transient-red-development.mdx) separately defines whether a result must be green before a particular boundary.
+
+## Admit ongoing regression coverage
+
+Classify in this order: **ongoing purpose → suitable level → execution conditions, frequency, and budget → tags**.
+
+- Name the supported behavior or boundary and the failure that must remain detectable.
+- Choose a level that sees that failure without unnecessary duplication of sufficient existing evidence.
+- Explain relevant changes/environments that require rerunning and how soon failure must be detected.
+- Check determinism, capable environment, tier, and aggregate budget.
+
+Apply this at contract, feature, or suite level. No new handwritten ledger or separate human approval for every test is required. Writing regression coverage directly under established project policy is normal development. Promoting a one-time verification artifact into a gate follows [Rule 6](./required-behavior.mdx): explicit proposal and reviewer decision, not self-promotion.
+
+An untagged default means CI-safe **after admission**; it does not admit every script automatically. Names containing dates, issue numbers, or `bugfix` are search hints. Neither the name nor renaming it determines lifetime.
+
+## Map guarantees before moving down a level
+
+Equal final assertions do not mean equal boundary coverage. Split the original proof into **replaced / already covered elsewhere / retained / relinquished** parts. Keep the [assertion matrix and variant inventory](./aggregate-suite-budget.mdx) when consolidating.
+
+An E2E that clicks through a UI, saves, and compares a total to 42 covers calculation plus wiring, conversion, persistence, and display. Move value combinations to unit tests, but identify the thin integration evidence for the remaining joints. A shared boundary representative may support many cheaper cases. If a joint is relinquished, record the detection loss rather than claiming equivalence.
+
+Modularization makes contracts and dependency closure clearer; splitting directories or repositories does not prove consumer independence. Unchanged API names or types do not establish unchanged behavior. Shared fixtures, configuration, and transitive dependencies can invalidate consumer evidence.
+
+A [walking skeleton](./walking-skeleton-e2e.mdx) starts with one representative of the same integration path. An independent authentication, upload, or native boundary may warrant additional proof. Do not pack unrelated journeys into one huge spec to satisfy a count limit; do not add E2E for every value permutation either.
+
+## Retire with a stated basis
+
+Retirement can be justified by any of these routes:
+
+1. **Temporary role completed.** Migration or creation-time verification is complete and no independent continuing obligation remains. Keep a small completion record when useful.
+2. **Supported contract ended.** The feature, compatibility promise, or supported environment has formally ended.
+3. **Replacement evidence.** Cheaper, consolidated, or different checks adequately cover the required behavior and boundaries.
+4. **Failure structurally eliminated.** Show why the invalid state/path can no longer arise. A rewrite or added types alone is not that demonstration.
+5. **Detection loss accepted.** Name lost detection, impact, rationale, and residual risk; obtain the decision through existing authority/review policy. This is a reduction of assurance, not equivalent replacement.
+
+Equivalent replacement is not the only valid deletion route. Conversely, age, zero recent failures, non-criticality, coverage overlap, names, or AI confidence alone do not prove redundancy. Failure history helps prioritize review; unknown history stays unknown. Six months of history or three incident-free months are not automatic thresholds: exposure, changes, and observability determine what silence means. Exhaustive history collection is not mandatory for every decision. Without an adequate basis, retain/fix and bound further investigation.
+
+When evidence for a live contract is lost, expose that specific gap in the [verification map](../test-integrity/verification-map.mdx). Keep sufficiently supported portions Proven. Record accepted unverified risk separately; acceptance never turns a gap into Proven.
+
+## Contrasting examples
+
+| Case | Decision |
+| --- | --- |
+| One-off page appearance script | Preserve completion evidence; retire only the completed temporary role, after separating any ongoing visual contract |
+| Issue-numbered data-loss regression with no recent failures | Retain while the supported failure still needs detection; the name and silence do not make it temporary |
+| UI-to-save flow ending in a total comparison | Unit-test calculation variants; map wiring, save, and display to integration evidence |
+| Low-impact check moved from every PR to a schedule | State detection delay and rerun on relevant changes; retirement instead means explicitly losing detection |
+| Migration differential harness | Move continuing boundary cases into ordinary regression tests, then retire the harness; see [dependency replacement](../project-recipes/dependency-replacement-testing.mdx) |
+| Ended compatibility promise | Retire its detection after confirming the support decision and remaining consumers |
+| Hundreds of tiny tests deleted | Count reduction is not measured job-time or billing reduction; inspect setup and slow-shard effects in an [AI suite audit](../ci-operations/ai-suite-audit.mdx) |

@@ -162,3 +162,7 @@ The through-line: **every step here turns a number into a claim somebody else ca
 - [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) — test identity, the twin-leg comparison, and the artifacts-before-rerun rule this protocol borrows.
 - [Live-Proof Evidence Contracts § Timing Samples Are Not Tail Proof](../test-integrity/live-proof-evidence-contracts.mdx#timing-samples-are-not-tail-proof) — what replaces a sample when the deadline belongs to the product rather than to your patience.
 - [Release Rounds § Gating Heavy CI by Base Branch](./release-rounds-branch-strategy.mdx#gating-heavy-ci-by-base-branch) — the branch-level form of the cost-only lever Step 7 makes you label.
+
+## Scope of the optimization
+
+Speeding up the same suite preserves canonical test identities and real-environment evidence, not merely test counts. Replacing/consolidating tests instead needs a guarantee mapping; reducing frequency or retiring detection needs the explicit timing/risk decision in [test lifecycle](../decision-guide/test-lifecycle.mdx). [AI suite audit](./ai-suite-audit.mdx) compares these alternatives and distinguishes billed execution, elapsed wait, and estimates. [Change-scoped verification](./change-scoped-verification.mdx) governs selection and reusable results. Removing merge waiting under [transient-red development](./transient-red-development.mdx) does not itself reduce runner cost.

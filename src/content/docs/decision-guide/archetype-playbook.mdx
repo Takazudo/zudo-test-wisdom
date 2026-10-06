@@ -216,7 +216,7 @@ Guard anything that mutates prod behind an explicit destructive-test guard — s
 
 **Skip — and why.**
 
-- **Nothing from the lower archetypes** — this is where the layers accumulate, not where they thin out.
+- **Required guarantees from lower archetypes** remain, but historical test implementations need not accumulate forever. Replace or retire them under [test lifecycle](./test-lifecycle.mdx).
 - **Silent promotion of verification artifacts** — even here, a one-off proof spec must not drift into a permanent gate. Promotion stays an explicit, reviewed step; see Rule 6 in [Required Testing Behavior](./required-behavior.mdx#the-four-execution-rules).
 
 **Escalation trigger.** This archetype *is* the escalation destination — the trigger to **adopt** it (from the monorepo archetype) is **cutover / release with real users**, which justifies the standing **T3** cost. Before release, run the reverse: defer T3 to a local exam lane, per [Which Tiers Does a Project Need?](./execution-tiers.mdx#which-tiers-does-a-project-need), and adopt the scheduled tier at cutover.

@@ -96,91 +96,23 @@ Verification complete:
 
 ### ルール6 — 検証テストは自己昇格しない
 
-エージェントが作成した検証スペックには `@verification` タグを付け、すべてのゲートから除外します。ティアへの昇格は明示的で意図的なステップです：
+[ライフサイクル](./test-lifecycle.mdx)に沿い、**継続目的 → レベル → 再実行条件・頻度・予算 → タグ** の順で分類します。既存方針に沿って最初から回帰テストを書く行為は通常の開発であり、新たな個別人間承認を要求しません。一時検証には `@verification` を付け、ゲートに入れません。昇格は明示的な提案とレビュアーの判断を必要とし、エージェントは自分のartifactを自己昇格させません。
 
-1. `@verification` タグを削除する
-2. 適切なティアタグを割り当てる（例：`@heavy`、`@gpu`）
-3. 対象スイートの時間予算内に収まることを確認する
-
-エージェントは自分の検証テストを自己昇格させません。PRの説明で昇格を提案し、決定はレビュアーに委ねます。
-
-```
-# PR description excerpt
-## Verification spec — graduation proposal
-- spec: tests/banner-render.spec.ts
-- currently: @verification (excluded from gates)
-- proposed tier: T1 (untagged CI-safe e2e)
-- rationale: stable for 5 runs, sub-2s, no platform dependency
-- action needed: reviewer removes @verification tag and assigns tier
-```
+提案には継続契約と失敗、適切なレベル、重複・代替証拠、再実行条件と検知時期、決定性、実行可能環境、ティア、予算を記載します。入場判断後に `@verification` を外し、適切なティアタグを付けます。タグなしは入場後のCIセーフを意味し、寿命の自動承認ではありません。
 
 #### 強制：タグが一度も付かなかったスペックを捕まえる
 
-上のステップが定めているのは、すでにタグを持つスペックの扱いです。タグが一度も付かなかったスペックについては何も語りません -- そして、そこが典型的な漏れ口です。自分の修正を証明しているエージェントには、そのスペックを「ただのテスト」以外のものとして考える理由がないからです。この失敗モードは[実行ティア](./execution-tiers.mdx#検証-vs-リグレッション-暗黙の昇格はタグ体系の下で起きる)で説明しています。以下のチェックは、その強制側の半分です。
-
-このチェックが名前パターンベースなのは意図的です。検証スペックのアサーションは本物でパスするため、アサーションのレベルではリグレッションテストと区別がつきません -- しかし**ファイル名**は、たいていの場合、それが書かれるきっかけとなった欠陥・反復回数・日付を、いまも指したままです。
-
-```sh
-#!/usr/bin/env sh
-# scripts/check-untagged-verification.sh -- run it in review, or as a CI step on the PR.
-# Flags specs whose NAME says "verification artifact" while they carry no @verification
-# tag: the ones the graduation rule above can never see.
-set -eu
-
-SPEC_GLOB='tests/*.spec.ts'  # git pathspec wildcards cross '/', so nested dirs are covered
-SMELL='(bugfix|verification|issue-[0-9]+|tweak-[0-9]|round-[0-9]|[0-9]{4}-[0-9]{2}-[0-9]{2})'
-
-found=0
-for spec in $(git ls-files "$SPEC_GLOB" | grep -E "$SMELL" || true); do
-  if ! grep -q '@verification' "$spec"; then
-    echo "untagged verification suspect: $spec"
-    found=1
-  fi
-done
-
-if [ "$found" -ne 0 ]; then
-  echo
-  echo "Each file above is named after a defect, an iteration, or a date, and runs in the gate."
-  echo "Either tag it @verification and drop it from the gate, or rename it after the behavior"
-  echo "it guards and record the graduation decision in the PR description."
-  exit 1
-fi
-```
-
-`SPEC_GLOB` はプロジェクトのスペックルートに、`SMELL` は実際に使われている命名規約に合わせて調整してください。このパターンは過剰検知するように作ってあります：誤検知のコストはリネーム1回で済みますが、見逃しのコストは、誰も払うと決めていないスペックがゲートに永久に居座り続けることです。
-
-<Note>
-
-検証アーティファクトと回帰ゲートの概念、および完全な昇格ライフサイクルは[実行ティア](./execution-tiers.mdx)ページにあります。このルールが定めるのはエージェントの強制可能な行動のみです：タグを付け、昇格を提案し、自己昇格しない -- そして、そもそもタグが一度も付かなかったスペックを捕まえるチェック。
-
-</Note>
+日付・Issue番号・`bugfix`・反復回数は探索のヒントであり、自動的なゲート失敗や除外の根拠にしません。契約と役割を確認します。Issue番号付きのデータ消失回帰テストは、長年greenでも恒久的な検知であり得ます。改名だけでは入場判断になりません。[実行ティア](./execution-tiers.mdx)が暗黙の入場を、[AIスイート精査](../ci-operations/ai-suite-audit.mdx)が全件台帳・全件人手レビューを要求しない調査を扱います。
 
 ### ルール7 — 赤いチェックは作者をブロックする
 
-自分が作成したPRにある赤いチェックは、リポジトリ設定で必須チェックとして指定されているかどうかに関わらず、あなたをブロックします。唯一の例外：失敗したテストに、リンクされたオープンなissueを伴う `@flaky` タグがある場合。
+redはrepo設定でrequiredでなくても作者の義務を生みます。既定のgreen-before-merge方針では、open issueと結果報告レーンを持つ正当な `@flaky` 隔離を除き、マージ前に解消します。[一時的なredを許容する開発](../ci-operations/transient-red-development.mdx)の明示的方針があれば、pendingや修復を追跡する局所的redのまま、許可済みの開発マージを進められます。マージ後も失敗の担当は残り、成功とは報告しません。
 
-```
-# Blocked — do not merge
-PR #42 authored by agent-session-A
-  ✗  unit: auth-service.test.ts — 1 failed
-     (not a required check, but authored by this session)
-  → investigate and fix before declaring done
+独立作業の続行条件は、失敗が理解・局所化され、次の作業が依存せず、具体的な担当と確認点のもとで修復を追跡することです。原因不明・横断的失敗、build・runtime基盤の破損、依存作業、原因追跡の困難化、security・データ・公開の危険では影響チェーンを停止します。リリース・デプロイ・公開・移行の必須証拠は外部影響前のゲートとして維持します。全体完了にも統合検証とalert整理が必要です。
 
-# Not blocked — exception applies
-  ✗  e2e: flaky-animation.spec.ts @flaky — see issue #38
-     (quarantined; allowed-to-fail in scheduled tier)
-  → merge may proceed; issue #38 tracks the fix
-```
+マージは統合であり成功の証明ではありません。pending・cancelled・superseded・skipped・deferredは成功ではありません。tested SHA、run・job、証拠、担当、次の行動を記録します。非requiredや古いgreenをred無視の理由にしません。実際の保護・承認要件に従い、このルールからbypass権限を得ることはありません。
 
-<Warning>
-
-「そのチェックは必須ではない」というのは、自分のPRの赤い結果を無視する正当な理由にはなりません。必須チェックのステータスはCI設定の詳細です — あなたの作者としての責任はそれとは独立しています。
-
-</Warning>
-
-ルール7はエージェント／規約のレイヤーであり、ブランチルールセットは機械／強制のレイヤーです -- どちらも互いの代替にはなりません（[ゲートを宣言ではなく強制にする](./execution-tiers.mdx#5つのティア-t0-t1-デフォルト-ゲートを宣言ではなく強制にする)を参照）。
-
-ルール7があなたを拘束するのは、赤いPRの**作者**としてです。逆の役割 — あなたがマージゲートを運用していて、redが自分の所有していないテストのものである場合 — には、専用の手続きがあります：[ゲートオペレーターのプレイブック](../test-integrity/deflaking-recipe.mdx#自分のものではない赤いci-—-ゲートオペレーターのプレイブック)。
+[ゲートオペレーターの手順](../test-integrity/deflaking-recipe.mdx)は、自分が書いていないredと非同期統合alertの上限つきtriageを扱います。
 
 ### ルール8 — ゲートを不正操作しない
 
@@ -293,8 +225,8 @@ zfb（[Takazudo/zudo-front-builder](https://github.com/Takazudo/zudo-front-build
 - [ ] CSS/ビジュアルの変更にはレベル5を使用した
 - [ ] テストしたものとしなかったものを報告した
 - [ ] 新しい検証スペックには `@verification` タグが付いており、自己昇格していない
-- [ ] 欠陥名・反復回数・日付にちなんだ名前のスペックを、タグなしでゲートに追加していない
-- [ ] 自分のPRの赤いチェックはすべて解決済み、またはリンクされたissueを伴う `@flaky` タグがある
+- [ ] 命名や改名ではなく、継続目的に基づいて入場を判断した
+- [ ] redの担当責任を維持し、宣言したマージ・外部影響境界の条件を満たした
 - [ ] `test.skip`、`@flaky`、または許容値の緩和はリンクされたissueなしに導入していない
 - [ ] 変更がヘビーレーン専用のコードに触れる場合、対応可能なホスト上で関連するヘビースペックを実行した
 - [ ] confirmタスクでは、子エージェントが実行可能なローカルチェックと、マネージャーが実行可能なPR／CIチェックを分け、どちらがどちらかを明記した

@@ -69,3 +69,9 @@ Together they close a common reporting gap. A perfectly fail-closed transport su
 Review the map whenever a contract, execution environment, or required gate changes. Adding a provider outcome means adding or widening a row before the implementation lands. Moving a test from packaged execution to a dev server changes the claim and may reopen a native row. Removing a CI gate turns every row that depended on it Outstanding until replacement evidence exists. A renamed command is documentation drift; a silently weakened environment is coverage drift.
 
 The useful review question is not “are the tests green?” It is “for every contract in this feature, what deterministic evidence earns the claim, what does that evidence not prove, and which rows are still Outstanding?” When the architecture document can answer that without inference, green means what the team says it means -- and no more.
+
+## Evidence validity and retirement
+
+Record relevant input/environment conditions and provenance for each contract's evidence using existing records. Invalidate affected evidence when those inputs, tests, fixtures, dependencies, configuration, runtime/browser, or live external conditions change; source SHA alone is not sufficient. [Change-scoped verification](../ci-operations/change-scoped-verification.mdx) defines valid reuse and conservative reruns when inputs are unknown.
+
+Use [test lifecycle](../decision-guide/test-lifecycle.mdx) when replacing or retiring detection. Reopen only the live-contract gaps that lose sufficient evidence; supported portions stay Proven. Ended contracts can leave the active map with their support decision recorded. Accepted unverified risk stays explicitly unverified, never Proven merely because someone accepted it.

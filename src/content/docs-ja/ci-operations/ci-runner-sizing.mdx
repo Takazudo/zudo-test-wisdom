@@ -283,3 +283,7 @@ gh api repos/{owner}/{repo}/actions/runs/<run-id>/jobs \
 - [重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx) — 環境／プラットフォーム的に実行不能なテストが、スケジュール型のmacOSティアへどう到達するか。
 - [定期再試験 & 夜間試験](./scheduled-re-exam.mdx) — スケジュール型（T3）のmacOSジョブが実際にどう組まれるか。
 - [CIゲートの最適化](./ci-gate-optimization.mdx) — これらのタイミングのルールが供給する受け入れプロトコル。時計に名前を付けること、3本の中央値というサンプルのルール、そして速くなったゲートが静かにカバレッジを失っていないことのアイデンティティによる証明。
+
+## 最適化の範囲
+
+同じスイートの高速化では、件数だけでなくcanonical test identitiesと実環境の証拠を維持します。置換・統合には保証の対応、頻度低下・退役には[ライフサイクル](../decision-guide/test-lifecycle.mdx)の検知時期・リスク判断が必要です。[AIスイート精査](./ai-suite-audit.mdx)は選択肢を比較し、課金実行量・待ち時間・概算を区別します。[変更範囲に応じた検証](./change-scoped-verification.mdx)は選択と結果再利用を扱います。[一時的なredを許容する開発](./transient-red-development.mdx)でマージ待ちを外しても、それだけでrunner費用は減りません。

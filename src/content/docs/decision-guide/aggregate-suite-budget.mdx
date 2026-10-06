@@ -29,7 +29,7 @@ flowchart TD
   C --> P[1. Price the suite<br/>wall x workers / count]
   P --> Q{Is the distribution skewed?}
   Q -->|a few tests dominate the wall clock| H
-  Q -->|flat: the count IS the cost| R[2. Consolidate<br/>loop-collapse / cluster-merge]
+  Q -->|flat: count helps estimate cost| R[2. Consolidate<br/>loop-collapse / cluster-merge]
   R --> S[3. Guard the consolidation<br/>assertion matrix + manifest parity]
   S --> T[4. Arm the budget trigger<br/>metrics per run, prune before timeouts]
 ```
@@ -50,19 +50,19 @@ The measured case, priced:
 5,520 / 566 tests       -> ~9.8 worker-seconds per test
 ```
 
-Worker-seconds, not wall-clock seconds, is what makes the number portable. Wall-clock silently folds in the parallelism of the machine that produced it, so a wall-clock-per-test figure changes when someone tunes `workers` without a single test changing. Worker-seconds is the work the suite actually asks for; divide by the worker count to get back to wall-clock on any given runner shape.
+This is an allocation/comparison estimate, not measured CPU work or a bill. Workers need not stay busy; setup, concurrency, skew, and the slowest shard determine actual savings.
 
-With a price, every suite decision is quotable in the currency the gate is actually spending:
+Use the allocation to prioritize hypotheses, then measure actual job and billing changes:
 
-- **Adding a spec file with 30 tests** costs ~294 worker-seconds — about 2.5 minutes of wall clock at two workers. That is a number a reviewer can weigh against the assertion.
-- **The 566 → ~370 plan** removes 196 tests: ~1,920 worker-seconds, ~16 minutes of wall clock recovered at two workers. The plan stops being "let's clean up the e2e suite" and becomes a 16-minute line item.
-- **A merge that folds 12 tests into 1** recovers at most 11 tests' worth of unit cost — about 108 worker-seconds when the merged tests shared their entire setup (a cluster-merge), and less when per-iteration work such as navigation survives the merge (a loop-collapse), because what a merge removes is the per-test overhead, not the assertions' own work. If the merge takes an hour to do safely and the suite is nowhere near its budget, the price says do not bother.
+- **Adding 30 tests** allocates about 294 worker-seconds at the average; it is not measured incremental job time.
+- **The 566 → ~370 plan** has an allocation difference of about 1,920 worker-seconds. Sixteen minutes saved is an idealized forecast, not an achieved or guaranteed result.
+- **Folding 12 tests into 1** does not remove surviving navigation/assertion work. Inspect setup and shard skew, then measure before/after to determine the effect.
 
 <Warning>
 
 **Unit cost is an average, and an average prices nothing when the distribution is skewed.** If the slowest 5% of specs own half the wall clock, ~9.8 worker-seconds describes no test in the suite: deleting cheap tests will not move the gate, and the real answer is the per-test page applied to the tail.
 
-Check the shape before you trust the price. Playwright's JSON reporter carries per-test durations; sort them and look at the top decile. Prune or re-tier the tail first, then re-derive the unit cost from what is left. Only a roughly flat distribution licenses the conclusion this page is about — that the *count* is the cost.
+Check the shape before you trust the price. Playwright's JSON reporter carries per-test durations; sort them and look at the top decile. Prune or re-tier the tail first, then re-derive the unit cost from what is left. A roughly flat distribution makes count useful for prioritization, not proof of marginal cost or billing savings.
 
 </Warning>
 
@@ -238,7 +238,7 @@ The duration comes from the reporter's own `stats.duration` (milliseconds), not 
 
 When the budget is exceeded, in order:
 
-1. **Prune** — apply [Branch 0](./heavy-test-decision.mdx) to the most expensive specs. Demote what belongs at a lower level; delete what has never caught anything and guards no critical journey.
+1. **Prune** — apply [Branch 0](./heavy-test-decision.mdx) to the most expensive specs. Map guarantees before demotion; retire only on a justified [lifecycle basis](./test-lifecycle.mdx), not zero detections or low criticality alone.
 2. **Consolidate** — loop-collapse and cluster-merge what survives, with the guards above.
 3. **Re-tier** — move genuinely heavy or environment-bound specs out of T1, per [Execution Tiers](./execution-tiers.mdx).
 4. **Tune execution** — workers, sharding, runner shape. This is last among the fixes because it buys wall clock without reducing work, and the work is what keeps growing.

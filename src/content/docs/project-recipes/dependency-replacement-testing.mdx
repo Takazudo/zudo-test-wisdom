@@ -275,7 +275,7 @@ The three stages have very different costs and lifetimes, so they map to differe
 | ---- | ---- | ---- |
 | Exhaustive old-vs-candidate diff | T4 (local heavy lane) | Once per migration, run by hand. It takes minutes and needs both libraries installed, which is true only during the swap |
 | Divergence-inventory gate (classification + per-class counts) | T1 (PR gate) | On the migration PR, for as long as the harness exists -- it is what makes a candidate version bump mid-review visible |
-| Promoted boundary regression tests | T1 (PR gate) | Forever. Once the harness is gone they are ordinary unit tests with no migration machinery behind them |
+| Promoted boundary regression tests | T1 (PR gate) | While the supported contract and detection need continue. After harness removal they are ordinary unit tests; [test lifecycle](../decision-guide/test-lifecycle.mdx) governs later replacement/retirement |
 
 The exhaustive run is deliberately *not* a CI gate. It exists to produce one inventory that one reviewer reads once; wiring it into CI would mean keeping both libraries installed indefinitely, which is precisely the outcome step 5 is written to prevent.
 

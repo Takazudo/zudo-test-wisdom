@@ -11,8 +11,8 @@ Sooner or later, every project with E2E tests hits the same moment: a test looks
 Every heavy test leaves this page through one of three exits:
 
 - **Fix** — keep the test, classify *why* it is heavy, and assign it the matching tier (if the test is flaky, see [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx))
-- **Demote** — rewrite the assertion at a lower testing level
-- **Delete** — remove the test and watch what happens
+- **Demote** — map guarantees, then move suitable proof to a lower level
+- **Delete** — retire on a documented lifecycle basis
 
 <Note>
 
@@ -30,32 +30,29 @@ Every heavy test leaves this page through one of three exits:
 
 Before classifying a heavy test by its heaviness, ask two questions in order.
 
-### (a) Is the assertion expressible at a lower level?
+### (a) Can a lower level carry the required guarantees?
 
-If what the test actually asserts can be expressed by a component test or a unit test, **demote it**. A 90-second browser flow that ends in "the computed total equals 42" is a unit test wearing an E2E costume. Demotion makes the assertion faster, more deterministic, and cheaper — with no loss of meaning.
+The same final assertion does not establish equivalent coverage. An E2E that clicks, saves, and checks a total of 42 covers calculation plus wiring, conversion, authentication, persistence, and display. Move calculation combinations to unit tests only after mapping what is replaced, covered elsewhere, retained, or relinquished. Follow [test lifecycle](./test-lifecycle.mdx) and the existing assertion matrix/variant inventory; retain thin integration proof for necessary joints.
 
-### (b) Has it never caught a real regression, and is it not a critical user journey?
+### (b) Is there a justified retirement basis?
 
-Establish "never caught a real regression" with evidence, not a guess: search CI failure history, linked issues, and commit messages that reference the spec by name. A spec less than roughly six months old has not accumulated enough history to answer this question either way — treat that as insufficient evidence, not as a "never caught" verdict.
+Show a completed temporary role, ended supported contract, sufficient replacement evidence, structural elimination of the failure, or explicit risk acceptance under existing authority. [Test lifecycle](./test-lifecycle.mdx) is the canonical retirement policy. Risk acceptance without replacement is not equivalent assurance.
 
-**Safe default:** when the evidence cannot be established — too young, or no accessible failure history — treat the test as if it *has* caught something, and route it to the **Fix** branch, not deletion. A wrong "keep" costs a bit of CI time; a wrong "delete" costs silently lost coverage.
+Failure history and criticality inform investigation; “never caught a bug + non-critical” alone does not justify deletion. Age, six months of history, and three incident-free months after deletion are not proof of redundancy. Consider change, exposure, and observability. Unknown history stays unknown; without a sufficient basis retain/fix. Exhaustive history collection is not required for every decision.
 
-If both are true — an evidence-backed "never caught" **and** not a critical user journey — **delete it** — then watch the production bug rate for roughly three months. If nothing surfaces that the test would have caught, it was dead weight. If something does, you have learned exactly which assertion matters, and you can write a better, cheaper test for it.
-
-Only survivors of Branch 0 get a tier.
+After retirement record useful revisit conditions and expose lost evidence for live contracts in the verification map. Assign execution tiers to retained tests.
 
 ## The Decision Flow
 
 ```mermaid
 flowchart TD
-  A[E2E test feels too heavy for PR CI] --> B0{Branch 0:<br/>should it exist at this level?}
-  B0 -->|assertion expressible lower| DEM[Demote<br/>component / unit level]
-  B0 -->|never caught a real bug<br/>AND not a critical journey| DEL[Delete<br/>watch prod bugs ~3 months]
-  B0 -->|keep| C{WHY is it heavy?}
-  C -->|slow but CI-capable| R1[stays on CI<br/>workers, shard, only-changed<br/>tag: @heavy]
-  C -->|needs hardware GPU /<br/>video encoder| R2[tag: @gpu<br/>night exam + scheduled macOS tier]
-  C -->|needs real keyboard /<br/>macOS / native webview| R3[tag: @interactive @macos-only<br/>night exam + scheduled macOS CI]
-  C -->|fails randomly| R4[tag: @flaky + issue URL<br/>quarantine: fix / demote / delete<br/>runs allowed-to-fail in scheduled tier]
+  A[Heavy E2E] --> B{Lifecycle decision}
+  B -->|mapped guarantees| D[Lower-level proof and retained boundaries]
+  B -->|justified retirement| E[Retire with evidence or accepted risk]
+  B -->|retain or evidence unknown| C{Why heavy?}
+  C -->|slow but CI capable| F[CI tuning and scoped execution]
+  C -->|hardware or platform| G[Capable scheduled and scoped lane]
+  C -->|flaky| H[Owned quarantine with deadline]
 ```
 
 ## Classify by Why It Is Heavy
@@ -106,7 +103,7 @@ The classification result is recorded as a tag on the test itself, so the tier m
 
 | Tag | Meaning | Tier |
 |---|---|---|
-| (untagged) | CI-safe; the default for every new e2e test | T1/T2 |
+| (untagged) | CI-safe; default after regression admission | T1/T2 |
 | `@smoke` | critical-journey subset (optional) | T1 |
 | `@heavy` | slow but CI-capable | T2/T3 |
 | `@gpu` | needs hardware GPU / video encoder | T3 + local heavy |
@@ -121,7 +118,9 @@ Whether a `@heavy`-tagged test's T2/T3 lane runs on every PR or only at release 
 
 ## Classifying a New Test: Mechanical Rules
 
-For a *new* test, classification must not require judgment. Apply the first rule that matches:
+First establish ongoing purpose and level under [test lifecycle](./test-lifecycle.mdx). The mechanical rules below classify environment/tier for admitted regression coverage; they do not automatically promote temporary verification.
+
+For an admitted regression test, assign the environment/tier mechanically. Apply the first rule that matches:
 
 1. Reads pixels or depends on GPU timing → `@gpu`
 2. Needs the OS to deliver real keyboard events → `@interactive`
@@ -129,7 +128,7 @@ For a *new* test, classification must not require judgment. Apply the first rule
 4. Runtime over ~60 seconds, or a multi-minute flow → `@heavy`
 5. Otherwise → **untagged**
 
-The default matters most: **a new e2e test is untagged and CI-safe unless one of these rules forces a tag.** An agent (or a developer) never starts from "which special tier does my test deserve?" — it starts from "my test runs in the PR gate" and tags only when a rule fires.
+The default matters most: **an admitted regression e2e test is untagged and CI-safe unless one of these rules forces a tag.** An agent (or a developer) never starts from "which special tier does my test deserve?" — it starts from "my test runs in the PR gate" and tags only when a rule fires.
 
 `@smoke` is the one tag in the taxonomy these rules do not reach. It is assigned manually, after the fact, to curate a critical-journey subset out of the already-untagged pool — not by any mechanical trigger on a new test.
 
@@ -167,6 +166,8 @@ fn exports_the_document_as_pdf() { /* ... */ }
 
 ### Same Classification Rules
 
+First decide lifetime/admission under [test lifecycle](./test-lifecycle.mdx). These rules classify execution for retained regression tests; temporary verification and pending-feature checks stay outside admission until their role changes.
+
 Apply the first rule that matches — same sequencing as [Classifying a New Test: Mechanical Rules](#classifying-a-new-test-mechanical-rules) above:
 
 1. Needs an env var, credential, or external service the PR runner cannot provide → `env-gate:`
@@ -200,7 +201,7 @@ See [Migrating a Rust Suite to cargo-nextest](../tool-patterns/cargo-nextest-mig
 
 Quarantine is a pipeline with an exit, not a parking lot:
 
-**Step 0 of quarantine:** verify the test has ever passed (not pass-by-skip) on some host; if it cannot pass, it is **broken, not flaky** — fix or delete immediately, no quarantine.
+**Step 0 of quarantine:** verify the test has ever passed (not pass-by-skip) on some host; if it cannot pass, it is **broken, not flaky** — diagnose/fix immediately, no quarantine; deletion still needs a lifecycle basis.
 
 Before entering the pipeline, confirm there is at least one verifiable green run of the exact assertion on any CI host. Pass-by-skip does not count — Playwright reports skips as `-` rather than `✓`, so check the distinction carefully. A test that has never produced a genuine green run is not flaky; it is broken. Sending it to quarantine would suspend product coverage without any chance of recovery. Note that this step is distinct from Branch 0 (which asks whether the test deserves a tier at all): Step 0 asks whether the test can even pass anywhere. See [Playwright Patterns](../tool-patterns/playwright-patterns.mdx) for notes on `test.skip` preconditions — a precondition that "should always hold" must be a hard assertion, not a conditional skip that can silently degrade into a permanent vacuous green.
 
@@ -225,7 +226,7 @@ This is the step an autonomous agent skips. The quarantine pipeline is *designed
 
 2. **Excluded from strict gates.** A quarantined test must not block a PR — otherwise quarantine means nothing.
 3. **It still runs — allowed-to-fail — in the scheduled tier.** A `@flaky` tag that runs nowhere is a graveyard: results stop being collected and the test silently rots. Running allowed-to-fail in T3 keeps fresh failure data flowing into the tracking issue. On GitHub Actions, implement allowed-to-fail with an explicit exit-code capture, **not** `continue-on-error` (see [Scheduled Re-exam § Flake Telemetry Mechanics](../ci-operations/scheduled-re-exam.mdx#flake-telemetry-mechanics)).
-4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. If nobody fixed it by the deadline, it was not worth fixing: demote it or delete it. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) — it covers the seven causes of E2E flakiness and the mechanical steps to eliminate each one.
+4. **Fix, demote, or delete — with a deadline.** The exits are the same three as Branch 0. A missed deadline triggers escalation and an explicit lifecycle decision, not proof that the test was worthless. Map guarantees for demotion and justify retirement before deleting. For the **Fix** path, see [Flake Root-Cause Catalog & Deflaking Recipe](../test-integrity/deflaking-recipe.mdx) — it covers the seven causes of E2E flakiness and the mechanical steps to eliminate each one.
 
 <Tip>
 

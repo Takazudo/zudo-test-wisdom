@@ -834,3 +834,7 @@ pnpm test:e2e --grep "@interactive" e2e/shortcuts-*.spec.ts
 | スコープ付き重い実行（ローカル）| 変更に関連するスペックのみ               | 実装中                           | 完了宣言の前に修正                       |
 
 どの単一のサーフェスもセーフティネットではなく、レイヤリングこそがネットです。そもそもどのテストが重いレーンに属するべきかは[重いテストの判断ルール](../decision-guide/heavy-test-decision.mdx)が決め、全体で使われるティアの語彙（T0--T4）は[実行ティア](../decision-guide/execution-tiers.mdx)で定義されています。
+
+## 検知の遅れは方針の選択
+
+保持する確認を毎PRから定期へ移すと検知の空白期間を受け入れることになり、有効な結果の再利用と同等ではありません。遅れとマージ・リリース前の必要証拠を明示します。関連変更にはルール9に沿った実行可能環境での範囲検証が必要で、将来の定期runは今日の検証済みを意味しません。live API・registryの変化はソース差分なしでも成功結果を失効させます。[変更範囲に応じた検証](./change-scoped-verification.mdx)、[ライフサイクル](../decision-guide/test-lifecycle.mdx)、上限を設けた[AIスイート精査](./ai-suite-audit.mdx)を参照してください。

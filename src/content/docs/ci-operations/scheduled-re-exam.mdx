@@ -834,3 +834,7 @@ Make the scoped run a stated requirement in the agent instructions, not folklore
 | Scoped heavy run (local) | only the specs related to the change  | during implementation           | fix before declaring done               |
 
 No single surface is the safety net; the layering is. Which tests belong in the heavy lanes at all is decided by the [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx), and the tier vocabulary (T0--T4) used throughout is defined on [Execution Tiers](../decision-guide/execution-tiers.mdx).
+
+## Detection delay is a policy choice
+
+Moving a retained check from every PR to a schedule accepts a detection window; it is not equivalent to reusing a valid result. Name that delay and any required pre-merge/release evidence. Relevant changes still require scoped verification on a capable environment under Rule 9; a future scheduled run does not make today's work verified. Live API/registry drift can invalidate success with no source diff. See [change-scoped verification](./change-scoped-verification.mdx), [test lifecycle](../decision-guide/test-lifecycle.mdx), and the bounded [AI suite audit](./ai-suite-audit.mdx).

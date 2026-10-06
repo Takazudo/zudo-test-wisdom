@@ -162,3 +162,7 @@ diff before.txt after.txt > identity.diff  # keep the artifact; set -e fails on 
 - [フレイク根本原因カタログ & デフレイキングレシピ](../test-integrity/deflaking-recipe.mdx) — このプロトコルが借りている、テストアイデンティティ、ツインレッグ比較、そして再実行前のアーティファクト保全のルール。
 - [フェイルクローズなライブ証明と証拠契約 § タイミングのサンプルはテールの証明ではない](../test-integrity/live-proof-evidence-contracts.mdx#タイミングのサンプルはテールの証明ではない) — 締め切りが自分の忍耐ではなくプロダクトのものであるとき、サンプルの代わりになるもの。
 - [リリースラウンド § 重いCIをベースブランチでゲートする](./release-rounds-branch-strategy.mdx#重い-ci-をベースブランチでゲートする) — ステップ7がラベル付けを求める、コストのみのレバーのブランチレベルでの形。
+
+## 最適化の範囲
+
+同じスイートの高速化では、件数だけでなくcanonical test identitiesと実環境の証拠を維持します。置換・統合には保証の対応、頻度低下・退役には[ライフサイクル](../decision-guide/test-lifecycle.mdx)の検知時期・リスク判断が必要です。[AIスイート精査](./ai-suite-audit.mdx)は選択肢を比較し、課金実行量・待ち時間・概算を区別します。[変更範囲に応じた検証](./change-scoped-verification.mdx)は選択と結果再利用を扱います。[一時的なredを許容する開発](./transient-red-development.mdx)でマージ待ちを外しても、それだけでrunner費用は減りません。

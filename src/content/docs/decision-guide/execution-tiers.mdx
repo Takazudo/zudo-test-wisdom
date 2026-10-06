@@ -24,7 +24,7 @@ A test's tier follows from its job, and there are exactly two jobs. Conflating t
 - A **verification artifact** is a one-time **"it was done"** proof. It exists to show that a change worked when it landed. It may be manual, an L5 screenshot, even an L6 AI judgment -- determinism is not required, because it will never run again. It belongs to **no gate**.
 - A **regression gate** is a repeatable, deterministic **"everything still works"** proof. Anyone must be able to run it, it must produce the same verdict every time, and it must live in a tier with a paper trail -- a required check, a CI run log, a scheduled job result.
 
-Tests **graduate** from verification to regression **explicitly -- never by default**. The dangerous default is silent graduation: a one-off proof script lands in the test directory, the runner picks it up, and it becomes a permanent cost that nobody decided to pay. Graduation is a decision with three parts: the test is checked for determinism, assigned a tier, and weighed against that tier's time budget.
+Promotion of temporary verification is explicit. First establish an ongoing contract/failure and suitable level, then rerun conditions, frequency, determinism, and budget, and finally tags. This is distinct from writing regression coverage directly under established project policy.
 
 The enforceable agent rules around graduation -- verification specs are tagged and excluded from all gates, and an agent never promotes its own verification test -- live in [Required Testing Behavior](./required-behavior.mdx).
 
@@ -34,51 +34,13 @@ The graduation rule above is written for specs that carry a `@verification` tag 
 
 That is where the leak actually happens, and it is upstream of tagging entirely. An agent is asked to fix a bug, writes a spec to prove the fix worked, and drops that spec into the gate's spec directory untagged -- not to evade the rule, but because at authoring time it looks like an ordinary test. In one measured case the spec was a one-day UI-review checklist, whose whole job was to confirm that a specific afternoon's tweaks looked right. It billed every PR from every author for three months, re-answering a question that had been settled on day one.
 
-#### The tag census: a verification set that costs nothing is the tell
+#### Names and tags are discovery hints
 
-Census the suite by tag and by cost at the same time, because either number alone looks healthy:
+Names containing `bugfix`, issue numbers, dates, iteration counts, or checklists help find candidates; they do not prove temporary verification. An issue-numbered data-loss regression with no recent failures still belongs when it guards a live contract. Zero CI cost for tagged verification may simply reflect intended exclusion; it does not itself prove unclassified artifacts exist.
 
-```sh
-pnpm exec playwright test --grep "@verification" --list | tail -1        # tagged, excluded from gates
-pnpm exec playwright test --grep-invert "@verification" --list | tail -1 # what the gate actually runs
-```
+For candidates establish ongoing purpose, suitable level, rerun conditions/frequency, determinism, and budget. Do not exclude/delete by name, or treat a rename as classification. [Test lifecycle](./test-lifecycle.mdx) owns admission and retirement. Review may be scheduled or triggered by budget overruns; use an [AI suite audit](../ci-operations/ai-suite-audit.mdx) to bound effort.
 
-The measured case came back with **30 tagged `@verification` tests costing 0 CI-seconds** -- correctly excluded from every gate, exactly as the rule prescribes -- while the real verification artifacts sat untagged inside the gate, paying full price.
-
-Read that pairing as evidence, not as a clean bill of health. A tagged verification set with a near-zero share of gate time means the tag is landing on specs someone already meant to exclude; the specs that actually needed the rule never received it. **When your `@verification` tests cost nothing, look for the verification artifacts in the untagged set.**
-
-#### Naming smells: a spec named after a fix or a date
-
-Untagged verification artifacts are hard to spot by reading assertions, because the assertions are real and they pass. They are easy to spot by **name**, because a verification spec is named after the thing it was proving, while a regression gate is named after the behavior it guards:
-
-- **`bugfix-*-verification`, `fix-*.spec.ts`, `issue-1234.spec.ts`** -- named after a defect. Only a proof is named after the bug it disproves.
-- **`*-tweak-2.spec.ts`, `*-round-3.spec.ts`** -- an iteration counter is a workflow artifact. Nothing in the product is called "tweak 2".
-- **Date-stamped names (`ui-check-2026-03-14.spec.ts`)** -- a date says the spec was about a moment, and moments do not recur.
-- **Checklist-shaped titles** -- `test('everything on the settings page looks right')` carrying fifteen unrelated assertions is a review checklist transcribed into a runner.
-
-None of these is proof on its own. Each is enough to make the spec answer the graduation question it never had to answer.
-
-#### Sweep the gate on a schedule, not once
-
-Join three columns -- tag, name, cost -- and route the intersection through the graduation decision:
-
-```sh
-# 1. the gate's spec set: what runs when nothing is excluded by tag
-pnpm exec playwright test --grep-invert "@verification" --list --reporter=json \
-  | jq -r '.. | .file? // empty' | sort -u > gate-specs.txt
-
-# 2. of those, the names that smell like verification artifacts
-grep -E '(bugfix|verification|issue-[0-9]+|tweak-[0-9]|round-[0-9]|[0-9]{4}-[0-9]{2}-[0-9]{2})' gate-specs.txt
-
-# 3. price each suspect: its test count x the suite's per-test unit cost
-pnpm exec playwright test --list <suspect.spec.ts> | tail -1
-```
-
-Column 3 turns the sweep into a number a reviewer can weigh, using the unit cost derived in [Aggregate Suite Budget](./aggregate-suite-budget.mdx#price-every-test-before-arguing-about-any-of-them): a 12-test suspect at ~9.8 worker-seconds per test costs ~118 worker-seconds -- about a minute of wall clock at two workers -- on every PR, forever.
-
-Every file column 2 returns goes through the graduation decision **explicitly** -- the same three parts as any promotion, applied retroactively: is it deterministic, which tier does it belong to, does it fit that tier's budget? A spec that cannot answer all three does not belong in the gate: tag it `@verification` and drop it, or delete it outright if the proof it was carrying is already spent.
-
-Run this as a sweep, not as a cleanup. Every agent-authored bugfix regenerates the population, so a suite swept once stays clean only until the next fix lands. The reviewer-side check that catches these at authoring time is [Rule 6's enforcement check](./required-behavior.mdx#the-four-execution-rules-rule-6-—-verification-tests-do-not-graduate-themselves).
+[Change-scoped verification](../ci-operations/change-scoped-verification.mdx) covers selection and reuse. Retention, this run's scope, scheduling, and reuse are different decisions.
 
 ## The Five Tiers
 
@@ -98,11 +60,11 @@ Run this as a sweep, not as a cleanup. Every agent-authored bugfix regenerates t
 
 ### T0 + T1: the defaults
 
-Every project gets T0 and T1, no justification needed. T0 is feedback speed -- what the agent runs constantly while implementing. T1 is **the authoritative gate**: a PR is mergeable when its required checks are green, and nothing outside the required checks blocks a merge. Everything above T1 exists to serve it, not to replace it.
+T0 provides fast feedback; T1 provides authoritative integration evidence. Normally green is required before merge. An explicit [transient-red development](../ci-operations/transient-red-development.mdx) policy may separate CI execution from merge waiting while retaining green at the external-impact boundary. Non-required red still creates Rule 7 ownership. The ruleset example below describes the green-before-merge topology.
 
 #### Make the gate enforced, not just declared
 
-Calling T1 "the authoritative gate" means something only if an enforcement layer actually blocks merges and pushes. A gate that lives only in this strategy doc is a convention, not a control: every red-check PR stays mergeable and direct pushes to `main` stay unblocked. Verify the enforcement layer exists -- one API call, not an assumption:
+When declaring green-before-merge, verify an enforcement layer actually blocks merges and pushes. For asynchronous development, verify enforcement at the declared publish/deploy boundary instead. These commands inspect the merge boundary.
 
 ```sh
 gh api repos/{owner}/{repo}/rulesets                      # [] means no rulesets
@@ -114,7 +76,7 @@ If both come back empty, "the authoritative gate" is a gentleman's agreement. Fi
 **The 3-pitfall checklist when adding the ruleset:**
 
 1. **Required status checks block direct pushes too.** A commit pushed straight to `main` has no completed checks at push time, so it is rejected -- which breaks release automation that pushes version-bump commits directly to `main`. Configure an explicit `bypass_actors` entry, then **verify the bypass with an actual test push** (a no-op commit through the real release path).
-2. **Never mark a path-filtered check as required.** A workflow with `on.pull_request.paths:` never runs on a non-matching PR, so that PR waits forever on "Expected -- waiting for status" and can never merge. Only always-running checks can be required; path-filtered checks stay non-required (Rule 7 still makes their reds blocking for the author).
+2. **Never mark a path-filtered check as required.** A workflow with `on.pull_request.paths:` never runs on a non-matching PR, so that PR waits forever on "Expected -- waiting for status" and can never merge. Only always-running checks can be required; path-filtered checks stay non-required (Rule 7 still makes their reds owned; blocking follows the declared boundary policy).
 3. **Enumerate exact check-run names from a recent merged PR -- never guess.** Required checks match by exact check-run name (the job name, or its `name:` override -- not the workflow name). A typo'd or guessed name hangs on "Expected" exactly like pitfall 2. Pull the real names instead of guessing:
 
 ```sh
