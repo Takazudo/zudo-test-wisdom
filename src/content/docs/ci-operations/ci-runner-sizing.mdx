@@ -283,3 +283,7 @@ The through-line: **a runner label is a two-token edit, but choosing it well mea
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) — how environment- and platform-incapable tests reach the scheduled macOS tier.
 - [Scheduled Re-exam and Night Exam](./scheduled-re-exam.mdx) — how the scheduled (T3) macOS job is actually built.
 - [CI Gate Optimization](./ci-gate-optimization.mdx) — the acceptance protocol these timing rules feed: naming the clock, the median-of-three sample rule, and the identity proof that a faster gate did not quietly lose coverage.
+
+## Scope of the optimization
+
+Speeding up the same suite preserves canonical test identities and real-environment evidence, not merely test counts. Replacing/consolidating tests instead needs a guarantee mapping; reducing frequency or retiring detection needs the explicit timing/risk decision in [test lifecycle](../decision-guide/test-lifecycle.mdx). [AI suite audit](./ai-suite-audit.mdx) compares these alternatives and distinguishes billed execution, elapsed wait, and estimates. [Change-scoped verification](./change-scoped-verification.mdx) governs selection and reusable results. Removing merge waiting under [transient-red development](./transient-red-development.mdx) does not itself reduce runner cost.

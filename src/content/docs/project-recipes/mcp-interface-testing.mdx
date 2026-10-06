@@ -185,7 +185,7 @@ The example mappings need argument-level checks too: note tray maps to `list_not
 
 Write one journey against a tiny `callTool(name, args)` driver: create a project, begin an authoring session, edit, upload an asset, inspect history, and read the result back. Reuse that function unchanged from the in-process app harness, Worker/HTTP harness, and stdio harness. Each harness supplies transport and fixture setup; the assertions and user story remain one source of truth.
 
-This is the [walking skeleton](../decision-guide/walking-skeleton-e2e.mdx) applied from the MCP consumer's point of view. It proves that one valuable route through the product remains connected across tool families. It should stay singular while focused A1 and A2 tests carry permutations and failures.
+This is the [walking skeleton](../decision-guide/walking-skeleton-e2e.mdx) applied from the MCP consumer's point of view. It proves that one valuable route through the product remains connected across tool families. Keep one representative for the same path while A1/A2 carry permutations and failures. Independent critical boundaries can justify another thin journey; shared scenarios and proof for each supported transport remain required.
 
 ## B3: Run One-Shot Agent Scenarios
 

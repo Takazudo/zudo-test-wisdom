@@ -96,91 +96,23 @@ Agents operating inside a tiered test suite must also follow these four rules. F
 
 ### Rule 6 — Verification Tests Do Not Graduate Themselves
 
-Agent-authored verification specs are tagged `@verification` and excluded from all gates. Promotion to a tier is an explicit, deliberate step:
+Classify **ongoing purpose → level → rerun conditions/frequency/budget → tags** under [test lifecycle](./test-lifecycle.mdx). Writing regression coverage directly under established policy is normal development; it does not need new individual human approval. One-time verification artifacts carry `@verification` and stay outside gates. Promotion requires an explicit proposal and reviewer decision; an agent does not self-promote its own artifact.
 
-1. Remove the `@verification` tag
-2. Assign the appropriate tier tag (e.g., `@heavy`, `@gpu`)
-3. Confirm the spec fits within the target suite's time budget
-
-An agent never promotes its own verification test. It proposes promotion in the PR description and leaves the decision to the reviewer.
-
-```
-# PR description excerpt
-## Verification spec — graduation proposal
-- spec: tests/banner-render.spec.ts
-- currently: @verification (excluded from gates)
-- proposed tier: T1 (untagged CI-safe e2e)
-- rationale: stable for 5 runs, sub-2s, no platform dependency
-- action needed: reviewer removes @verification tag and assigns tier
-```
+The proposal names the continuing contract and failure, suitable level, duplication/replacement evidence, relevant rerun conditions and detection timing, determinism, capable environment, tier, and budget. After admission remove `@verification` and assign the appropriate tier tag. Untagged means CI-safe after admission, not automatic lifetime approval.
 
 #### Enforcement: catch the specs that never got tagged
 
-The steps above govern a spec that already carries the tag. They say nothing about the spec that never got one -- and that is the common leak, because an agent proving its own fix has no reason to think of the spec as anything but a test. The failure mode is described in [Execution Tiers](./execution-tiers.mdx#verification-vs-regression-silent-graduation-happens-below-the-tag-system); the check below is its enforcement half.
-
-It is deliberately name-pattern based. A verification spec's assertions are real and they pass, so nothing at the assertion level distinguishes it from a regression test -- but its **file name** usually still refers to the defect, the iteration, or the date it was written for.
-
-```sh
-#!/usr/bin/env sh
-# scripts/check-untagged-verification.sh -- run it in review, or as a CI step on the PR.
-# Flags specs whose NAME says "verification artifact" while they carry no @verification
-# tag: the ones the graduation rule above can never see.
-set -eu
-
-SPEC_GLOB='tests/*.spec.ts'  # git pathspec wildcards cross '/', so nested dirs are covered
-SMELL='(bugfix|verification|issue-[0-9]+|tweak-[0-9]|round-[0-9]|[0-9]{4}-[0-9]{2}-[0-9]{2})'
-
-found=0
-for spec in $(git ls-files "$SPEC_GLOB" | grep -E "$SMELL" || true); do
-  if ! grep -q '@verification' "$spec"; then
-    echo "untagged verification suspect: $spec"
-    found=1
-  fi
-done
-
-if [ "$found" -ne 0 ]; then
-  echo
-  echo "Each file above is named after a defect, an iteration, or a date, and runs in the gate."
-  echo "Either tag it @verification and drop it from the gate, or rename it after the behavior"
-  echo "it guards and record the graduation decision in the PR description."
-  exit 1
-fi
-```
-
-Tune `SPEC_GLOB` to the project's spec root and `SMELL` to the naming conventions actually in use. The pattern is meant to be over-eager: a false positive costs one rename, while a false negative costs the gate a permanent spec nobody decided to pay for.
-
-<Note>
-
-The concept of verification artifacts versus regression gates, and the full graduation lifecycle, lives on the [Execution Tiers](./execution-tiers.mdx) page. This rule carries only the enforceable agent behavior: tag it, propose promotion, never self-promote -- plus the check that catches the specs which never got tagged at all.
-
-</Note>
+Use names containing dates, issue numbers, `bugfix`, or iteration counters as discovery hints, not automatic gate failures or grounds for exclusion. Inspect the contract and role. An issue-numbered data-loss regression may be permanent coverage despite years of green. Renaming does not decide admission. [Execution tiers](./execution-tiers.mdx) covers the silent-admission failure mode; [AI suite audit](../ci-operations/ai-suite-audit.mdx) bounds investigation without requiring a ledger or human review of every test.
 
 ### Rule 7 — Red Checks Block the Author
 
-Any red check on a PR you authored is blocking for you, regardless of whether the failing check is marked required in the repository settings. The only exception: the failing test carries `@flaky` with a linked open issue.
+A red check creates an author obligation even when it is not required by repository settings. Under the default green-before-merge policy, resolve it before merging, except valid `@flaky` quarantine with a linked open issue and a reporting lane. A declared [transient-red development](../ci-operations/transient-red-development.mdx) policy can permit an authorized development merge while CI is pending or a localized red has tracked repair. The failure remains owned after merge; it is never reported as passed.
 
-```
-# Blocked — do not merge
-PR #42 authored by agent-session-A
-  ✗  unit: auth-service.test.ts — 1 failed
-     (not a required check, but authored by this session)
-  → investigate and fix before declaring done
+Continue independent work only when the failure is understood/localized, the next work does not depend on it, and a concrete owner/checkpoint tracks repair. Pause affected chains for unknown or cross-cutting failures, broken build/runtime foundations, dependent work, lost attribution, or security/data/publication hazards. Required release/deploy/publish/migration evidence remains blocking before external impact. Overall completion still requires integrated verification and alert reconciliation.
 
-# Not blocked — exception applies
-  ✗  e2e: flaky-animation.spec.ts @flaky — see issue #38
-     (quarantined; allowed-to-fail in scheduled tier)
-  → merge may proceed; issue #38 tracks the fix
-```
+A merge is integration, not proof of success. Pending, cancelled, superseded, skipped, and deferred checks are not passes. Record tested SHA, run/job, evidence, owner, and next action. Neither a non-required label nor an old green run excuses ignoring red. Respect the actual protections and approvals; this rule grants no bypass.
 
-<Warning>
-
-"The check is not required" is not a valid reason to ignore a red result on your own PR. Required-check status is a CI configuration detail — your authorship obligation is independent of it.
-
-</Warning>
-
-Rule 7 is the agent/convention layer; the branch ruleset is the machine/enforcement layer -- neither substitutes for the other (see [Make the gate enforced, not just declared](./execution-tiers.mdx#the-five-tiers-t0-t1-the-defaults-make-the-gate-enforced-not-just-declared)).
-
-Rule 7 binds you as the **author** of the red PR. The inverse role — you are operating a merge gate, and the red is on a test you don't own — has its own procedure: [the gate operator's playbook](../test-integrity/deflaking-recipe.mdx#red-ci-you-don-t-own-—-the-gate-operator-s-playbook).
+The [gate operator's playbook](../test-integrity/deflaking-recipe.mdx) supplies bounded triage for red you did not author, including asynchronous integration alerts.
 
 ### Rule 8 — Never Game the Gate
 
@@ -293,8 +225,8 @@ Before declaring any fix complete:
 - [ ] For CSS/visual changes, used Level 5
 - [ ] Reported what was and was not tested
 - [ ] New verification specs are tagged `@verification` and not self-promoted
-- [ ] No spec named after a defect, an iteration, or a date was added to the gate untagged
-- [ ] All red checks on own PR are resolved or carry `@flaky` with a linked issue
+- [ ] Admission was decided by ongoing purpose, not names or renaming
+- [ ] Red checks remain owned; the declared merge and external-impact gates are satisfied
 - [ ] No `test.skip`, `@flaky`, or loosened tolerances introduced without a linked issue
 - [ ] If change touches heavy-lane-only code, related heavy specs were run on a capable host
 - [ ] Confirm tasks separate child-runnable local checks from manager-runnable PR/CI checks, and say which is which

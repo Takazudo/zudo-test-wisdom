@@ -1,0 +1,43 @@
+---
+title: AI-Assisted Suite Audit
+sidebar_position: 13
+---
+
+## Bound the investigation
+
+Use existing reports and history to examine the suites with the largest cost or maintenance burden. Do not begin with a full inventory, a new measurement service, or a deletion quota. Scheduled audits are optional; budget overruns, suite growth, and ended support can also trigger review.
+
+1. **Choose a goal and budget.** Billing, developer wait, flake handling, and maintenance are different goals. Limit workflows, suites, time window, and investigation effort.
+2. **Locate the burden.** Inspect frequency, duplicate triggers, jobs/matrices/shards, runner type, and setup/install/build/test/retry phases. Missing data stays unknown.
+3. **Read contracts and evidence.** Distinguish a confirmed product contract from a specification inferred from current tests. Map replacement evidence, retained boundaries, and lost detection using [test lifecycle](../decision-guide/test-lifecycle.mdx).
+4. **Compare actions.** Retain, fix flakes, replace/consolidate, select by change, reuse results, change frequency, or retire. Deletion count is not the objective.
+5. **Validate proportionately.** Use assertion/boundary mapping and scoped before/after comparisons. Targeted fault injection or mutation testing can resolve difficult cases; it is not required for every deletion. Keep [Rule 8](../decision-guide/required-behavior.mdx) open-issue and fresh-context review requirements for assertion weakening, skips, filters, and gate-file changes. Candidate discovery or a retain decision adds no new review gate.
+6. **Check the effect after application.** Compare cost, wait, retries, and detection in the affected scope. Set useful revisit/revert conditions. An audit that changed no operation has achieved no measured savings.
+
+AI can investigate, propose, implement within existing delegation, and provide independent review. It need not make a human reread every test. Return unresolved product-contract or risk-acceptance decisions to the authorized owner when they exceed that delegation.
+
+## Minimal candidate report
+
+Report per suite or contract group; obvious retired contracts or exact duplicates can be brief. Expand only where the decision needs it.
+
+| Field | Record |
+| --- | --- |
+| Target and role | Files/suite, ongoing contract or temporary verification, source links |
+| Burden | Available runtime, frequency, retries, maintenance; measured/estimated/unknown labels |
+| Guarantee mapping | Detected failures, replacement evidence, retained boundaries, lost detection |
+| Proposal | Action and reason |
+| Uncertainty and risk | Unconfirmed requirements, unobserved conditions, assurance reduction needing acceptance |
+| Validation and review | Checks actually run, evidence links, decision under existing policy |
+| Effect and revisit | Forecast versus measurement, reconsideration/revert conditions if needed |
+
+## Compare like with like
+
+Workflow elapsed time includes waiting; billed job execution depends on runner rates and execution amount. Test count and average worker-seconds are not billing. Parallelism, skew, shared setup, and the slowest shard can make deletion leave job time unchanged. Setup or duplicate triggers may be the better target.
+
+Use three separate validation paths:
+
+- **Same-suite speedup:** preserve canonical test identities, not just counts, and actual CI-environment evidence from [CI gate optimization](./ci-gate-optimization.mdx). [Runner sizing](./ci-runner-sizing.mdx) changes execution resources.
+- **Replacement/consolidation:** map required assertions and boundaries, retaining the existing assertion matrix and variant inventory.
+- **Reduced frequency or retirement:** name delayed/lost detection and the authorized risk decision. Do not call it equivalent assurance.
+
+A 20-minute job running asynchronously can remove 20 minutes of merge waiting while still consuming 20 runner-minutes. [Transient-red development](./transient-red-development.mdx) changes the critical path, not automatically the bill. [Change-scoped verification](./change-scoped-verification.mdx) has its own input-validity requirements. No savings percentage is assumed here.

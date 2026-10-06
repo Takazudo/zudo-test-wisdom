@@ -244,3 +244,7 @@ This slots cleanly onto the [Environment-Tiered Testing](./environment-tiered-te
 - [Heavy Test Decision Rule](../decision-guide/heavy-test-decision.mdx) -- how a test earns "heavy" classification in the first place, deciding what belongs in the base-`main`-gated lane.
 - [Environment-Tiered Testing](./environment-tiered-testing.mdx) -- staging in the deploy-target sense, and where the preview-on-`develop` migration-rehearsal mapping fits.
 - [CI-Skip Markers and Merge Hygiene](./skip-markers-and-merge-hygiene.mdx) -- the second, independent reason not to squash: a squash merge can copy a CI-skip marker out of branch history and onto `main`, suppressing every `push` workflow for that commit.
+
+## Transient-red accumulation
+
+A protected release boundary can permit transiently red accumulation under an explicit [transient-red development](./transient-red-development.mdx) policy. CI still runs, each failure stays owned, and affected chains pause when diagnosis or dependencies demand it. Main may itself be the integration line only if it has no unprotected production/publication effect. Branch names alone prove nothing. Keep the declared integrated-candidate green gate before external impact.

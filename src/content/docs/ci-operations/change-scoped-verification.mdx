@@ -1,0 +1,36 @@
+---
+title: Change-Scoped Verification
+sidebar_position: 12
+---
+
+## Selection and reuse answer different questions
+
+Selection asks **which checks can this change affect?** Reuse asks **is an earlier result still valid under the relevant inputs and conditions?** Passing one test of soundness does not establish the other. Sharing a build artifact is also not proof that a test result is reusable.
+
+Start with a baseline at which the required verification succeeded, informed by CI history. Do not mechanically diff only the previous commit: intervening failures, skipped runs, and shared configuration changes may still be unresolved. Record tested SHA and input identity. Matching revision is neither sufficient for live dependencies nor necessary when relevant inputs are equivalent across revisions.
+
+## Identify the real inputs
+
+Consider target code, test code, shared helpers, transitive dependencies, fixture/seed data, configuration, feature flags, relevant environment variables, command and arguments, runtime, browser, and toolchain. Declare the inputs that actually influence the check; do not indiscriminately include every environment variable or expose secrets in evidence.
+
+Pin or isolate external dependencies where appropriate. A live API, registry, unpinned dependency, or clock-sensitive behavior can change without a source diff. If such conditions cannot be fixed or shown equivalent, rerun. [Scheduled re-exam](./scheduled-re-exam.mdx) detects external drift; relevant source/environment changes still trigger scoped revalidation.
+
+| Change | Selection obligation | Reuse obligation |
+| --- | --- | --- |
+| Shared helper or fixture | Include dependent suites, including indirect consumers | Invalidate results whose effective inputs changed |
+| Shared config, flag, runtime, or browser | Follow the affected dependency/environment closure | Compare relevant conditions, not just source hashes |
+| Module split with unchanged API names | Inspect consumers and behavioral contracts | Do not infer independence from directory/repository boundaries |
+| Live service changes, source unchanged | Run the live-boundary checks at the declared cadence/boundary | A source-only cache cannot prove the current service |
+| Unknown dependency/input model | Broaden scope or rerun | Absence of a discovered impact is not proof of no impact |
+
+## Make evidence traceable
+
+Use existing tool metadata to identify input/condition fingerprints, source run, command, environment, and tested revision. Distinguish **fresh pass**, **reused success with validated equivalence**, **not run**, and **invalidated/unknown**. Do not mark accepted risk as Proven in the [verification map](../test-integrity/verification-map.mdx).
+
+At introduction, check representative shared-code, configuration, and indirect-dependency changes to confirm that selection broadens and cache entries invalidate. A time-bounded comparison with the previous full-run policy can resolve uncertainty; permanent duplicate execution is not a universal requirement. Fall back conservatively when the model is incomplete.
+
+## Timing remains a separate policy
+
+Moving a check to a schedule changes how late a defect may be found. Valid reuse avoids recomputation under equivalent conditions. These are not the same assurance-preserving optimization. Keep pre-merge or pre-release obligations explicit under [execution tiers](../decision-guide/execution-tiers.mdx) and [transient-red development](./transient-red-development.mdx). Cancellation and supersession are not passes; unresolved alerts survive batching.
+
+[Test lifecycle](../decision-guide/test-lifecycle.mdx) governs whether detection should continue at all. This page defines tool-independent conditions; Nx adoption and experiments remain separate and unverified here.
