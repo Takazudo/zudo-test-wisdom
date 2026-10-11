@@ -135,6 +135,12 @@ The environment-shaped signatures are the ones from the top of this page: timeou
 
 **One rerun, not "rerun until green".** The solo rerun is a controlled experiment: same command, contention removed. It has two informative outcomes. A second and third rerun are [pass-on-retry](../test-integrity/deflaking-recipe.mdx#the-three-rules) wearing a lab coat.
 
+### A progressing compile that hits the cap needs a tier review
+
+When `ENV_SUSPECT exit=124` comes from a compile or link that is still making progress with adequate memory, do not automatically increase the run cap. Inspect the log and build inputs: a release-time version stamp may have turned a normally warm lane into a cold rebuild. Keep Rule 2's broken-expectation override and bounded rerun policy; a timeout is neither a pass nor proof that the product is correct.
+
+Review the lane's placement before paying for more of the same work. If equivalent full coverage is enforced on the exact candidate SHA in CI, make the future local gate focused T0 checks and wait for that CI result at the declared boundary. If a run was already attempted and remains unresolved, record and settle it under Rule 3; a later tier change does not erase its result. If no other executor owns the required coverage, it remains unverified. See [release-input costs](./heavy-test-decision.mdx) and [execution tiers](./execution-tiers.mdx).
+
 ## Rule 3: Deferral That Cannot Become a Laundering Path
 
 Some heavy steps cannot produce a trustworthy local result today. Blocking the whole workflow on them is wrong; calling them green is worse. **Defer** the step -- move its verdict to a machine that can give one.

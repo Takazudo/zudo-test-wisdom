@@ -62,6 +62,14 @@ For candidates establish ongoing purpose, suitable level, rerun conditions/frequ
 
 T0 provides fast feedback; T1 provides authoritative integration evidence. Normally green is required before merge. An explicit [transient-red development](../ci-operations/transient-red-development.mdx) policy may separate CI execution from merge waiting while retaining green at the external-impact boundary. Non-required red still creates Rule 7 ownership. The ruleset example below describes the green-before-merge topology.
 
+#### Do not duplicate an enforced CI suite locally
+
+Before adding a full suite to a local pre-release or pre-push gate, identify which CI job owns that evidence. If CI runs equivalent coverage on the **exact commit SHA** and its successful result is an enforced prerequisite for the next irreversible step (publish, release creation, or deployment), keep the local gate at focused T0 checks. A second full local run is optional convenience, not an additional enforcement requirement. This does not create a new required T4 lane for a CI-capable suite.
+
+Verify the job's actual selection, configuration, platform and inputs; a job with a similar name is not proof of equivalent coverage. A green result on the parent commit does not cover a version-bump commit. If the candidate changes after CI, require evidence for the new SHA. Local checks remain useful for changed code that CI has not tested yet, or for a distinct environment CI cannot cover. Do not remove either required coverage or the final CI wait merely because the local copy is redundant.
+
+Make this placement decision **before running** the heavy step. It is different from [deferring an attempted step after an environmental failure](./local-heavy-lane-admission.mdx).
+
 #### Make the gate enforced, not just declared
 
 When declaring green-before-merge, verify an enforcement layer actually blocks merges and pushes. For asynchronous development, verify enforcement at the declared publish/deploy boundary instead. These commands inspect the merge boundary.

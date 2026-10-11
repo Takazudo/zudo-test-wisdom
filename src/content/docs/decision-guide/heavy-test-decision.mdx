@@ -69,6 +69,12 @@ The test runs fine on CI runners — it just takes long. This category **stays o
 
 Tag: `@heavy`. Never make this category local-only — slowness alone is not a reason to leave the enforced gate. For the underlying trade-offs of tuning workers, sharding, and sizing the runner itself, see [CI Runner Sizing](../ci-operations/ci-runner-sizing.mdx).
 
+#### Price the actual release inputs
+
+A warm development run can badly understate a release gate's cost. Version stamps embedded by `build.rs`, `rerun-if-env-changed`, or generated version files can invalidate compilation and linking on every release. Measure the command with those changed inputs, separating compile/link time from test execution.
+
+For example, a Rust release that embeds a version string can relink dozens of V8 integration binaries before any test runs. If an enforced CI job already owns that full suite on the release SHA, use focused library tests locally and retain the CI requirement. This changes the placement of duplicate work, not the assertions or coverage; see [Execution Tiers](./execution-tiers.mdx).
+
 ### 2. Environment-incapable
 
 The test needs hardware the CI runner does not have: a real GPU, a hardware video encoder. Software rendering on a standard CI runner produces different pixels, so pixel-level assertions fail for environmental reasons, not product reasons. Case B — a canvas/GPU-heavy pattern-generation web app whose pixel-level specs fail on software-rendering CI runners — is the canonical example.
