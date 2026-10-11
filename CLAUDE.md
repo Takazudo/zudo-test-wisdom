@@ -1,6 +1,6 @@
 # zudo-test-wisdom
 
-Takazudo's frontend testing strategy guide, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4).
+Takazudo's frontend testing strategy guide, built with zudo-doc (zfb 4, MDX, zudo-react, zudo-wind).
 
 ## Commands
 
@@ -104,7 +104,7 @@ Run `pnpm setup:doc-skill` to generate the test-wisdom skill and symlink it to `
 
 Improving the shared template is an upstream change — see `/dev-upstream-report`.
 
-The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry, so that is the name generated regardless of what the current zudo-doc 5.x template would derive. Its derivation is **suffix-aware** (`zudolab/zudo-doc#3154`): a `PROJECT_NAME` already ending in `-wisdom` is used as-is, so the derived default here is `zudo-test-wisdom` rather than the doubled `zudo-test-wisdom-wisdom` it produced before. `.gitignore` covers that project-name variant too, so neither name leaves a tracked stray.
+The `test-wisdom` name is pinned as an explicit `$1` override in the `setup:doc-skill` script entry, so that is the name generated regardless of what the current zudo-doc template would derive. Its derivation is **suffix-aware** (`zudolab/zudo-doc#3154`): a `PROJECT_NAME` already ending in `-wisdom` is used as-is, so the derived default here is `zudo-test-wisdom` rather than the doubled `zudo-test-wisdom-wisdom` it produced before. `.gitignore` covers that project-name variant too, so neither name leaves a tracked stray.
 
 The doubled-suffix behaviour is historical. The template still computes the legacy `<packageName>-wisdom` name, but only to detect leftover directories from the old rule and warn about them — and that warning is silent here, because it fires only when the derived default is actually in use and this repo always passes the explicit override.
 
@@ -123,7 +123,7 @@ One invariant to preserve if you touch the install path: browser downloads must 
 
 ## Project Layout
 
-zudo-doc 5.x is a thin host shell — all wiring (components, config types,
+zudo-doc 6.x is a thin host shell — all wiring (components, config types,
 utils, routes, chrome) lives inside `@takazudo/zudo-doc`, driven by the single
 `zudoDoc()` config.
 

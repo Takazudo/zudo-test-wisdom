@@ -1,6 +1,6 @@
 # zudo-test-wisdom
 
-Takazudo's frontend testing strategy guide, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4).
+Takazudo's frontend testing strategy guide, built with zudo-doc (zfb 4, MDX, zudo-react, zudo-wind).
 
 **Live site**: <https://zudo-test-wisdom.takazudomodular.com/>
 

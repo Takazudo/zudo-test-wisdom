@@ -6,7 +6,7 @@
 # Format: one repo-relative path per line (no leading slash).
 # Blank lines and `#` comments are ignored.
 #
-# Reconciled through the zudo-doc 5.27.0 baseline. The 4.4 migration established
+# Reconciled through the zudo-doc 6.0.0 baseline. The 4.4 migration established
 # the single-entry `zudoDoc()` config and removed the ejected pages/lib +
 # src/{config,components,utils,types,integrations} shells. Only three
 # template files diverge from the pinned baseline; everything else is either
@@ -25,8 +25,8 @@
 
 # ── docHistory-patched route stubs ────────────────────────────────────────
 # create-zudo-doc patches the base + i18n doc-route stubs when the docHistory
-# feature is selected: it statically imports DocHistory from
-# "@takazudo/zudo-doc/doc-history" and merges it over chromeBindings in
+# feature is selected: it statically imports DocHistoryBoundary from
+# "@takazudo/zudo-doc/doc-history-area" and merges it over chromeBindings in
 # createChrome's hostBindings, so the doc-history button hydrates on these
 # self-contained dynamic routes. The patched files differ from the raw
 # base/features templates, so the drift check flags them.
