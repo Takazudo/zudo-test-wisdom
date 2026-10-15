@@ -7,7 +7,7 @@ set -euo pipefail
 #   1. Format check (mdx)
 #   2. Category metadata check (pure-Node, reads src/ + zfb.config.ts)
 #   3. Link checker tests (pure Node)
-#   4. Template drift check (needs node_modules — create-zudo-doc devDep)
+#   4. Template drift check (resolves matching published scaffold)
 #   5. Pin parity check (pure-Node, reads package.json only)
 #   6. Wrangler pin check (needs node_modules — reads the zfb platform binary)
 #   7. Type checking (zfb check)
@@ -67,7 +67,7 @@ else
 fi
 
 # ── Step 4: Template drift check ──────────────────────
-# Requires node_modules (reads create-zudo-doc devDep templates).
+# Requires node_modules to read the installed zudo-doc version; fetches matching templates.
 # Run `pnpm install` first if this fails with "not found".
 step "Template drift check"
 if (cd "$ROOT_DIR" && pnpm check:template-drift); then

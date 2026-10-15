@@ -1,41 +1,10 @@
-# Template drift allowlist for zudo-test-wisdom.
-# Generated projects start from create-zudo-doc templates; this file lists
-# intentional divergences from the pinned create-zudo-doc baseline so
-# `pnpm check:template-drift` exits 0.
-#
-# Format: one repo-relative path per line (no leading slash).
-# Blank lines and `#` comments are ignored.
-#
-# Reconciled through the zudo-doc 5.27.0 baseline. The 4.4 migration established
-# the single-entry `zudoDoc()` config and removed the ejected pages/lib +
-# src/{config,components,utils,types,integrations} shells. Only three
-# template files diverge from the pinned baseline; everything else is either
-# byte-identical to the template or host-owned (not template-tracked).
-#
-# The former `pages/index.tsx` entry was dropped at the 4.4.13 bump: zudo-doc
-# 4.4.x added the `home.wide` config toggle requested in zudo-doc#2959, so the
-# host reconstruction (and its `pages/[locale]/index.tsx` sibling) was deleted
-# in favour of `home: { wide: true }` in zfb.config.ts and the package-owned
-# routes, which also pass a `tags` prop the reconstruction had gone stale on.
-#
-# The 5.26.2 template contains Bash 3.2-safe config/locale handling and
-# quoted-attribute/single-pass HTML scans, plus the escaped-MDX-tag fix.
-# Both scripts now match that template exactly, so their former entries
-# have been dropped.
+# Intentional divergences from published create-zudo-doc@7.0.0.
+# Three-way reconciliation against 5.28.1 and 7.0.0 preserves host additions.
+# All other base/i18n template files match the published scaffold byte-for-byte.
 
-# ── docHistory-patched route stubs ────────────────────────────────────────
-# create-zudo-doc patches the base + i18n doc-route stubs when the docHistory
-# feature is selected: it statically imports DocHistory from
-# "@takazudo/zudo-doc/doc-history" and merges it over chromeBindings in
-# createChrome's hostBindings, so the doc-history button hydrates on these
-# self-contained dynamic routes. The patched files differ from the raw
-# base/features templates, so the drift check flags them.
+# Doc-history feature patches: bind the server boundary, preserving host slots.
 pages/docs/[[...slug]].tsx
 pages/[locale]/docs/[[...slug]].tsx
 
-# ── Japanese font fallback: global.css ────────────────────────────────────
-# global.css extends the futura-editorial pack's Latin-only Noto Sans stack
-# with Noto Sans JP, loaded through zfb.config.ts `head`. Its scoped :root
-# selector preserves that fallback when the pack stylesheet loads later.
-# Display typography and chrome styling stay owned by the package/theme pack.
+# Futura pack Noto Sans JP body fallback; font links remain in zfb.config.ts.
 src/styles/global.css
