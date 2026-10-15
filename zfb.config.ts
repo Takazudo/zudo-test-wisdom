@@ -1,8 +1,8 @@
 import { defineConfig } from "zfb/config";
 import { zudoDoc } from "@takazudo/zudo-doc/config";
 
-// zudo-doc v4 single-entry config. `zudoDoc()` shallow-merges these fields over
-// the package defaults and returns a complete ZfbConfig (framework, tailwind,
+// zudo-doc v7 single-entry config. `zudoDoc()` shallow-merges these fields over
+// the package defaults and returns a complete ZfbConfig (framework, zudo-wind,
 // collections, plugins, markdown, package-owned routes are all supplied
 // internally — the host sets only what differs from the defaults). Fields left
 // at their documented @default (colorScheme/colorMode, base "/", mermaid,
@@ -75,7 +75,7 @@ Claude Code用の\`test-wisdom\`スキルは、このリポジトリで\`pnpm se
     },
     // Noto Sans JP webfont for JA + Latin body text. Emitted as real <head>
     // links (preconnect + async stylesheet); global.css points --font-sans at
-    // it. Never load the font via CSS @import — Tailwind v4 bundling can push
+    // it. Never load the font via CSS @import — CSS bundling can push
     // it past the first style rule and the browser silently drops it.
     head: {
       preconnect: [
