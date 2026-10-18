@@ -825,10 +825,16 @@ async fn control_withheld_body_hits_the_phase_deadline() {
 
 #[tokio::test]
 async fn control_term_ignoring_child_is_reported_as_forced() {
+    use tokio::io::AsyncBufReadExt;
     let mut child = tokio::process::Command::new("sh")
-        .args(["-c", "trap '' TERM; exec sleep 60"])
+        .args(["-c", "trap '' TERM; echo ready; exec sleep 60"])
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    // Wait until the trap is installed; an early SIGTERM would end sh gracefully.
+    let mut ready = String::new();
+    let stdout = child.stdout.take().unwrap();
+    tokio::io::BufReader::new(stdout).read_line(&mut ready).await.unwrap();
     let out = stop_child(&mut child, Duration::from_millis(300), Duration::from_secs(5)).await;
     assert!(out.forced_kill, "{out:?}");
     assert!(out.status.is_some_and(|s| !s.success()), "{out:?}");
@@ -857,7 +863,7 @@ async fn control_in_process_timer_cannot_preempt_a_blocking_call() {
 
 ネイティブ待機のタイムアウト値に変更を提案する前に、これを実行してください：
 
-- [ ] **セットアップからteardownまでのすべての操作**が、1つの単調な絶対期限を持つフェーズに属している。ネストした操作は残り予算だけを受け取り、新しい定数は決して受け取らない。
+- [ ] **セットアップからteardownまでのすべての操作**が、1つの単調な絶対期限を持つフェーズに属している。ネストした待機は残り予算だけを受け取り、新しい定数は決して受け取らない。クリーンアップの猶予（`GRACEFUL + REAP`）だけが固定予算であり、直列の最悪ケースに算入される。
 - [ ] **期限切れは作業の前に確認され、成功を受け入れる前にもう一度確認される**（高速パスを含む）。そして契約は、「期限前」が観測時刻を意味するのか、信頼できるイベントのタイムスタンプを意味するのかを明示している。
 - [ ] **静穏ウィンドウには絶対的な上限がある**。それに達することは、上限のある診断情報を伴う名前つきの失敗である。同期的な受信スキャンはバッチごとに制限され、バッチの間で期限を確認する。
 - [ ] **HTTPやその他のI/Oは端から端まで**、本文の読み取りを含めてフェーズ期限で制限されている — `send()` だけのタイムアウトではなく。

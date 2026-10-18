@@ -271,9 +271,9 @@ sha256_of() {
 # --- helper under test (normally sourced from scripts/) ----------------------
 stage_reference_cli() { # <downloaded-input> <staging-dir> <expected-sha256>
   local incoming=$1 stage=$2 expected=$3
-  [[ "$(sha256_of "$incoming")" == "$expected" ]] || fail "unexpected input: $incoming"
   mkdir -p "$stage"
   cp "$incoming" "$stage/cli"
+  [[ "$(sha256_of "$stage/cli")" == "$expected" ]] || fail "unexpected input: $incoming"
   chmod 0755 "$stage/cli" # trusted boundary: validated bytes, our own copy
   REF_CLI="$stage/cli"    # the defect: leaving this pointed at "$incoming"
   echo "ref-cli path=$REF_CLI mode=$(file_mode "$REF_CLI") sha256=$expected" >&2

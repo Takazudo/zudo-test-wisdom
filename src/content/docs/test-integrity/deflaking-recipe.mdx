@@ -825,10 +825,16 @@ async fn control_withheld_body_hits_the_phase_deadline() {
 
 #[tokio::test]
 async fn control_term_ignoring_child_is_reported_as_forced() {
+    use tokio::io::AsyncBufReadExt;
     let mut child = tokio::process::Command::new("sh")
-        .args(["-c", "trap '' TERM; exec sleep 60"])
+        .args(["-c", "trap '' TERM; echo ready; exec sleep 60"])
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    // Wait until the trap is installed; an early SIGTERM would end sh gracefully.
+    let mut ready = String::new();
+    let stdout = child.stdout.take().unwrap();
+    tokio::io::BufReader::new(stdout).read_line(&mut ready).await.unwrap();
     let out = stop_child(&mut child, Duration::from_millis(300), Duration::from_secs(5)).await;
     assert!(out.forced_kill, "{out:?}");
     assert!(out.status.is_some_and(|s| !s.success()), "{out:?}");
@@ -857,7 +863,7 @@ This control passing is the point: a wait that wraps a synchronous native call i
 
 Run this before proposing any change to a native wait's timeout value:
 
-- [ ] **Every operation, setup through teardown,** belongs to a phase with one monotonic absolute deadline; nested operations receive only the remaining budget, never a fresh constant.
+- [ ] **Every operation, setup through teardown,** belongs to a phase with one monotonic absolute deadline; nested waits receive only the remaining budget, never a fresh constant; cleanup grace (`GRACEFUL + REAP`) is the one fixed budget, and it is counted in the sequential worst case.
 - [ ] **Expiry is checked before work and again before accepting success**, fast paths included, and the contract names whether "before the deadline" means observation time or a trustworthy event timestamp.
 - [ ] **Quiet windows have an absolute cap**; hitting it is a named failure with bounded diagnostics; synchronous receive scans are bounded per batch with a deadline check between batches.
 - [ ] **HTTP and other I/O are bounded end to end**, body consumption included, by the phase deadline — not by a timeout on `send()` alone.
