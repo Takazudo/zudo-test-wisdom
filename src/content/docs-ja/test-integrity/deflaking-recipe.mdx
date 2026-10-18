@@ -118,7 +118,7 @@ bandの幅は、都合ではなく根拠から決めてください。このケ�
 
 - **非決定論的なスケジューリング** — スレッドやタスクのインターリーブに依存するテスト（ハイドレーションレースのネイティブ版）。
 - **待機そのものとしての固定 `sleep`** — 待機の代わりに置かれたハードコードの `sleep(N)` は、裸の `waitForTimeout(N)` と同じ推測です。代わりに実際の条件をポーリングするか、完了シグナルを待機してください。この処方に従えばflakeは消えます。
-- **すでにイベントに同期している待機の、ハング検知用の固定期限** — 同じタイマーでも、固定 `sleep` とは役割が異なります。テストは実際のイベントを待ち、到着した時点で待機を終えます。タイマーの役割は、ハングでジョブが止まり続けるのを防ぎ、診断可能な失敗として報告することだけです。待機はすでに実際の条件を確認しているため、上の対処をしても**何も変わりません**。問うべきは同期の仕組みではなく、ガードレールの*値*に根拠があるかどうかです。レイテンシを根拠に値を決める場合は、待機区間のレイテンシ分布を通常時と負荷時で計測し、比較してください：
+- **すでにイベントに同期している待機の、ハング検知用の固定期限** — 同じタイマーでも、固定 `sleep` とは役割が異なります。テストは実際のイベントを待ち、到着した時点で待機を終えます。タイマーの役割は、ハングでジョブが止まり続けるのを防ぎ、診断可能な失敗として報告することだけです。待機はすでに実際の条件を確認しているため、上の対処をしても**何も変わりません**。問うべきは同期の仕組みではなく、ガードレールの*値*に根拠があるかどうかです。ただしこの問いは、上限がそもそも強制されていることを前提にしており、イベントへの同期はそれを証明しません：遅れて受け入れられる述語、リセット可能な静穏ウィンドウ、上限のない内側のawait、強制的なteardownは、どれも宣言された期限をすり抜けえます。それらの監査が先です — [上限つきのネイティブ待機](#上限つきのネイティブ待機：サイズを決める前に期限が守られることを証明する)を参照してください。レイテンシを根拠に値を決める場合は、待機区間のレイテンシ分布を通常時と負荷時で計測し、比較してください：
   - 入力が同一のまま**連続した長い裾**が伸びている → 競合（contention）です。正当な修正：レーンの並列度を下げる、サブプロセスを多用するファイルを分離する、避けられるプロセス起動のオーバーヘッドを取り除く、**あるいはガードレールを計測値に基づいた値に修正する**。
   - **タイムライン上で因果的に説明できる停止** → プロダクトを疑ってください。[偽物](#part-1-—-根本原因カタログ-偽物-flakeが実はプロダクトのバグである場合)の節に従います。
 
@@ -625,6 +625,248 @@ test("navigates to dashboard", async ({ page }) => {
   await expect(page.locator("h1")).toHaveText("Dashboard");
 });
 ```
+
+## 上限つきのネイティブ待機：サイズを決める前に期限が守られることを証明する
+
+カタログの[ガードレールの項目](#part-1-—-根本原因カタログ)は、ネイティブの待機がイベントに同期していれば、残る問いはガードレールの*値*だと述べています。ただしそれが成り立つのは、その前の問いが片付いてからです：**宣言された上限は、実際に強制されているか？** イベントへの同期で決まるのは、待機が*何を*待つかです。待機が期限を越えて生き延びられないことまでは証明しません — 期限切れの後まで走る述語、イベントのたびにリセットされる静穏ウィンドウ、外側のチェックからは見えない内側のawait、強制終了で終わるteardownは、どれも定数に書かれた数字をすり抜けます。強制されていないガードレールをリサイズするのは、待機が従っていない数字のサイズを決めることであり、どんなレイテンシ計測からもその値は導けません。
+
+実例：RustのウォッチャーとdevサーバーのスイートをmacOSネイティブで実行したところ、300秒でのランナータイムアウトが9件、加えてウォッチャーの生存確認とdevサーバーの失敗が報告されました。テスト対象リビジョンのテストヘルパーを読むと、宣言された上限をすり抜けうる経路が4つ見つかりました — 下の4つの形です。これらのハザードはソースレベルで実証されています。しかし、なぜその9件のテストが300秒に達したのかは**説明しません**：ネイティブでの再現によってタイムアウトの原因をファイルイベントのバックエンド、バックグラウンド負荷、ハードウェア、プロダクトの欠陥のいずれかに帰属させたわけではなく、このページもそうしません。この監査の価値は、誰かがタイムアウト値に手を触れる前に、ヘルパーを容疑者から外すか、有罪にするかのどちらかを決められる点にあります。
+
+### イベントに同期した待機が上限をすり抜ける4つの経路
+
+1. **遅れた成功。** ヘルパーが先に述語を呼び、その後で期限切れを確認している — 高速パスも含めて。予算が尽きた後に `true` を返す述語は `live: true` を生み、「期限前に観測された」と文書化された結果型と矛盾します。期限切れの確認は作業の前に行い、**成功を受け入れる前にもう一度**行ってください。そして契約の意味を決めてください：*観測時刻*（テストがそれを見た時刻）なのか、信頼できる*イベントのタイムスタンプ*（プロダクトがそれが起きたと言う時刻）なのか。これを決めない限り、「期限前」には指す対象がありません。
+2. **リセット可能な静穏ウィンドウは全体の上限ではない。** イベントのたびに新しい200msの受信タイムアウトを始めるドレインは、途切れないトラフィックの下では決して静穏に達しません。同じヘルパーは `try_recv` を上限のない同期ループでドレインしていたため、無関係なトラフィックが続けば、呼び出し元の期限チェックに戻ること自体も先送りされえました。連続した静穏ウィンドウ**と**絶対的なドレイン上限の両方を持ち、同期的なスキャン1回あたりの作業量を制限し、バッチの間で期限を確認してください。上限に突き当たったトラフィックは、上限のある診断情報（件数、最初の数件のイベント種別）を伴う**名前つきの失敗**であり、決して「不在の証明」の成功ではありません。
+3. **外側のポーリング条件は内側のI/Oを制限しない。** 新しいHTMLを待つポーリングは、ループの入口で30秒の予算を確認した後、レスポンスヘッダーと本文を、どちらも残り予算と競わせずにawaitしていました — そして遅れて届いた完了も受け入れていました。本文の読み取りを含めた**HTTP操作全体**を、同じフェーズ期限で制限してください。`send()` だけを囲むタイムアウトは、ヘッダーのところで止まります。
+4. **グレースフルな終了と強制クリーンアップは別の結果である。** あるシャットダウンテストは、12秒のグレースフル終了のアサーションと20秒の `SIGKILL` フォールバックを分けていながら、両者を経過時間で区別し、終了ステータスを捨てていました。報告された20,049msはフォールバックが発火したことと矛盾しませんが、それだけではどちらの経路が走ったかの証明になりません。受け入れ値をフォールバックより上に引き上げれば、強制killがグレースフルなシャットダウンになりすませるようになります。
+
+4つ目の形は、[ルール8](../decision-guide/required-behavior.mdx#4つの実行ルール-ルール8-—-ゲートを不正操作しない)が依って立つ境界を示しています。**ハング検知用のガードレール**はプロダクトについて何もアサートしないので、証拠から導いた引き上げは正当です。**グレースフルシャットダウンの期限**はプロダクトの受け入れアサーション — 「サーバーは12秒以内にきれいに終了する」 — であり、それを引き上げるのはガードレールのリサイズではなくアサーションの緩和です。その背後にあるkillフォールバックはクリーンアップの仕組みであり、どちらの数字も他方の代わりにはなりません。
+
+### キャンセルの境界：プロセス内タイマーにできないこと
+
+上限については正直に述べてください。Tokioの [`timeout`](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html) が効くのは、包まれたfutureがyieldしたときだけです：`.await` に到達しないまま同期的な処理を走らせるfutureは中断されず、タイマーはそれが戻るまで発火することすらできません。[`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) のタスクは、一度始まるとabortできません — タイムアウトは戻ってきても、スレッドは走り続けます。したがって、同期的なネイティブの登録・破棄の呼び出し（ファイルウォッチャーのストリーム、プラットフォームのハンドル）をasyncのタイムアウトで包んでも、プリエンプションは**生まれません**。そしてabortの要求は、タスクやリソースが停止したことの証明ではありません。
+
+そのような呼び出しの周りに厳密な実時間の上限が必要なら、それを**独立して監督されるプロセス境界**の向こうに置いてください：フェーズを子プロセスで実行し、期限でスーパーバイザーにkillさせ、子には進行に応じてフェーズのマーカーを報告させて、スーパーバイザーが最後に*開始した*フェーズと最後に*完了した*フェーズを保持できるようにします。これは[ライブ証明の証拠契約](./live-proof-evidence-contracts.mdx#タイミングのサンプルはテールの証明ではない-サンプルの代わりになるもの)が、プロダクトに課金される実時間について使っているのと同じ、信頼されたスーパーバイザーの形です。
+
+### 実例：1つのフェーズ期限を、すべての待機に通す
+
+```rust
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+
+#[derive(Debug)]
+enum WaitError {
+    Expired { phase: &'static str },
+    DrainCapExceeded { phase: &'static str, events_seen: usize },
+    SourceClosed { phase: &'static str },
+    Http { phase: &'static str, detail: String },
+}
+
+/// One monotonic absolute deadline per phase.
+#[derive(Clone, Copy)]
+struct Phase {
+    name: &'static str,
+    deadline: Instant,
+}
+
+impl Phase {
+    fn start(name: &'static str, budget: Duration) -> Self {
+        Phase { name, deadline: Instant::now() + budget }
+    }
+
+    /// A nested operation gets the smaller of its own cap and what is left.
+    fn child(&self, name: &'static str, cap: Duration) -> Self {
+        Phase { name, deadline: self.deadline.min(Instant::now() + cap) }
+    }
+
+    fn remaining(&self) -> Result<Duration, WaitError> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(WaitError::Expired { phase: self.name })
+    }
+}
+
+/// Ok means the predicate was observed true *before* the deadline.
+fn wait_for(phase: Phase, mut observed: impl FnMut() -> bool) -> Result<(), WaitError> {
+    loop {
+        phase.remaining()?; // before the work, fast path included
+        if observed() {
+            phase.remaining()?; // and again before accepting success
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10).min(phase.remaining()?));
+    }
+}
+
+const QUIET: Duration = Duration::from_millis(200);
+const SCAN_BATCH: usize = 256;
+
+/// Absence proof: one full QUIET window with no event, inside the phase.
+async fn drain_until_quiet<T>(
+    phase: Phase,
+    rx: &mut UnboundedReceiver<T>,
+) -> Result<usize, WaitError> {
+    let mut seen = 0;
+    loop {
+        // Bounded synchronous scan, then back to the deadline check.
+        for _ in 0..SCAN_BATCH {
+            match rx.try_recv() {
+                Ok(_) => seen += 1,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    return Err(WaitError::SourceClosed { phase: phase.name })
+                }
+            }
+        }
+        let cap_hit = WaitError::DrainCapExceeded { phase: phase.name, events_seen: seen };
+        let Ok(left) = phase.remaining() else { return Err(cap_hit) };
+        match tokio::time::timeout(QUIET.min(left), rx.recv()).await {
+            Ok(Some(_)) => seen += 1, // traffic: the quiet window restarts, the cap does not
+            Ok(None) => return Err(WaitError::SourceClosed { phase: phase.name }),
+            Err(_) if left >= QUIET => return Ok(seen),
+            Err(_) => return Err(cap_hit), // the window was cut short by the cap
+        }
+    }
+}
+
+/// Headers *and* body race one remaining budget.
+async fn fetch_body(phase: Phase, client: &reqwest::Client, url: &str) -> Result<String, WaitError> {
+    let op = async {
+        let resp = client.get(url).send().await?; // headers
+        Ok::<_, reqwest::Error>(resp.text().await?) // body, still inside the budget
+    };
+    let body = tokio::time::timeout(phase.remaining()?, op)
+        .await
+        .map_err(|_| WaitError::Expired { phase: phase.name })?
+        .map_err(|e| WaitError::Http { phase: phase.name, detail: e.to_string() })?;
+    phase.remaining()?; // a completion after the deadline is not success
+    Ok(body)
+}
+
+/// Graceful exit and kill fallback are separate outcomes, never inferred from elapsed time.
+#[derive(Debug)]
+struct ShutdownOutcome {
+    status: Option<std::process::ExitStatus>, // None: never reaped
+    forced_kill: bool,
+    elapsed: Duration,
+}
+
+async fn stop_child(
+    child: &mut tokio::process::Child,
+    graceful: Duration,
+    reap: Duration,
+) -> ShutdownOutcome {
+    let started = Instant::now();
+    if let Some(pid) = child.id() {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    if let Ok(Ok(status)) = tokio::time::timeout(graceful, child.wait()).await {
+        return ShutdownOutcome { status: Some(status), forced_kill: false, elapsed: started.elapsed() };
+    }
+    let _ = child.start_kill(); // a request, not proof
+    let status = tokio::time::timeout(reap, child.wait()).await.ok().and_then(Result::ok);
+    ShutdownOutcome { status, forced_kill: true, elapsed: started.elapsed() }
+}
+```
+
+これらを使うテストは、アサーションの結果とクリーンアップの結果を分けて扱います。シナリオはpanicする代わりに `Result` を返すので、クリーンアップは必ず試みられ、その結果はどちらの場合も出力され、元の失敗はクリーンアップの苦情に消されることなく最初に報告されます：
+
+```rust
+#[tokio::test]
+async fn dev_server_shuts_down_gracefully() {
+    let test = Phase::start("test", Duration::from_secs(90));
+    let mut child = spawn_dev_server();
+    let scenario = run_scenario(test, &mut child).await; // assertion outcome
+    let cleanup = stop_child(&mut child, GRACEFUL, REAP).await; // always attempted
+    eprintln!("cleanup: {cleanup:?}"); // retained on every outcome
+    scenario.expect("scenario"); // the original failure wins
+    assert!(!cleanup.forced_kill, "forced kill is not a graceful shutdown: {cleanup:?}");
+    assert!(cleanup.status.is_some_and(|s| s.success()), "exit status: {cleanup:?}");
+}
+```
+
+この一連の流れは、[逐次ステージ予算の項目](#part-1-—-根本原因カタログ)と同じ算術でサイズを決めてください：`test` が1つの期限であり、ネストしたすべての待機は `test.child(...)` を受け取り、最悪ケース — `GRACEFUL + REAP` を含む — がランナーのkill期限を下回るようにして、テスト自身の診断的な失敗が先に発火するようにします。自分自身の判定を報告するクリーンアップは、[クリーンアップは独立したゲート](./live-proof-evidence-contracts.mdx#クリーンアップは独立したゲート)のテスト内での形です。
+
+### 反証コントロール
+
+各ヘルパーが信頼を得られるのは、契約が破られたときに失敗することによってだけです。以下の4つのコントロールは安価です — プロダクトは不要で、ネットワークもループバックしか使いません — そして、それぞれがフェーズ名を伴って、意図した契約どおりに失敗しなければなりません：
+
+```rust
+#[test]
+fn control_late_signal_is_not_success() {
+    let phase = Phase::start("handshake", Duration::from_millis(50));
+    let late = || {
+        std::thread::sleep(Duration::from_millis(80));
+        true
+    };
+    assert!(matches!(wait_for(phase, late), Err(WaitError::Expired { phase: "handshake" })));
+}
+
+#[tokio::test]
+async fn control_continuous_traffic_is_not_quiet() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while tx.send(()).is_ok() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    let phase = Phase::start("drain", Duration::from_secs(1));
+    let err = drain_until_quiet(phase, &mut rx).await.unwrap_err();
+    assert!(matches!(err, WaitError::DrainCapExceeded { events_seen, .. } if events_seen > 0));
+}
+
+#[tokio::test]
+async fn control_withheld_body_hits_the_phase_deadline() {
+    let url = serve_headers_then_stall().await; // sends headers + Content-Length, never the body
+    let phase = Phase::start("fresh-html", Duration::from_millis(500));
+    let err = fetch_body(phase, &reqwest::Client::new(), &url).await.unwrap_err();
+    assert!(matches!(err, WaitError::Expired { phase: "fresh-html" }));
+}
+
+#[tokio::test]
+async fn control_term_ignoring_child_is_reported_as_forced() {
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", "trap '' TERM; exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let out = stop_child(&mut child, Duration::from_millis(300), Duration::from_secs(5)).await;
+    assert!(out.forced_kill, "{out:?}");
+    assert!(out.status.is_some_and(|s| !s.success()), "{out:?}");
+}
+```
+
+5つ目のコントロールは、ヘルパーではなく限界そのものを文書化するもので、プロセス内タイマーについてよく想定されていることの逆をアサートします：
+
+```rust
+#[tokio::test]
+async fn control_in_process_timer_cannot_preempt_a_blocking_call() {
+    let started = Instant::now();
+    let result = tokio::time::timeout(Duration::from_millis(50), async {
+        std::thread::sleep(Duration::from_millis(300)); // stands in for a synchronous native call
+    })
+    .await;
+    // The timer could not fire until the call returned: the "50 ms bound" was not a bound.
+    assert!(result.is_ok());
+    assert!(started.elapsed() >= Duration::from_millis(300));
+}
+```
+
+このコントロールがパスすることこそが要点です：同期的なネイティブ呼び出しを包む待機を制限するのは、上で説明したプロセス境界か、さもなければ何もありません — 決してその定数ではありません。
+
+### 監査チェックリスト
+
+ネイティブ待機のタイムアウト値に変更を提案する前に、これを実行してください：
+
+- [ ] **セットアップからteardownまでのすべての操作**が、1つの単調な絶対期限を持つフェーズに属している。ネストした操作は残り予算だけを受け取り、新しい定数は決して受け取らない。
+- [ ] **期限切れは作業の前に確認され、成功を受け入れる前にもう一度確認される**（高速パスを含む）。そして契約は、「期限前」が観測時刻を意味するのか、信頼できるイベントのタイムスタンプを意味するのかを明示している。
+- [ ] **静穏ウィンドウには絶対的な上限がある**。それに達することは、上限のある診断情報を伴う名前つきの失敗である。同期的な受信スキャンはバッチごとに制限され、バッチの間で期限を確認する。
+- [ ] **HTTPやその他のI/Oは端から端まで**、本文の読み取りを含めてフェーズ期限で制限されている — `send()` だけのタイムアウトではなく。
+- [ ] **同期的な処理や `spawn_blocking` の処理をプリエンプトしたとして、プロセス内タイマーの手柄にしているものはない**。厳密な上限が必要な箇所では、監督されたプロセス境界が、最後に開始したフェーズと最後に完了したフェーズを保持している。
+- [ ] **アサーションの結果とクリーンアップの結果は別々に記録されている**：グレースフルシャットダウンのテストは期待する終了ステータスと `forced_kill = false` をアサートする。クリーンアップは成功の後でもアサーション失敗の後でも同じように試みられ、元の失敗を決して消さない。
+- [ ] **ガードレールとアサーションの線が引かれている**：ハング検知用のガードレールは証拠に基づいて大きくしてよい。プロダクトのシャットダウン期限はアサーションであり、そうはいかない。
+- [ ] **逐次的な最悪ケース** — 待機とクリーンアップのグレース期間 — が、余裕をもってランナーのkill期限に収まっている。
+
+すべてのボックスにチェックが入って初めて、カタログの「証拠に基づくサイズ決め」の問いが当てはまります。証拠から導いた正当なガードレールの引き上げは、この監査の後も正当なままです。監査が取り除くのは、そもそも上限のなかった待機を計測してしまう可能性です。
 
 ## 関連ページ
 
