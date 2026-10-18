@@ -235,6 +235,81 @@ fi
 
 </Tip>
 
+### アーティファクト転送：実際に起動される実行ファイルをテストする
+
+tarballゲートが覆うのは1つの境界だけです。ジョブをまたぐパイプラインはさらにいくつもの境界を越え、そのそれぞれが同じバイナリの異なる性質を変えることがあります：
+
+`built output -> uploaded artifact -> downloaded input -> staged package -> installed package -> actual spawn target`
+
+この連鎖の上では、4つのものを区別してください。**バイト列**はダイジェストが証明するもので、ダイジェストはモードについて何も語りません。**ファイルシステムのメタデータ** -- つまりモード -- は、転送がバイトに一切触れずに変えてしまえるものです。**ステージされたリファレンス実行ファイル**は、検証側が自分のために用意するコピーで、たとえば出力の比較に使います。**インストールされたコンシューマー実行ファイル**は、パッケージマネージャーがユーザーのためにディスクに置いたものです。ダイジェストの一致、`0`で終了したインストール、*どれか*のコピーに対して成功した`chmod` -- これらは後ろの2つについて何も確立しません。
+
+モードが失われるのは転送の場面です。GitHubの`upload-artifact`は、通常のアーカイブ型アーティファクトの経路について[パーミッションの喪失](https://github.com/actions/upload-artifact#permission-loss)を文書化しています：ファイルは実行ビットを失った状態（`0644`）で戻ってきます。これは実際に使っているアクションのバージョンとアーカイブ設定に照らして再確認してください。その経路についての観測であって、あらゆる転送方式の性質ではありません。
+
+**発端のインシデント：[zudo-front-builder PR #4204](https://github.com/Takazudo/zudo-front-builder/pull/4204)、2026-10-13。** パック済みCSS APIのスモークヘルパー（[修正前](https://github.com/Takazudo/zudo-front-builder/blob/7112d0e3d6fed2d885ae006d4671070be2def519/scripts/smoke-css-api-packed.sh)、[修正後](https://github.com/Takazudo/zudo-front-builder/blob/cb95ad41a8e995a4e136dc198040965bc1a21df0/scripts/smoke-css-api-packed.sh)）は、ダウンロードしたCLIをプラットフォームパッケージのステージングパスにコピーし、そのコピーを`0755`にchmodしていました -- しかし`ZFB_CSS_API_CLI`は元のダウンロード入力を指したままでした。PRのインシデント台帳には、そのモード`0644`のパスでの`EACCES`が記録されており、修正前後のソースもこの食い違いを独立に裏付けています。修正はヘルパーがステージ済みのCLIを起動するようにしたもので、ネイティブコンパイラの入力は変わっていません。証拠の範囲：これはソースとホステッド実行の結果（[以前のスキャフォールド実行](https://github.com/Takazudo/zudo-front-builder/actions/runs/38409697155/job/115344426604)、および2026-10-13の確認時点で成功していた[修正後のワークフロー](https://github.com/Takazudo/zudo-front-builder/actions/runs/38413305311)）に基づいています。クリーンルームスイートをローカルで実行してはおらず、保持されたプラットフォームアーティファクトの再生もしていません。スキャフォールドのワークフローが緑であることは、PR #4204全体が緑だという主張ではありません -- 別のヘルスワークフローは、依然としてCargo.lockの来歴を拒否しています。
+
+ここから3つのルールが導かれます：
+
+- **モードを保持するか、意図して復元する。** モードを保つ転送（アップロード前にtarで固め、ダウンロード後に展開する）を使うか、期待どおりの入力であることを*検証した後で*、信頼できるステージング境界で必要なモードを復元します -- 検証はたとえばダイジェストのチェックです。ダウンロードが渡してきたものを何であれ一律に`chmod`してはいけません。
+- **修復ではなく、起動対象をアサートする。** 起動の時点で、解決された起動パス、そのモード、その入力の同一性を記録します -- [プロセス起動の入力ルール](../test-integrity/deflaking-recipe.mdx#3つのルール-ルール1-—-「flaky」は診断ではない。まだ診断できていないことの告白である。-プロセスを起動するテストにおける「入力」とは何か)が求めるのと同じ一覧です。コマンドが元のパスを指したままなら、ステージ済みコピーへの修復は何の意味も持ちません。
+- **コンシューマーパッケージのアサーションは分けておく。** インストールされたパッケージは、インストールされたままの状態でアサートします。その受け入れテストの中で`chmod`してはいけません -- それはテストが捕まえるために存在するパッケージング欠陥そのものを覆い隠します。パリティチェックを通ったステージ済みリファレンスCLIは、インストールされたパッケージの実行ファイルが健全である証拠にはなりません。
+
+安価なネガティブフィクスチャは、ヘルパーの本物のエントリーポイントで走らせます：入ってくるリファレンスCLIはバイト単位で同一だが`0644`、ステージ済みコピーは実行可能になり、ヘルパーは実際にそのステージ済みコピーを起動しなければなりません。フィクスチャのCLIは自分の起動パスを出力するので、「コピーAをchmodして、元のBを起動する」は起動そのものの段階で失敗します -- そして、ダウンロードの方をchmodして「直す」ヘルパーも失敗します。意図的に壊したインストール済みバイナリは、依然として拒否されなければなりません：
+
+```bash
+#!/usr/bin/env bash
+# Negative fixture for a staging helper, plus a separate consumer-contract check.
+# Unix runners only: on Windows, mode bits do not mean the same thing.
+set -euo pipefail
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "skip: Unix-mode check"; exit 0 ;; esac
+
+fail() { echo "::error::$*" >&2; exit 1; }
+file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; } # GNU || BSD/macOS
+sha256_of() {
+  if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
+
+# --- helper under test (normally sourced from scripts/) ----------------------
+stage_reference_cli() { # <downloaded-input> <staging-dir> <expected-sha256>
+  local incoming=$1 stage=$2 expected=$3
+  [[ "$(sha256_of "$incoming")" == "$expected" ]] || fail "unexpected input: $incoming"
+  mkdir -p "$stage"
+  cp "$incoming" "$stage/cli"
+  chmod 0755 "$stage/cli" # trusted boundary: validated bytes, our own copy
+  REF_CLI="$stage/cli"    # the defect: leaving this pointed at "$incoming"
+  echo "ref-cli path=$REF_CLI mode=$(file_mode "$REF_CLI") sha256=$expected" >&2
+}
+run_reference_cli() { "$REF_CLI" "$@"; }
+
+# --- consumer contract: asserts the installed file as installed, never chmods --
+assert_installed_executable() { # <installed-binary>
+  [[ -x "$1" ]] || { echo "not executable: $1 (mode $(file_mode "$1"))" >&2; return 1; }
+}
+
+# --- fixture ---------------------------------------------------------------
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+printf '#!/bin/sh\necho "$0"\n' >"$work/incoming-cli" # reports its launch path
+chmod 0644 "$work/incoming-cli"                       # as the download hands it over
+expected=$(sha256_of "$work/incoming-cli")            # mode is not part of the bytes
+
+stage_reference_cli "$work/incoming-cli" "$work/stage" "$expected"
+[[ "$(file_mode "$work/incoming-cli")" == 644 ]] || fail "helper chmodded the download"
+launched=$(run_reference_cli) || fail "spawn failed: $REF_CLI"
+[[ "$launched" == "$work/stage/cli" ]] || fail "launched $launched, not the staged copy"
+
+pkg_bin="$work/node_modules/my-cli-linux-x64-gnu/bin/my-cli"
+mkdir -p "$(dirname "$pkg_bin")"
+cp "$work/incoming-cli" "$pkg_bin" && chmod 0644 "$pkg_bin" # a mis-packed binary
+if assert_installed_executable "$pkg_bin"; then
+  fail "a 0644 installed binary passed the consumer contract"
+fi
+echo "ok: staged target launched; broken installed binary still rejected"
+```
+
+`stat`はプラットフォームによって異なります -- GNUは`-c %a`、BSD/macOSは`-f %Lp`を取ります -- そのためのフォールバックです。tarballゲートと同じく、Windowsではこれらのunixモードのアサーションをスキップしてください。モードがそこでは持たない意味をアサートすべきではありません。
+
+このフィクスチャは安価な部分であって、エンドツーエンドのカバレッジを置き換えるものでも、新しいリリースゲートを正当化するものでもありません。エンドツーエンドのカバレッジは既存のホステッドなアーティファクト受け渡し／パック済みコンシューマーのレーンに任せ、ネイティブのマトリクスは関連するネイティブ入力が変わったときにだけ再ビルドします -- [変更スコープの検証](./change-scoped-verification.mdx#実際の入力を特定する)に従ってください。#4204のような検証側だけの修復は、そうした変更には当たりません。
+
 ## 失敗モード3：ダブルPUTのACKロストレース
 
 npmのpublishはHTTP PUTであり、ネットワークの瞬断は、レジストリがすでにバージョンを保存した後に成功**ACK**を失わせることがあります。クライアントは、確認応答が得られないのを見てPUTをリトライします -- そしてそのリトライは`403 ... cannot publish over the previously published versions`（`EPUBLISHCONFLICT`）を受け取ります。publishは*成功していた*のに、*失敗したように見える*だけなのです。`set -e`の下では、複数パッケージのリリースはリスト途中で死にます -- 9個中7個のパッケージを公開し、8個目でこの幻のコンフリクトに当たり、ジョブが中断します。さらに悪いことに、それは単純に再実行できません：すでに公開済みのパッケージは2回目の試行でどれも403を返すため、リスト全体を素朴にリトライすると即座に失敗します。

@@ -235,6 +235,81 @@ The value of the pre-publish assertion is that it fails *loudly on a future regr
 
 </Tip>
 
+### Artifact transport: test the executable that actually launches
+
+The tarball gate covers one boundary. A cross-job pipeline crosses several more, and each one can change a different property of the same binary:
+
+`built output -> uploaded artifact -> downloaded input -> staged package -> installed package -> actual spawn target`
+
+Keep four things apart along that chain. **Bytes** are what a digest proves, and a digest says nothing about mode. **Filesystem metadata** -- the mode -- is what transport can change without touching a byte. A **staged reference executable** is a copy the verifier prepares for itself, for example to compare outputs. The **installed consumer executable** is what the package manager put on disk for the user. A matching digest, an install that exits `0`, and a successful `chmod` on *some* copy establish nothing about the last two.
+
+Transport is where the mode goes missing. GitHub's `upload-artifact` documents [permission loss](https://github.com/actions/upload-artifact#permission-loss) for the normal archived-artifact path: files come back without their execute bit (as `0644`). Re-check that against the action version and archive settings you actually use; it is an observation about that path, not a property of every transport.
+
+**Source incident: [zudo-front-builder PR #4204](https://github.com/Takazudo/zudo-front-builder/pull/4204), 2026-10-13.** The packed CSS API smoke helper ([before](https://github.com/Takazudo/zudo-front-builder/blob/7112d0e3d6fed2d885ae006d4671070be2def519/scripts/smoke-css-api-packed.sh), [after](https://github.com/Takazudo/zudo-front-builder/blob/cb95ad41a8e995a4e136dc198040965bc1a21df0/scripts/smoke-css-api-packed.sh)) copied the downloaded CLI to the platform-package staging path and chmodded that copy to `0755` -- but `ZFB_CSS_API_CLI` still pointed at the original downloaded input. The PR's incident ledger records `EACCES` on that mode-`0644` path, and the before/after source independently confirms the mismatch. The fix makes the helper invoke the staged CLI; no native compiler inputs changed. Evidence limits: this is drawn from the source and the hosted run outcomes ([earlier scaffold run](https://github.com/Takazudo/zudo-front-builder/actions/runs/38409697155/job/115344426604), [corrected workflow](https://github.com/Takazudo/zudo-front-builder/actions/runs/38413305311), which completed successfully when checked on 2026-10-13). The clean-room suite was not executed locally and the retained platform artifacts were not replayed. The green scaffold workflow is not a claim that all of PR #4204 is green -- its separate health workflow still rejects Cargo.lock provenance.
+
+Three rules follow:
+
+- **Preserve the mode, or restore it deliberately.** Either use a transport that keeps modes (tar before upload, extract after download), or restore the required mode at a trusted staging boundary *after* validating that the input is the one you expected -- a digest check, for example. Never blanket-`chmod` whatever a download handed you.
+- **Assert the spawn target, not the repair.** Record the resolved spawn path, its mode, and its input identity at the point of the spawn -- the same list the [process-spawn input rule](../test-integrity/deflaking-recipe.mdx#the-three-rules-rule-1-—-flaky-is-not-a-diagnosis-it-is-an-admission-you-have-not-diagnosed-it-yet-what-counts-as-input-for-a-process-spawning-test) asks for. A repair to the staged copy does nothing when the command still points at the original.
+- **Keep consumer-package assertions separate.** Assert the installed package as installed. Never `chmod` it inside its own acceptance test -- that conceals exactly the packaging defect the test exists to catch. A staged reference CLI that passes a parity check is not evidence that the installed package's executable is healthy.
+
+The cheap negative fixture runs at the helper's real entry point: the incoming reference CLI is byte-identical but `0644`, the staged copy becomes executable, and the helper must actually launch that staged copy. The fixture CLI prints its own launch path, so "chmod copy A, spawn original B" fails on the spawn itself -- and a helper that "fixes" it by chmodding the download fails too. A deliberately broken installed binary must still be rejected:
+
+```bash
+#!/usr/bin/env bash
+# Negative fixture for a staging helper, plus a separate consumer-contract check.
+# Unix runners only: on Windows, mode bits do not mean the same thing.
+set -euo pipefail
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "skip: Unix-mode check"; exit 0 ;; esac
+
+fail() { echo "::error::$*" >&2; exit 1; }
+file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; } # GNU || BSD/macOS
+sha256_of() {
+  if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
+
+# --- helper under test (normally sourced from scripts/) ----------------------
+stage_reference_cli() { # <downloaded-input> <staging-dir> <expected-sha256>
+  local incoming=$1 stage=$2 expected=$3
+  [[ "$(sha256_of "$incoming")" == "$expected" ]] || fail "unexpected input: $incoming"
+  mkdir -p "$stage"
+  cp "$incoming" "$stage/cli"
+  chmod 0755 "$stage/cli" # trusted boundary: validated bytes, our own copy
+  REF_CLI="$stage/cli"    # the defect: leaving this pointed at "$incoming"
+  echo "ref-cli path=$REF_CLI mode=$(file_mode "$REF_CLI") sha256=$expected" >&2
+}
+run_reference_cli() { "$REF_CLI" "$@"; }
+
+# --- consumer contract: asserts the installed file as installed, never chmods --
+assert_installed_executable() { # <installed-binary>
+  [[ -x "$1" ]] || { echo "not executable: $1 (mode $(file_mode "$1"))" >&2; return 1; }
+}
+
+# --- fixture ---------------------------------------------------------------
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+printf '#!/bin/sh\necho "$0"\n' >"$work/incoming-cli" # reports its launch path
+chmod 0644 "$work/incoming-cli"                       # as the download hands it over
+expected=$(sha256_of "$work/incoming-cli")            # mode is not part of the bytes
+
+stage_reference_cli "$work/incoming-cli" "$work/stage" "$expected"
+[[ "$(file_mode "$work/incoming-cli")" == 644 ]] || fail "helper chmodded the download"
+launched=$(run_reference_cli) || fail "spawn failed: $REF_CLI"
+[[ "$launched" == "$work/stage/cli" ]] || fail "launched $launched, not the staged copy"
+
+pkg_bin="$work/node_modules/my-cli-linux-x64-gnu/bin/my-cli"
+mkdir -p "$(dirname "$pkg_bin")"
+cp "$work/incoming-cli" "$pkg_bin" && chmod 0644 "$pkg_bin" # a mis-packed binary
+if assert_installed_executable "$pkg_bin"; then
+  fail "a 0644 installed binary passed the consumer contract"
+fi
+echo "ok: staged target launched; broken installed binary still rejected"
+```
+
+`stat` differs by platform -- GNU takes `-c %a`, BSD/macOS takes `-f %Lp` -- hence the fallback. As with the tarball gate, skip these Unix-mode assertions on Windows rather than assert a meaning the mode does not carry there.
+
+This fixture is the cheap part; it does not replace end-to-end coverage, and it does not justify a new release gate. Keep end-to-end coverage on the existing hosted artifact-handoff / packed-consumer lane, and rebuild native matrices only when the relevant native inputs changed, following [change-scoped verification](./change-scoped-verification.mdx#identify-the-real-inputs). A verifier-only repair like #4204's is not such a change.
+
 ## Failure Mode 3: The Double-PUT Lost-ACK Race
 
 npm's publish is an HTTP PUT, and a network blip can lose the success **ACK** after the registry has already stored the version. The client, seeing no acknowledgement, retries the PUT -- and the retry gets `403 ... cannot publish over the previously published versions` (`EPUBLISHCONFLICT`). The publish *succeeded*; it only *looks* failed. Under `set -e`, a multi-package release then dies mid-list -- publish 7 of 9 packages, hit the phantom conflict on the 8th, and the job aborts. Worse, it cannot simply be re-run: every already-published package now 403s on the second attempt, so a naive retry of the whole list fails immediately.
