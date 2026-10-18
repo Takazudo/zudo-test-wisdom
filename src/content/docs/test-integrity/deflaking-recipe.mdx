@@ -118,7 +118,7 @@ Every E2E flake has a cause. The seven below cover the overwhelming majority of 
 
 - **Non-deterministic scheduling** — tests that depend on thread/task interleaving (the native analogue of a hydration race).
 - **Fixed `sleep` as the wait itself** — a hard-coded `sleep(N)` standing in for the wait is the same guess as a bare `waitForTimeout(N)`; poll the real condition or await the completion signal instead. Follow that prescription and the flake is gone.
-- **A fixed deadline as a failure guardrail on an already event-keyed wait** — the same clock, a different animal. The test waits on a real event and resolves the instant it arrives; the timer exists only to turn a hang into a diagnosable failure instead of a stuck job. The prescription above is a **no-op** here — the wait already polls the real condition — so the open question is not the mechanism but whether the guardrail's _value_ is evidence-based. When deriving the value from latency, measure the awaited phase's distribution, baseline versus under load:
+- **A fixed deadline as a failure guardrail on an already event-keyed wait** — the same clock, a different animal. The test waits on a real event and resolves the instant it arrives; the timer exists only to turn a hang into a diagnosable failure instead of a stuck job. The prescription above is a **no-op** here — the wait already polls the real condition — so the open question is not the mechanism but whether the guardrail's _value_ is evidence-based. That question presumes the bound is enforced at all, and event-keying does not prove it: a late-accepted predicate, a resettable quiet window, an unbounded inner await, or a forced teardown can each escape the advertised deadline, and the audit for those comes first — see [Bounded Native Waits](#bounded-native-waits-prove-the-deadline-holds-before-sizing-it). When deriving the value from latency, measure the awaited phase's distribution, baseline versus under load:
   - A **continuous long tail** with identical inputs → contention. Legitimate fixes: reduce lane concurrency, isolate the subprocess-heavy file, remove avoidable process-startup overhead, **or correct the guardrail to a measured value**.
   - A **stall the timeline can attribute causally** → suspect the product, per [the impostor](#part-1-—-root-cause-catalog-the-impostor-when-the-flake-is-a-real-product-bug).
 
@@ -625,6 +625,254 @@ test("navigates to dashboard", async ({ page }) => {
   await expect(page.locator("h1")).toHaveText("Dashboard");
 });
 ```
+
+## Bounded Native Waits: Prove the Deadline Holds Before Sizing It
+
+The catalog's [guardrail bullet](#part-1-—-root-cause-catalog) says that once a native wait is event-keyed, the open question is the guardrail's _value_. That holds only after a prior question is settled: **is the advertised bound actually enforced?** Event-keying fixes _what_ the wait waits for. It does not prove the wait cannot outlive its deadline — a predicate that runs past expiry, a quiet window that restarts on every event, an inner await the outer check never sees, and a teardown that ends by force all escape the number on the constant. Resizing an unenforced guardrail is sizing a number the wait does not obey, and no latency measurement can derive a value for it.
+
+Worked case: a native macOS run of a Rust watcher/dev-server suite reported nine runner timeouts at 300 s, plus watcher-liveness and dev-server failures. Reading the test helpers at the tested revision found four distinct ways the advertised bound could be escaped — the four shapes below. Those hazards are demonstrated at the source level. They do **not** explain why those nine tests reached 300 s: no native reproduction attributed the timeouts to the file-event backend, background load, hardware, or a product defect, and this page does not either. The value of the audit is that it either clears the helpers as a suspect or convicts them before anyone touches a timeout value.
+
+### Four ways an event-keyed wait escapes its bound
+
+1. **Late success.** The helper calls its predicate first and checks expiry afterwards — including on a fast path. A predicate that returns `true` after the budget is gone produces `live: true`, contradicting a result type documented as "observed before the deadline". Check expiry before the work **and again before accepting success**, and decide what the contract means: _observation time_ (when the test saw it) or a trustworthy _event timestamp_ (when the product says it happened). Without that decision, "before the deadline" has no referent.
+2. **A resettable quiet window is not a total bound.** A drain that starts a fresh 200 ms receive timeout after every event never reaches quiet under continuous traffic. The same helper drained `try_recv` in an unbounded synchronous loop, so sustained unrelated traffic could also postpone the return to the owner's deadline check. Keep both a consecutive-quiet window **and** an absolute drain cap; bound the work per synchronous scan and check the deadline between batches. Traffic that runs into the cap is a **named failure** with bounded diagnostics (a count, the first few event kinds), never a successful absence proof.
+3. **An outer polling condition does not bound inner I/O.** A fresh-HTML poll checked its 30 s budget at loop entry, then awaited the response headers and the body without racing either against the remaining budget — and accepted a completion that arrived late. Bound the **whole** HTTP operation, body consumption included, with the same phase deadline. A timeout around `send()` alone stops at the headers.
+4. **Graceful exit and forced cleanup are different outcomes.** A shutdown test separated a 12 s graceful-exit assertion from a 20 s `SIGKILL` fallback, then told them apart by elapsed time and discarded the exit status. A reported 20,049 ms is consistent with the fallback having fired; it is not, by itself, proof of which path ran. Raising the acceptance value past the fallback would let a forced kill masquerade as a graceful shutdown.
+
+The fourth shape marks a boundary [Rule 8](../decision-guide/required-behavior.mdx#the-four-execution-rules-rule-8-—-never-game-the-gate) depends on. A **hang guardrail** asserts nothing about the product, so an evidence-derived increase is legitimate. A **graceful-shutdown deadline** is a product acceptance assertion — "the server exits cleanly within 12 s" — and raising it is a loosened assertion, not a resized guardrail. The kill fallback behind it is cleanup machinery, and neither number may stand in for the other.
+
+### The cancellation boundary: what an in-process timer cannot do
+
+State the bound honestly. Tokio's [`timeout`](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html) can only take effect when the wrapped future yields: a future that runs synchronous work without reaching an `.await` is not interrupted, and the timer cannot even fire until it returns. A [`spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) task cannot be aborted once it has started — the timeout returns, and the thread keeps running. So wrapping a synchronous native registration or destruction call (a file-watcher stream, a platform handle) in an async timeout does **not** create preemption, and an abort request is not proof that a task or a resource has stopped.
+
+If the test needs a hard wall-clock bound around such a call, put it behind an **independently supervised process boundary**: run the phase in a child process, let a supervisor kill it at the deadline, and have the child report phase markers as it goes so the supervisor preserves the last phase _entered_ and the last phase _completed_. That is the same trusted-supervisor shape [Live-Proof Evidence Contracts](./live-proof-evidence-contracts.mdx#timing-samples-are-not-tail-proof-what-replaces-the-sample) uses for a product's charged wall time.
+
+### Worked example: one phase deadline, threaded through every wait
+
+```rust
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+
+#[derive(Debug)]
+enum WaitError {
+    Expired { phase: &'static str },
+    DrainCapExceeded { phase: &'static str, events_seen: usize },
+    SourceClosed { phase: &'static str },
+    Http { phase: &'static str, detail: String },
+}
+
+/// One monotonic absolute deadline per phase.
+#[derive(Clone, Copy)]
+struct Phase {
+    name: &'static str,
+    deadline: Instant,
+}
+
+impl Phase {
+    fn start(name: &'static str, budget: Duration) -> Self {
+        Phase { name, deadline: Instant::now() + budget }
+    }
+
+    /// A nested operation gets the smaller of its own cap and what is left.
+    fn child(&self, name: &'static str, cap: Duration) -> Self {
+        Phase { name, deadline: self.deadline.min(Instant::now() + cap) }
+    }
+
+    fn remaining(&self) -> Result<Duration, WaitError> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(WaitError::Expired { phase: self.name })
+    }
+}
+
+/// Ok means the predicate was observed true *before* the deadline.
+fn wait_for(phase: Phase, mut observed: impl FnMut() -> bool) -> Result<(), WaitError> {
+    loop {
+        phase.remaining()?; // before the work, fast path included
+        if observed() {
+            phase.remaining()?; // and again before accepting success
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10).min(phase.remaining()?));
+    }
+}
+
+const QUIET: Duration = Duration::from_millis(200);
+const SCAN_BATCH: usize = 256;
+
+/// Absence proof: one full QUIET window with no event, inside the phase.
+async fn drain_until_quiet<T>(
+    phase: Phase,
+    rx: &mut UnboundedReceiver<T>,
+) -> Result<usize, WaitError> {
+    let mut seen = 0;
+    loop {
+        // Bounded synchronous scan, then back to the deadline check.
+        for _ in 0..SCAN_BATCH {
+            match rx.try_recv() {
+                Ok(_) => seen += 1,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    return Err(WaitError::SourceClosed { phase: phase.name })
+                }
+            }
+        }
+        let cap_hit = WaitError::DrainCapExceeded { phase: phase.name, events_seen: seen };
+        let Ok(left) = phase.remaining() else { return Err(cap_hit) };
+        match tokio::time::timeout(QUIET.min(left), rx.recv()).await {
+            Ok(Some(_)) => seen += 1, // traffic: the quiet window restarts, the cap does not
+            Ok(None) => return Err(WaitError::SourceClosed { phase: phase.name }),
+            Err(_) if left >= QUIET => return Ok(seen),
+            Err(_) => return Err(cap_hit), // the window was cut short by the cap
+        }
+    }
+}
+
+/// Headers *and* body race one remaining budget.
+async fn fetch_body(phase: Phase, client: &reqwest::Client, url: &str) -> Result<String, WaitError> {
+    let op = async {
+        let resp = client.get(url).send().await?; // headers
+        Ok::<_, reqwest::Error>(resp.text().await?) // body, still inside the budget
+    };
+    let body = tokio::time::timeout(phase.remaining()?, op)
+        .await
+        .map_err(|_| WaitError::Expired { phase: phase.name })?
+        .map_err(|e| WaitError::Http { phase: phase.name, detail: e.to_string() })?;
+    phase.remaining()?; // a completion after the deadline is not success
+    Ok(body)
+}
+
+/// Graceful exit and kill fallback are separate outcomes, never inferred from elapsed time.
+#[derive(Debug)]
+struct ShutdownOutcome {
+    status: Option<std::process::ExitStatus>, // None: never reaped
+    forced_kill: bool,
+    elapsed: Duration,
+}
+
+async fn stop_child(
+    child: &mut tokio::process::Child,
+    graceful: Duration,
+    reap: Duration,
+) -> ShutdownOutcome {
+    let started = Instant::now();
+    if let Some(pid) = child.id() {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    if let Ok(Ok(status)) = tokio::time::timeout(graceful, child.wait()).await {
+        return ShutdownOutcome { status: Some(status), forced_kill: false, elapsed: started.elapsed() };
+    }
+    let _ = child.start_kill(); // a request, not proof
+    let status = tokio::time::timeout(reap, child.wait()).await.ok().and_then(Result::ok);
+    ShutdownOutcome { status, forced_kill: true, elapsed: started.elapsed() }
+}
+```
+
+The test that uses them keeps the assertion outcome and the cleanup outcome apart. The scenario returns a `Result` instead of panicking, so cleanup is always attempted, its outcome is printed either way, and the original failure is reported first rather than erased by a cleanup complaint:
+
+```rust
+#[tokio::test]
+async fn dev_server_shuts_down_gracefully() {
+    let test = Phase::start("test", Duration::from_secs(90));
+    let mut child = spawn_dev_server();
+    let scenario = run_scenario(test, &mut child).await; // assertion outcome
+    let cleanup = stop_child(&mut child, GRACEFUL, REAP).await; // always attempted
+    eprintln!("cleanup: {cleanup:?}"); // retained on every outcome
+    scenario.expect("scenario"); // the original failure wins
+    assert!(!cleanup.forced_kill, "forced kill is not a graceful shutdown: {cleanup:?}");
+    assert!(cleanup.status.is_some_and(|s| s.success()), "exit status: {cleanup:?}");
+}
+```
+
+Size the sequence with the same arithmetic as the [sequential-stage budgets bullet](#part-1-—-root-cause-catalog): `test` is one deadline, every nested wait receives `test.child(...)`, and the worst case — `GRACEFUL + REAP` included — stays under the runner's kill deadline, so the test's own diagnostic failure fires first. Cleanup that reports its own verdict is the in-test shape of [Cleanup Is Its Own Gate](./live-proof-evidence-contracts.mdx#cleanup-is-its-own-gate).
+
+### Falsification controls
+
+Each helper earns trust only by failing when its contract is broken. These four controls are cheap — no product, no network beyond loopback — and each must fail its intended contract with the phase named:
+
+```rust
+#[test]
+fn control_late_signal_is_not_success() {
+    let phase = Phase::start("handshake", Duration::from_millis(50));
+    let late = || {
+        std::thread::sleep(Duration::from_millis(80));
+        true
+    };
+    assert!(matches!(wait_for(phase, late), Err(WaitError::Expired { phase: "handshake" })));
+}
+
+#[tokio::test]
+async fn control_continuous_traffic_is_not_quiet() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while tx.send(()).is_ok() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    let phase = Phase::start("drain", Duration::from_secs(1));
+    let err = drain_until_quiet(phase, &mut rx).await.unwrap_err();
+    assert!(matches!(err, WaitError::DrainCapExceeded { events_seen, .. } if events_seen > 0));
+}
+
+#[tokio::test]
+async fn control_withheld_body_hits_the_phase_deadline() {
+    let url = serve_headers_then_stall().await; // sends headers + Content-Length, never the body
+    let phase = Phase::start("fresh-html", Duration::from_millis(500));
+    let err = fetch_body(phase, &reqwest::Client::new(), &url).await.unwrap_err();
+    assert!(matches!(err, WaitError::Expired { phase: "fresh-html" }));
+}
+
+#[tokio::test]
+async fn control_term_ignoring_child_is_reported_as_forced() {
+    use tokio::io::AsyncBufReadExt;
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", "trap '' TERM; echo ready; exec sleep 60"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Wait until the trap is installed; an early SIGTERM would end sh gracefully.
+    let mut ready = String::new();
+    let stdout = child.stdout.take().unwrap();
+    tokio::io::BufReader::new(stdout).read_line(&mut ready).await.unwrap();
+    let out = stop_child(&mut child, Duration::from_millis(300), Duration::from_secs(5)).await;
+    assert!(out.forced_kill, "{out:?}");
+    assert!(out.status.is_some_and(|s| !s.success()), "{out:?}");
+}
+```
+
+A fifth control documents the limit rather than a helper, and it asserts the opposite of what an in-process timer is often assumed to do:
+
+```rust
+#[tokio::test]
+async fn control_in_process_timer_cannot_preempt_a_blocking_call() {
+    let started = Instant::now();
+    let result = tokio::time::timeout(Duration::from_millis(50), async {
+        std::thread::sleep(Duration::from_millis(300)); // stands in for a synchronous native call
+    })
+    .await;
+    // The timer could not fire until the call returned: the "50 ms bound" was not a bound.
+    assert!(result.is_ok());
+    assert!(started.elapsed() >= Duration::from_millis(300));
+}
+```
+
+This control passing is the point: a wait that wraps a synchronous native call is bounded by the process boundary described above, or by nothing — never by its constant.
+
+### Audit checklist
+
+Run this before proposing any change to a native wait's timeout value:
+
+- [ ] **Every operation, setup through teardown,** belongs to a phase with one monotonic absolute deadline; nested waits receive only the remaining budget, never a fresh constant; cleanup grace (`GRACEFUL + REAP`) is the one fixed budget, and it is counted in the sequential worst case.
+- [ ] **Expiry is checked before work and again before accepting success**, fast paths included, and the contract names whether "before the deadline" means observation time or a trustworthy event timestamp.
+- [ ] **Quiet windows have an absolute cap**; hitting it is a named failure with bounded diagnostics; synchronous receive scans are bounded per batch with a deadline check between batches.
+- [ ] **HTTP and other I/O are bounded end to end**, body consumption included, by the phase deadline — not by a timeout on `send()` alone.
+- [ ] **No in-process timer is credited with preempting synchronous or `spawn_blocking` work**; where a hard bound is needed, a supervised process boundary preserves the last entered and completed phase.
+- [ ] **Assertion outcome and cleanup outcome are recorded separately**: a graceful-shutdown test asserts the expected exit status and `forced_kill = false`; cleanup is attempted after success and after assertion failure alike, and never erases the original failure.
+- [ ] **The guardrail/assertion line is drawn**: hang guardrails may grow from evidence; a product shutdown deadline is an assertion and does not.
+- [ ] **The sequential worst case** — waits plus cleanup grace — fits the runner's kill deadline with headroom.
+
+Only once every box is checked does the catalog's evidence-based sizing question apply. A legitimate, evidence-derived guardrail increase stays legitimate after this audit; what the audit removes is the possibility of measuring a wait that was never bounded.
 
 ## See Also
 
